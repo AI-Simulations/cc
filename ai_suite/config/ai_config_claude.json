@@ -1,0 +1,41 @@
+{
+  "provider": "claude",
+  "writing_model": "claude-opus-5-5",
+  "review_model": "sonnet",
+  "timeout": 1800,
+  "min_book_pages": 250,
+  "min_chapter_words": 1200,
+  "humanize_rounds": 2,
+  "humanize_threshold": 15.0,
+  "judge_models": [],
+  "models": {
+    "claude-opus-5-5": {
+      "name": "Claude Opus 5.5 (CLI)",
+      "max_output": 0
+    },
+    "claude-fable-5-1": {
+      "name": "Claude Fable 5.1 (CLI)",
+      "max_output": 0
+    },
+    "claude-sonnet-5": {
+      "name": "Claude Sonnet 5 (CLI)",
+      "max_output": 0
+    },
+    "claude-haiku-4-5-20251001": {
+      "name": "Claude Haiku 4.5 (CLI)",
+      "max_output": 0
+    },
+    "opus": {
+      "name": "Claude Opus, latest (CLI alias)",
+      "max_output": 0
+    },
+    "sonnet": {
+      "name": "Claude Sonnet, latest (CLI alias)",
+      "max_output": 0
+    },
+    "haiku": {
+      "name": "Claude Haiku, latest (CLI alias)",
+      "max_output": 0
+    }
+  }
+}
