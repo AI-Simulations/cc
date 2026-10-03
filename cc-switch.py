@@ -8,8 +8,12 @@
 # Only affects the current PowerShell session: env vars are applied by the
 # 'cc' PS function dot-sourcing apply.ps1 (a child process cannot set them).
 
-import ctypes, json, os, re, socket, subprocess, sys, time, urllib.request, winreg
-import msvcrt
+import json, os, re, subprocess, sys, time, urllib.request, winreg
+from pathlib import Path
+
+sys.path.insert(0, os.environ.get("AI_SUITE_DIR") or str(Path(__file__).resolve().parents[1] / "ai-suite"))
+from ai_suite.service import background_process_options, ensure_openai_oauth_proxy
+from ai_suite import providers as catalog  # book writer's menus, model facts and colors
 
 CFG_DIR = os.path.expanduser(r"~\.config\cc")
 APPLY_FILE = os.path.join(CFG_DIR, "apply.ps1")
@@ -18,33 +22,49 @@ OPENCODE_AUTH = os.path.expanduser(r"~\.local\share\opencode\auth.json")
 OPENCODE_CONFIG = os.path.expanduser(r"~\.config\opencode\opencode.jsonc")
 OAUTH_PORT = 10531
 ADAPTER_PORT = 10532
+G4F_PORT = 1337
 
 CC_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
            "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-           "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_MODE_SERVER"]
+           "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_MODE_SERVER", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
+           "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+           "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ENABLE_CLAUDEAI_MCP_SERVERS", "API_TIMEOUT_MS"]
+# /model picker entries beyond the chosen model (which also takes Opus and Haiku, so
+# background work stays on it), filled with this provider's other models.
+PICKER_SLOTS = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION"]
+# Claude Code's own /effort levels (claude --help).
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 OAI_VARS = ["OPENAI_BASE_URL", "OPENAI_API_KEY"]
 
 PROVIDERS = {
-    "commandcode": {"label": "Claude Code via Command Code", "format": "anthropic", "base": "https://api.commandcode.ai/provider", "key": "commandcode"},
+    "commandcode": {"label": "Command Code API (needs Provider plan; Go plan is CLI-only)", "format": "anthropic", "base": "https://api.commandcode.ai/provider", "key": "commandcode"},
+    "commandcode-cli": {"label": "Command Code subscription via cmdc CLI (Go plan; text tool protocol)", "format": "openai", "key": "cli"},
     "official":     {"label": "Claude official (claude.ai login)", "format": "anthropic", "base": ""},
     "minimax":      {"label": "MiniMax (Anthropic API)", "format": "anthropic", "base": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY"},
     "opencode-go":  {"label": "OpenCode Go subscription (x-api-key, live key)", "format": "anthropic", "base": "https://opencode.ai/zen/go", "key": "opencode-go", "header": "x-api-key"},
-    "opencode-zen": {"label": "OpenCode Zen PAYG (needs a zen key; unverified)", "format": "anthropic", "base": "https://opencode.ai/zen", "key": "opencode", "header": "x-api-key"},
+    "opencode-zen": {"label": "OpenCode Zen PAYG (needs account funds; free models are OpenCode-only)", "format": "anthropic", "base": "https://opencode.ai/zen", "key": "opencode", "header": "x-api-key"},
     "openai-oauth": {"label": "OpenAI OAuth proxy - ChatGPT account (OpenAI-format)", "format": "openai", "base": f"http://127.0.0.1:{OAUTH_PORT}/v1", "key": "oauth"},
     "openrouter":   {"label": "Claude Code via OpenRouter (API credits)", "format": "anthropic", "base": "https://openrouter.ai/api", "key": "openrouter", "auth": "bearer"},
     "nvidia":       {"label": "Claude Code via NVIDIA NIM", "format": "openai", "base": "https://integrate.api.nvidia.com/v1", "key": "nvidia"},
+    "gpt4free":     {"label": "gpt4free local API (free, best-effort; starts g4f on :1337)", "format": "openai", "base": f"http://127.0.0.1:{G4F_PORT}/v1", "key": "gpt4free"},
 }
 
 # go and zen are DIFFERENT gateways with different model catalogs
 FALLBACK_MODELS = {
-    "commandcode": [("claude-sonnet-4-6", "")],
-    "opencode-go":  [("deepseek-v4-flash", "DeepSeek V4 Flash"), ("deepseek-v4-pro", "DeepSeek V4 Pro"),
-                     ("glm-5.2", "GLM-5.2"), ("kimi-k2.7-code", "Kimi K2.7 Code"),
-                     ("qwen3.7-max", "Qwen3.7 Max"), ("minimax-m3", "MiniMax M3")],
-    "opencode-zen": [("claude-opus-5", ""), ("claude-sonnet-5", ""), ("claude-fable-5", "")],
-    "openrouter":   [("openai/gpt-5.3-codex", ""), ("anthropic/claude-sonnet-4.6", "")],
-    "nvidia":       [("nvidia/llama-3.3-nemotron-super-49b-v1", "")],
-    "openai-oauth": [("gpt-5.4-mini", "")],
+    "commandcode": [("claude-opus-5-5", ""), ("claude-fable-5-1", ""), ("claude-sonnet-5", ""),
+                    ("gpt-6-sol", ""), ("deepseek/deepseek-v4.1-flash", "")],
+    "opencode-go":  [("glm-5.3", "GLM-5.3"), ("kimi-k3", "Kimi K3"), ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+                     ("deepseek-v4-pro", "DeepSeek V4 Pro"), ("qwen3.8-max", "Qwen3.8 Max"),
+                     ("minimax-m3", "MiniMax M3"), ("gpt-6-luna", "GPT-6 Luna")],
+    "opencode-zen": [("claude-opus-5-5", ""), ("claude-fable-5-1", ""), ("claude-sonnet-5", ""),
+                     ("gpt-6-sol", ""), ("deepseek-v4.1-flash", "")],
+    "openrouter":   [("anthropic/claude-opus-5.5", ""), ("anthropic/claude-fable-5.1", ""),
+                     ("openai/gpt-6-sol", ""), ("deepseek/deepseek-v4.1-flash", "")],
+    "commandcode-cli": [("deepseek/deepseek-v4.1-flash", ""), ("moonshotai/kimi-k3", ""), ("zai-org/glm-5.3", "")],
+    "nvidia":       [("deepseek-ai/deepseek-v4-pro", "")],
+    "openai-oauth": [("gpt-6-sol", ""), ("gpt-6-luna", "")],
+    "minimax":      [("MiniMax-M3", ""), ("MiniMax-M2.7", "")],
+    "gpt4free":     [("deepseek-v4-pro", ""), ("deepseek-v4.1-flash", ""), ("glm-5.3", ""), ("kimi-k3", "")],
 }
 
 
@@ -68,7 +88,7 @@ def user_env(name):
 
 def auth_key(name):
     # Only read this provider's credentials; never send another provider's key.
-    env_name = "CMD_API_KEY" if name == "commandcode" else name.upper().replace("-", "_") + "_API_KEY"
+    env_name = {"commandcode": "CMD_API_KEY", "gpt4free": "G4F_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
     key = os.environ.get(env_name) or user_env(env_name)
     if key:
         return key
@@ -121,11 +141,17 @@ def go_limits():
 def get_models(name):
     models = []
     try:
-        if name == "commandcode":
+        if name == "official":
+            models = [{"id": mid, "name": "", "context": None, "output": None} for mid in catalog._provider_models("claude")]
+        elif name == "commandcode":
+            # Claude ids use /messages; the rest route through the adapter's /chat/completions.
+            # Models serving neither (e.g. /responses only) cannot work from Claude Code.
             live = fetch("https://api.commandcode.ai/provider/v1/models", {"Authorization": "Bearer " + auth_key(name)})
             for m in live["data"]:
-                if any(endpoint.endswith("/messages") for endpoint in m.get("supported_endpoints", [])):
+                if {"/messages", "/chat/completions"} & set(m.get("supported_endpoints", [])):
                     models.append({"id": m["id"], "name": m.get("name", ""), "context": m.get("context_window") or m.get("context_length"), "output": None})
+        elif name == "commandcode-cli":
+            models = [{"id": mid, "name": "", "context": None, "output": None} for mid in sorted(catalog._live_model_ids("commandcode") or ())]
         elif name == "opencode-go":
             live = fetch("https://opencode.ai/zen/go/v1/models", {"x-api-key": auth_key("opencode-go")})
             limits = go_limits()
@@ -153,6 +179,13 @@ def get_models(name):
                 if re.search(r"image|tts|embed", m["id"]):
                     continue
                 models.append({"id": m["id"], "name": "", "context": m.get("context_window") or m.get("context_length"), "output": None})
+        elif name == "gpt4free":
+            ensure_g4f()
+            live = fetch(f"http://127.0.0.1:{G4F_PORT}/v1/models", timeout=10)
+            for m in live["data"]:
+                if m.get("image") or m.get("audio") or m.get("video") or re.search(r"image|tts|embed|flux|dall-e|whisper", m["id"]):
+                    continue
+                models.append({"id": m["id"], "name": "", "context": None, "output": None})
         elif name == "openai-oauth":
             ensure_oauth_proxy()
             live = fetch(f"http://127.0.0.1:{OAUTH_PORT}/v1/models", timeout=10)
@@ -176,41 +209,69 @@ def get_models(name):
     return models
 
 
-def oauth_proxy_up():
-    try:
-        socket.create_connection(("127.0.0.1", OAUTH_PORT), timeout=0.5).close()
-        return True
-    except OSError:
-        return False
-
-
 def ensure_oauth_proxy():
-    if oauth_proxy_up():
+    try:
+        ensure_openai_oauth_proxy()
+    except RuntimeError as exc:
+        die(str(exc))
+
+
+def ensure_g4f():
+    # gpt4free's OpenAI-compatible server (pip install -U "g4f[api]"); started hidden on first use.
+    url = f"http://127.0.0.1:{G4F_PORT}/v1/models"
+    try:
+        fetch(url, timeout=2)
         return
-    if not subprocess.run("where npx >nul 2>nul", shell=True).returncode == 0:
-        die("openai-oauth needs Node.js (npx) on PATH.")
-    print("Starting openai-oauth proxy; complete browser sign-in if prompted...", file=sys.stderr)
-    subprocess.Popen("npx openai-oauth --detach", shell=True,
-                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-    for _ in range(40):
-        if oauth_proxy_up():
+    except (OSError, ValueError):
+        pass
+    try:
+        import g4f  # noqa: F401
+    except ImportError:
+        die('gpt4free is not installed: pip install -U "g4f[api]"')
+    subprocess.Popen([sys.executable, "-m", "g4f.cli", "--port", str(G4F_PORT), "--no-gui"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     **background_process_options())
+    for _ in range(120):  # g4f imports its providers on startup; allow ~30 s
+        try:
+            fetch(url, timeout=1)
             return
-        time.sleep(0.25)
-    die(f"openai-oauth proxy did not open port {OAUTH_PORT}.")
+        except (OSError, ValueError):
+            time.sleep(0.25)
+    die(f"gpt4free did not start on port {G4F_PORT}; run 'python -m g4f.cli --port {G4F_PORT}' to see why.")
+
+
+def stop_port_owner(port):
+    """Kill the process listening on 127.0.0.1:<port> and wait for the port to free."""
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True).stdout
+    for parts in map(str.split, out.splitlines()):
+        if len(parts) == 5 and parts[1] == f"127.0.0.1:{port}" and parts[3] == "LISTENING":
+            subprocess.run(["taskkill", "/F", "/PID", parts[4]], capture_output=True)
+    for _ in range(30):
+        try:
+            fetch(f"http://127.0.0.1:{port}/health", timeout=0.5)
+        except (OSError, ValueError):
+            return
+        time.sleep(0.1)
+    die(f"Could not stop the outdated adapter on port {port}; end it in Task Manager and retry.")
 
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 1}
+    expected = {"service": "cc-anthropic-proxy", "version": 9}
     try:
-        if fetch(url, timeout=1) == expected:
-            return
-        die(f"Port {ADAPTER_PORT} is occupied by another service.")
+        running = fetch(url, timeout=1)
     except (OSError, ValueError):
-        pass
+        running = None
+    if running == expected:
+        return
+    if isinstance(running, dict) and running.get("service") == expected["service"]:
+        # An older adapter from a previous install: replace it. Sessions still on it drop.
+        stop_port_owner(ADAPTER_PORT)
+    elif running is not None:
+        die(f"Port {ADAPTER_PORT} is occupied by another service; free it before retrying.")
     subprocess.Popen([sys.executable, os.path.join(CFG_DIR, "cc-anthropic-proxy.py")],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
+                     **background_process_options())
     for _ in range(40):
         try:
             if fetch(url, timeout=1) == expected:
@@ -222,188 +283,97 @@ def ensure_anthropic_proxy():
 
 
 # ---------------- menu ----------------
-
-def vt_enable():
-    for handle in (-11, -12):  # stdout, stderr
-        try:
-            h = ctypes.windll.kernel32.GetStdHandle(handle)
-            mode = ctypes.c_uint32()
-            if ctypes.windll.kernel32.GetConsoleMode(h, ctypes.byref(mode)):
-                ctypes.windll.kernel32.SetConsoleMode(h, mode.value | 0x0004)
-        except Exception:
-            pass
-
-
-def get_key():
-    c = msvcrt.getwch()
-    if c in ("\xe0", "\x00"):
-        return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(msvcrt.getwch(), "")
-    return {"w": "up", "W": "up", "s": "down", "S": "down", "\r": "enter", "\x1b": "esc"}.get(c, "")
-
-
-def window_size():
-    try:
-        class SCR(ctypes.Structure):
-            _fields_ = [("szSize", ctypes.c_short * 2), ("szCursorPosition", ctypes.c_short * 2),
-                        ("wAttributes", ctypes.c_ushort), ("srWindow", ctypes.c_short * 4),
-                        ("dwMaximumWindowSize", ctypes.c_short * 2)]
-        h = ctypes.windll.kernel32.GetStdHandle(-11)
-        buf = SCR()
-        if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(h, ctypes.byref(buf)):
-            return buf.srWindow[2] - buf.srWindow[0] + 1, buf.srWindow[3] - buf.srWindow[1] + 1
-    except Exception:
-        pass
-    try:
-        import shutil
-        return os.get_terminal_size().columns, os.get_terminal_size().lines
-    except Exception:
-        return 80, 24
-
-
-def cursor_row():
-    """Query terminal cursor row via DSR; returns None if unsupported."""
-    sys.stdout.write("\x1b[6n")
-    sys.stdout.flush()
-    buf = ""
-    end = time.time() + 0.5
-    while time.time() < end:
-        if msvcrt.kbhit():
-            c = msvcrt.getwch()
-            buf += c
-            if c == "R":
-                break
-        time.sleep(0.005)
-    m = re.match(r"\x1b\[(\d+);(\d+)R", buf)
-    return int(m.group(1)) if m else None
-
-
-def show_menu(items, default=0, title=None):
-    """Fixed list, arrows/W/S move, Enter select, Esc cancel. Selected row highlighted.
-    Renders the whole block (optional title + items) at a queried absolute row on
-    every keypress, so a mangled row can never corrupt the next frame."""
-    n = len(items)
-    if n == 0:
-        return -1
-    sel = max(0, min(default, n - 1))
-    width, height = window_size()
-    w = max(20, width - 2)
-    clip = lambda s: s if len(s) <= w else s[:w]
-    block = n + (1 if title else 0)
-
-    def line(i, cur):
-        return clip((" > " if i == cur else "   ") + items[i])
-
-    top = cursor_row()
-    overflow = anchored = False
-    if top is not None:
-        if top + block > height:
-            delta = top + block - height + 1
-            sys.stdout.write(f"\x1b[{delta}S")
-            sys.stdout.flush()
-            overflow = True
-        else:
-            anchored = True
-    if not anchored:
-        top = max(1, height - block - 1)
-        park = height - 1
-    else:
-        park = top + block
-
-    def render(cur):
-        if title:
-            sys.stdout.write(f"\x1b[{top};1H\x1b[2K{clip(title)}")
-        for i in range(n):
-            styled = f"\x1b[7m{line(i, cur)}\x1b[0m" if i == cur else line(i, cur)
-            sys.stdout.write(f"\x1b[{top + (1 if title else 0) + i};1H\x1b[2K{styled}")
-        sys.stdout.write(f"\x1b[{park};1H")
-        sys.stdout.flush()
-
-    render(sel)
-    while True:
-        k = get_key()
-        if k == "up":
-            sel = (sel - 1) % n
-            render(sel)
-        elif k == "down":
-            sel = (sel + 1) % n
-            render(sel)
-        elif k == "enter":
-            break
-        elif k == "esc":
-            sel = -1
-            break
-    sys.stdout.flush()
-    return sel
-
+# Same arrow menus, colors and model facts as book writer (ai_suite.providers).
 
 def provider_menu():
     state = load_state()
-    default = state.get("provider", "official") if state.get("provider") in PROVIDERS else "official"
-    names = sorted(PROVIDERS) + ["quit"]
-    idx = show_menu(names, names.index(default))
-    if idx < 0 or names[idx] == "quit":
-        return None
-    return names[idx]
+    default = state.get("provider") if state.get("provider") in PROVIDERS else "official"
+    names = sorted(PROVIDERS)
+    width = max(map(len, names))
+    tag = "  " + catalog._color("default", "2")
+    picked = catalog._arrow_menu("Provider", [
+        (n, f"{n:<{width}}  {PROVIDERS[n]['label']}{tag if n == default else ''}") for n in names], default)
+    if picked is None:  # not a console: type it
+        try:
+            picked = input(f"Provider ({', '.join(names)}) [default: {default}]: ").strip().lower() or default
+        except EOFError:
+            picked = default
+    return picked
 
 
 def model_menu(name):
     state = load_state()
-    default = state.get("model", "") if state.get("provider") == name else ""
-    if name == "minimax":
-        try:
-            got = input("Model [default: MiniMax-M2.7]: ")
-        except EOFError:
-            got = ""
-        return got or "MiniMax-M2.7"
-    if name == "openrouter":
-        print("Codex and free models first (any model ID can be typed):", file=sys.stderr)
-    models = get_models(name)
-    if name == "openrouter":
-        models = ([m for m in models if "codex" in m["id"]]
-                  + [m for m in models if ":free" in m["id"] and "codex" not in m["id"]]
-                  + [m for m in models if ":free" not in m["id"] and "codex" not in m["id"]][:15])
-    items = [m["id"] + (f"  ({m['context']:,} context)" if type(m.get("context")) is int and m["context"] > 0 else "") for m in models]
-    defIdx = next((i for i, m in enumerate(models) if m["id"] == default), 0)
-    idx = show_menu(items, defIdx, title=f"Available {name} models:")
-    if idx < 0:
-        try:
-            got = input(f"Type model id [default: {default or models[0]['id']}]: ")
-        except EOFError:
-            got = ""
-        return got or (default or models[0]["id"])
-    return models[idx]["id"]
+    with catalog._loading(f"{name} models"):
+        models = get_models(name)
+        catalog._models_dev()
+        catalog._artificial_analysis()
+    ids = [m["id"] for m in models]
+    if not ids:
+        die(f"No {name} models available; check its login or network and retry.")
+    catalog._refresh_missing_intelligence(ids)  # new AA scores show on the next menu
+    default = state.get("model") if state.get("provider") == name and state.get("model") in ids else ids[0]
+    facts = {"official": "claude", "commandcode-cli": "commandcode"}.get(name, name)
+    rows = []
+    for m in models:
+        info = catalog._model_facts(facts, m["id"])
+        if type(m.get("context")) is int and m["context"] > 0:  # the provider's own figure wins
+            info = {**info, "limit": {**(info.get("limit") or {}), "context": m["context"]}}
+        rows.append((m["id"], info))
+    paid_by = "; your subscription pays" if name in ("official", "opencode-go", "openai-oauth", "commandcode-cli") else ""
+    return catalog._pick_model(PROVIDERS[name]["label"], rows, default, "", paid_by)
+
+
+def effort_menu():
+    """Starting effort for the session ("" = Claude's default); /effort changes it later."""
+    return catalog._prompt_effort(EFFORTS, load_state().get("effort", ""))
 
 
 # ---------------- apply ----------------
 
-def write_apply(env, delete, run_claude, claude_args=()):
+def ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def write_apply(env, delete, run_claude, claude_args=(), model=None):
+    lines = [f'Remove-Item "Env:{k}" -ErrorAction SilentlyContinue' for k in delete]
+    lines += [f"Set-Item 'Env:{k}' {ps_quote(v)}" for k, v in env.items()]
+    if run_claude:
+        # Scope the provider env vars to this launch, so a later plain `claude` opens default Claude.
+        names = list(dict.fromkeys([*delete, *env]))
+        saved = "; ".join(f"'{k}' = [Environment]::GetEnvironmentVariable('{k}')" for k in names)
+        command = " ".join(["claude", *map(ps_quote, (["--model", model] if model else []) + list(claude_args))])
+        lines = [f"$ccSaved = @{{{saved}}}", "try {", *lines,
+                 'Write-Host "Starting Claude Code..." -ForegroundColor Gray',
+                 "Remove-Item -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue",
+                 command,
+                 "} finally { foreach ($k in $ccSaved.Keys) { [Environment]::SetEnvironmentVariable($k, $ccSaved[$k]) } }"]
     with open(APPLY_FILE, "w", encoding="utf-8") as f:
-        for k in delete:
-            f.write(f'Remove-Item "Env:{k}" -ErrorAction SilentlyContinue\n')
-        for k, v in env.items():
-            f.write(f"Set-Item 'Env:{k}' '{str(v).replace(chr(39), chr(39) + chr(39))}'\n")
-        if run_claude:
-            f.write('Write-Host "Starting Claude Code (env vars inherited from this session)..." -ForegroundColor Gray\n')
-            f.write('Remove-Item -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue\n')
-            command = "claude --model $env:ANTHROPIC_MODEL" if env.get("ANTHROPIC_MODEL") else "claude"
-            for arg in claude_args:
-                command += " '" + arg.replace("'", "''") + "'"
-            f.write(command + "\n")
+        f.write("\n".join(lines) + "\n")
 
 
-def apply(name, model_id=None, no_run=False, claude_args=()):
+def picker_models(name, model_id):
+    """This provider's recent picks, then its fallback list, for the /model picker."""
+    ids = [*load_state().get("recent", {}).get(name, []), *(i for i, _ in FALLBACK_MODELS.get(name, []))]
+    # Command Code's Claude and other models live behind different base URLs.
+    same_route = lambda m: name != "commandcode" or m.startswith("claude-") == model_id.startswith("claude-")
+    return [m for m in dict.fromkeys(ids) if m != model_id and same_route(m)]
+
+
+def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
     p = PROVIDERS[name]
     if name != "official" and (not isinstance(model_id, str) or not model_id.strip()):
         die("A nonempty model ID is required.")
-    if name == "commandcode" and not model_id.startswith("claude-"):
-        die("Command Code's Messages endpoint only serves Claude models. For Codex models use cc openrouter openai/gpt-5.3-codex.")
-    delete, env = [], {}
+    # Command Code serves Claude over /messages and everything else over /chat/completions.
+    fmt = "openai" if name == "commandcode" and not model_id.startswith("claude-") else p["format"]
+    if name in ("opencode-go", "opencode-zen", "commandcode"):
+        # Only typed ids can miss: the menu lists usable models only.
+        known = [m["id"] for m in get_models(name)]
+        if known and model_id not in known:
+            warn(f"'{model_id}' is not in {name}'s usable model list - Claude Code may reject it.")
+    env = {}
     if name == "official":
-        delete = CC_VARS + OAI_VARS
         run_claude = not no_run
-    elif p["format"] == "anthropic":
-        # Gateways choose either bearer or x-api-key authentication.
-        delete = list(OAI_VARS) + ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+    elif fmt == "anthropic":
         token = ""
         if p.get("keyEnv"):
             token = os.environ.get(p["keyEnv"]) or user_env(p["keyEnv"])
@@ -414,75 +384,90 @@ def apply(name, model_id=None, no_run=False, claude_args=()):
             if not key:
                 die(f"No key for {name}. Use commandcode auth login or CMD_API_KEY for Command Code; otherwise configure this provider in opencode or its API_KEY environment variable.")
             token = key
-        if name in ("opencode-go", "opencode-zen"):
-            known = [m["id"] for m in get_models(name)]
-            if known and model_id not in known:
-                warn(f"'{model_id}' not in live gateway model list - CC may reject it.")
         env["ANTHROPIC_BASE_URL"] = p["base"]
-        if p.get("auth") == "bearer":
-            env["ANTHROPIC_AUTH_TOKEN"] = token
-            env["ANTHROPIC_API_KEY"] = ""
-        else:
-            env["ANTHROPIC_API_KEY"] = token
-        # ANTHROPIC_CUSTOM_HEADERS breaks auth: CC then sends both Authorization
-        # and x-api-key; the gateway 401s ("Invalid API key").
-        delete.extend(["ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_AUTO_MODE_SERVER"])
-        for v in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]:
-            env[v] = model_id
+        # A bearer token, unlike ANTHROPIC_API_KEY, avoids Claude's "Both claude.ai and
+        # ANTHROPIC_API_KEY set" warning. x-api-key gateways also get the key as a header;
+        # Claude then sends exactly one x-api-key, which OpenCode accepts beside the bearer.
+        env["ANTHROPIC_AUTH_TOKEN"] = token
+        if p.get("header") == "x-api-key":
+            env["ANTHROPIC_CUSTOM_HEADERS"] = f"x-api-key: {token}"
         if name == "opencode-zen":
-            warn("opencode-zen unverified - the account key 401s on the zen gateway; "
-                 "you may need a dedicated zen API key from https://opencode.ai/zen")
+            warn("opencode-zen bills the account balance (402 when empty); free models answer only the OpenCode client.")
         if name == "openrouter" and not model_id.startswith("anthropic/"):
             warn("Non-Claude models are experimental in Claude Code; usage is billed to OpenRouter, not your ChatGPT subscription.")
         run_claude = not no_run
     else:
-        delete = list(CC_VARS) + list(OAI_VARS)
-        key = "" if p["key"] == "oauth" else auth_key(p["key"])
+        key ="" if p["key"] in ("oauth", "cli") else auth_key(p["key"])
         if name == "openai-oauth":
             ensure_oauth_proxy()
+        elif name == "commandcode-cli":
+            warn("Each request runs cmdc once; tools use a text protocol, so expect slower, less reliable tool calls.")
+        elif name == "gpt4free":
+            ensure_g4f()  # the key is optional: only needed when g4f runs with --g4f-api-key
         elif not key:
             die(f"No API key configured for {name}.")
         ensure_anthropic_proxy()
         env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/{name}"
-        env["ANTHROPIC_API_KEY"] = key or "openai-oauth"
+        env["ANTHROPIC_AUTH_TOKEN"] = key or name  # the adapter reads bearer or x-api-key
         env["ENABLE_TOOL_SEARCH"] = "false"
-        # OpenAI-format providers cannot perform Anthropic's server-side safety checks.
-        # Keep Claude's existing client-side classifier and avoid the billing notice.
-        env["CLAUDE_CODE_AUTO_MODE_SERVER"] = "0"
-        for v in CC_VARS:
-            if v == "ANTHROPIC_MODEL" or v.startswith("ANTHROPIC_DEFAULT_") or v == "CLAUDE_CODE_SUBAGENT_MODEL":
-                env[v] = model_id
         run_claude = not no_run
 
-    if "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in delete:
-        delete.append("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+    if name != "official":
+        # Gateways cannot perform Anthropic's server-side safety checks. Keep Claude's
+        # existing client-side classifier and avoid the billing notice.
+        env["CLAUDE_CODE_AUTO_MODE_SERVER"] = "0"
+        # claude.ai connectors never load over a gateway; skip their "disabled" notice.
+        env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        # Slow reasoning models and one cmdc run per request outlast Claude's 10-minute
+        # request timeout; match the adapter's own 30-minute CLI limit.
+        env["API_TIMEOUT_MS"] = "1800000"
+        for v in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]:
+            env[v] = model_id
+        env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = model_id
+        # ponytail: CLAUDE_CODE_MAX_CONTEXT_TOKENS stays the chosen model's; a /model pick
+        # with a smaller window can overflow before auto-compaction.
+        for slot, other in zip(PICKER_SLOTS, picker_models(name, model_id)):
+            env[slot] = env[slot + "_NAME"] = other
+        # Claude Code keeps /effort off for model ids it does not know; the adapter
+        # forwards it as reasoning_effort, Anthropic-format gateways get it as sent.
+        env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] = "1"
+    if effort and run_claude:
+        claude_args = ["--effort", effort, *claude_args]
+
     if name != "official":
         context = next((m.get("context") for m in get_models(name) if m["id"] == model_id), None)
+        if not (type(context) is int and context > 0):  # the menu's models.dev figure
+            facts = {"commandcode-cli": "commandcode"}.get(name, name)
+            context = (catalog._models_dev_facts(facts, model_id).get("limit") or {}).get("context")
         if type(context) is int and context > 0:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = context
 
-    save_state({"provider": name, "model": model_id or ""})
-    write_apply(env, delete, run_claude, claude_args)
+    state = load_state()
+    recent = state.get("recent", {})
+    if model_id:
+        recent[name] = list(dict.fromkeys([model_id, *recent.get(name, [])]))[:8]
+    save_state({**state, "provider": name, "model": model_id or "", "recent": recent, **({} if effort is None else {"effort": effort})})
+    # Clear every switcher variable this route does not set, so no earlier choice leaks in.
+    write_apply(env, [v for v in CC_VARS + OAI_VARS if v not in env], run_claude, claude_args, model_id)
     print()
-    print("Switched: " + (name if name == "official" else f"{name}/{model_id}"))
+    print("Switched: " + (f"{name}/{model_id}" if model_id else name))
     print(f"Effective: ANTHROPIC_BASE_URL={env.get('ANTHROPIC_BASE_URL', '')}  "
-          f"model={env.get('ANTHROPIC_MODEL', '')}  OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', '')}  "
-          f"context={env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'Claude default')}")
+          f"model={model_id or ''}  OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', '')}  "
+          f"context={env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'Claude default')}  "
+          f"effort={effort or 'Claude default'} (/effort changes it)")
 
 
 def main():
     for f in (APPLY_FILE,):
         if os.path.exists(f):
             os.remove(f)
-    vt_enable()
     args = sys.argv[1:]
     no_run, pos = False, []
     while args:
         if args[0].lower() in ("-norun", "--norun"):
             no_run = True
             args.pop(0)
-        elif args[0].startswith("-") or len(pos) >= (1 if pos and pos[0].lower() == "official" else 2):
+        elif args[0].startswith("-") or len(pos) >= 2:
             break
         else:
             pos.append(args.pop(0))
@@ -492,7 +477,7 @@ def main():
     if not pos and claude_args in (["--help"], ["-h"]):
         print("Usage: cc [provider] [model] [-NoRun] [Claude arguments]")
         print("cc --resume [session-id-or-name] | cc --continue | cc status")
-        print("Resume reuses the last selected provider/model; specify both to override.")
+        print("Every launch, resume included, asks for the provider and model unless both are given.")
         return
 
     if pos and pos[0] == "status":
@@ -506,29 +491,19 @@ def main():
             print(f"  Last chosen         : {state.get('provider')} / {state.get('model')}")
         return
 
-    state = load_state()
-    name = None
-    if pos:
-        name = pos[0].lower()
+    try:
+        name = pos[0].lower() if pos else provider_menu()
         if name not in PROVIDERS:
             die(f"Unknown provider '{name}'. Valid: {', '.join(sorted(PROVIDERS))}, status")
-    elif claude_args and state.get("provider") in PROVIDERS:
-        name = state["provider"]
-    else:
-        name = provider_menu()
-        if not name:
-            print("No change.")
-            sys.exit(1)
+        model_id = pos[1] if len(pos) > 1 else model_menu(name)
+        # Asked with the menus only; a typed `cc <provider> <model>` passes --effort itself.
+        effort = effort_menu() if len(pos) < 2 and not no_run and not any(
+            a == "--effort" or a.startswith("--effort=") for a in claude_args) else None
+    except KeyboardInterrupt:
+        print("No change.")  # a cancel is not a failure: the PowerShell wrapper must not throw
+        return
 
-    if name == "official":
-        model_id = None
-    else:
-        model_id = pos[1] if len(pos) > 1 else None
-        if not model_id and claude_args and state.get("provider") == name:
-            model_id = state.get("model")
-        model_id = model_id or model_menu(name)
-
-    apply(name, model_id, no_run, claude_args=claude_args)
+    apply(name, model_id, no_run, claude_args=claude_args, effort=effort)
 
 
 if __name__ == "__main__":

@@ -31,10 +31,11 @@ with tempfile.TemporaryDirectory(prefix='cc-check-') as directory:
     with patch.object(cc, 'fetch', return_value={'data': [
         {'id': 'claude-sonnet-4-6', 'supported_endpoints': ['/messages']},
         {'id': 'openai/gpt-5.3-codex', 'supported_endpoints': ['/responses']},
+        {'id': 'gpt-6-sol', 'supported_endpoints': ['/chat/completions', '/responses']},
     ]}), patch.object(cc, 'auth_key', return_value='test'):
-        assert [m['id'] for m in cc.get_models('commandcode')] == ['claude-sonnet-4-6']
+        assert [m['id'] for m in cc.get_models('commandcode')] == ['claude-sonnet-4-6', 'gpt-6-sol'], 'Only models Claude Code can reach are listed'
     with patch.object(cc, 'fetch', side_effect=OSError('offline')), contextlib.redirect_stderr(io.StringIO()):
-        assert cc.get_models('commandcode')[0]['id'] == 'claude-sonnet-4-6'
+        assert cc.get_models('commandcode')[0]['id'] == 'claude-opus-5-5'
 
     (temp / 'models_cache.json').write_text(json.dumps({'models': [
         {'slug': 'gpt-6-astra', 'context_window': 272000, 'max_context_window': 872000},
@@ -52,9 +53,9 @@ with tempfile.TemporaryDirectory(prefix='cc-check-') as directory:
         assert len(cc.get_models('openrouter')) == 20, 'Typed models beyond menu shortlist need limits too'
 
     fake_key = "test'$(throw 'must not execute')`secret"
-    for provider, model in [('commandcode', 'claude-sonnet-4-6'), ('openrouter', 'openai/gpt-5.3-codex'), ('official', None), ('openai-oauth', 'gpt-6-astra'), ('nvidia', 'test/model'), ('openai-oauth', "model'$(throw 'must not execute')`id")]:
+    for provider, model in [('commandcode', 'claude-sonnet-4-6'), ('openrouter', 'openai/gpt-5.3-codex'), ('official', None), ('openai-oauth', 'gpt-6-astra'), ('nvidia', 'test/model'), ('gpt4free', 'deepseek-v4-pro'), ('openai-oauth', "model'$(throw 'must not execute')`id")]:
         context = 872000 if provider == 'openai-oauth' and model == 'gpt-6-astra' else 131072 if provider == 'nvidia' else None
-        with patch.object(cc, 'get_models', return_value=[{'id': model, 'context': context}]), patch.object(cc, 'auth_key', return_value=fake_key), patch.object(cc, 'ensure_oauth_proxy'), patch.object(cc, 'ensure_anthropic_proxy'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with patch.object(cc, 'get_models', return_value=[{'id': model, 'context': context}]), patch.object(cc, 'auth_key', return_value=fake_key), patch.object(cc, 'ensure_oauth_proxy'), patch.object(cc, 'ensure_g4f'), patch.object(cc, 'ensure_anthropic_proxy'), patch.object(cc.catalog, '_models_dev_facts', return_value={}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             cc.apply(provider, model)
         script = temp / 'check.ps1'
         script.write_text('''$ErrorActionPreference = 'Stop'
@@ -67,6 +68,11 @@ function claude {
         token = $env:ANTHROPIC_AUTH_TOKEN
         model = $env:ANTHROPIC_MODEL
         fable = $env:ANTHROPIC_DEFAULT_FABLE_MODEL
+        haiku = $env:ANTHROPIC_DEFAULT_HAIKU_MODEL
+        sonnet = $env:ANTHROPIC_DEFAULT_SONNET_MODEL
+        sonnetName = $env:ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+        connectors = $env:ENABLE_CLAUDEAI_MCP_SERVERS
+        apiTimeout = $env:API_TIMEOUT_MS
         subagent = $env:CLAUDE_CODE_SUBAGENT_MODEL
         openai = $env:OPENAI_API_KEY
         openaiBase = $env:OPENAI_BASE_URL
@@ -85,22 +91,28 @@ function codex { $script:codexLaunched = $true; claude @args }
         result = subprocess.run(['powershell', '-NoProfile', '-File', str(script)], env=env, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout.splitlines()[-1])
         assert not data['headers']
-        assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia') else not data['toolSearch']
-        assert data['autoModeServer'] == '0' if provider in ('openai-oauth', 'nvidia') else not data['autoModeServer']
+        assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else not data['toolSearch']
+        assert data['autoModeServer'] == '0' if provider != 'official' else not data['autoModeServer']
+        assert data['connectors'] == 'false' if provider != 'official' else not data['connectors']
+        assert data['apiTimeout'] == '1800000' if provider != 'official' else not data['apiTimeout']
         assert data['client'] == 'claude'
         assert data['context'] == str(context) if context else not data['context']
         assert not data['openai'] and not data['openaiBase']
         if provider == 'official':
-            assert all(not data[k] for k in ['base', 'key', 'token', 'model', 'fable', 'subagent'])
+            assert all(not data[k] for k in ['base', 'key', 'token', 'model', 'fable', 'sonnet', 'subagent'])
             assert data['launchArgs'] == []
         else:
-            assert data['base'] == (f'http://127.0.0.1:{cc.ADAPTER_PORT}/{provider}' if provider in ('openai-oauth', 'nvidia') else cc.PROVIDERS[provider]['base'])
-            assert data['model'] == data['fable'] == data['subagent'] == model
+            assert data['base'] == (f'http://127.0.0.1:{cc.ADAPTER_PORT}/{provider}' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else cc.PROVIDERS[provider]['base'])
+            assert data['model'] == data['haiku'] == data['subagent'] == model
+            # /model offers the provider's other models; Command Code keeps Claude ids on their route.
+            picks = cc.picker_models(provider, model)
+            assert data['sonnet'] == data['sonnetName'] == (picks[0] if picks else None) and model not in picks
+            assert provider != 'commandcode' or all(m.startswith('claude-') for m in picks)
             assert data['launchArgs'] == ['--model', model]
-            assert data['token' if provider == 'openrouter' else 'key'] == ('openai-oauth' if provider == 'openai-oauth' else fake_key)
-            assert not data['key' if provider == 'openrouter' else 'token']
+            # A bearer token avoids Claude's claude.ai/ANTHROPIC_API_KEY conflict warning.
+            assert data['token'] == ('openai-oauth' if provider == 'openai-oauth' else fake_key) and not data['key']
 
-    for provider, model, key in [('commandcode', 'gpt-wrong', 'test'), ('commandcode', '', 'test'), ('commandcode', 'claude-sonnet-4-6', ''), ('openrouter', 'openai/gpt-5.3-codex', '')]:
+    for provider, model, key in [('commandcode', '', 'test'), ('commandcode', 'claude-sonnet-4-6', ''), ('openrouter', 'openai/gpt-5.3-codex', '')]:
         with patch.object(cc, 'auth_key', return_value=key), contextlib.redirect_stderr(io.StringIO()):
             try:
                 cc.apply(provider, model)
@@ -118,9 +130,16 @@ function codex { $script:codexLaunched = $true; claude @args }
         script.write_text("$ErrorActionPreference = 'Stop'\nfunction claude { throw 'Unexpected launch' }\nfunction codex { throw 'Unexpected launch' }\n. $env:CC_TEST_APPLY\n", encoding='utf-8')
         subprocess.run(['powershell', '-NoProfile', '-File', str(script)], env=env, capture_output=True, text=True, check=True)
     for invalid_context in [None, True, '1000000', -1, 0, 1.5]:
-        with patch.object(cc, 'get_models', return_value=[{'id': 'test/model', 'context': invalid_context}]), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy'), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(cc, 'get_models', return_value=[{'id': 'test/model', 'context': invalid_context}]), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy'), patch.object(cc.catalog, '_models_dev_facts', return_value={}), contextlib.redirect_stdout(io.StringIO()):
             cc.apply('nvidia', 'test/model', no_run=True)
         assert "Set-Item 'Env:CLAUDE_CODE_MAX_CONTEXT_TOKENS'" not in Path(cc.APPLY_FILE).read_text()
+    with patch.object(cc, 'get_models', return_value=[]), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy'), patch.object(cc.catalog, '_models_dev_facts', return_value={}), contextlib.redirect_stdout(io.StringIO()):
+        cc.apply('nvidia', 'test/model', effort='xhigh')
+        generated = Path(cc.APPLY_FILE).read_text()
+        assert "'--effort' 'xhigh'" in generated and "Set-Item 'Env:CLAUDE_CODE_ALWAYS_ENABLE_EFFORT' '1'" in generated
+        assert cc.load_state()['effort'] == 'xhigh'
+        cc.apply('official')
+        assert "Set-Item 'Env:CLAUDE_CODE_ALWAYS_ENABLE_EFFORT'" not in Path(cc.APPLY_FILE).read_text()
 print('PASS: context limits and reset, OAuth metadata, credential isolation, model filtering, offline fallback, PowerShell routing/quoting/cleanup, OAuth and NVIDIA Claude launch, official reset, invalid input, NoRun.')
 
 with tempfile.TemporaryDirectory(prefix='cc-entry-check-') as directory:

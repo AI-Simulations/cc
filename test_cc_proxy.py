@@ -2,6 +2,9 @@
 import importlib.util
 import io
 import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 import threading
 import urllib.error
@@ -25,6 +28,10 @@ assert chat["messages"][3]["content"] == "hello"
 assert chat["model"] == "gpt-6-astra" and chat["parallel_tool_calls"] is False
 assert chat["tools"][0]["function"]["name"] == "Read"
 assert json.loads(chat["messages"][2]["tool_calls"][0]["function"]["arguments"]) == {"file_path": "test.txt"}
+# Claude Code's /effort rides output_config; OpenAI tops out at xhigh.
+assert "reasoning_effort" not in chat
+assert proxy.to_chat({**body, "output_config": {"effort": "low"}})["reasoning_effort"] == "low"
+assert proxy.to_chat({**body, "output_config": {"effort": "max"}})["reasoning_effort"] == "xhigh"
 assert proxy.content_parts([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}])[0]["image_url"]["url"] == "data:image/png;base64,abc"
 try:
     proxy.content_parts([{"type": "document"}])
@@ -34,6 +41,8 @@ else:
     raise AssertionError("Unsupported content silently discarded")
 
 chunks = [
+    {"choices": [{"delta": {"reasoning_content": "Plan: "}}]},
+    {"choices": [{"delta": {"reasoning": "read it."}}]},
     {"choices": [{"delta": {"content": "Hello "}}]},
     {"choices": [{"delta": {"content": "world"}}]},
     {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_2", "function": {"name": "Read", "arguments": '{"file_'}}]}}]},
@@ -47,6 +56,14 @@ assert "".join(e["delta"]["text"] for e in events if e.get("delta", {}).get("typ
 assert next(e for e in events if e.get("delta", {}).get("type") == "input_json_delta")["delta"]["partial_json"] == '{"file_path": "test.txt"}'
 assert events[-2]["delta"]["stop_reason"] == "tool_use"
 assert events[-2]["usage"]["input_tokens"] == 10
+# Reasoning streams as Claude's thinking block, before the answer and tools, each block closed.
+starts = [e["content_block"]["type"] for e in events if e["type"] == "content_block_start"]
+assert starts == ["thinking", "text", "tool_use"], starts
+assert [e["index"] for e in events if e["type"] == "content_block_start"] == [0, 1, 2]
+assert [e["index"] for e in events if e["type"] == "content_block_stop"] == [0, 1, 2]
+assert "".join(e["delta"]["thinking"] for e in events if e.get("delta", {}).get("type") == "thinking_delta") == "Plan: read it."
+assert proxy.to_message({"choices": [{"message": {"reasoning_content": "hm", "content": "ok"}, "finish_reason": "stop"}]}, "m")["content"] == [
+    {"type": "thinking", "thinking": "hm", "signature": ""}, {"type": "text", "text": "ok"}]
 try:
     list(proxy.stream_events(io.BytesIO(b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'), "test"))
 except ValueError:
@@ -100,4 +117,80 @@ finally:
     for server in (adapter, upstream):
         server.shutdown()
         server.server_close()
+
+# Command Code CLI route: a fake cmdc answers with a text tool call.
+prompt = proxy.to_prompt(body)
+assert '"name": "Read"' in prompt and '<tool_result id="call_1">\nhello\n</tool_result>' in prompt and "<system>\nSystem" in prompt
+reply = proxy.from_cli('Checking.\n<tool_call>{"name": "Read", "input": {"file_path": "a.txt"}}</tool_call>', {"inputTokens": 5, "outputTokens": 3}, "end_turn", "m")
+assert [b["type"] for b in reply["content"]] == ["text", "tool_use"] and reply["content"][1]["input"] == {"file_path": "a.txt"}
+assert reply["stop_reason"] == "tool_use" and reply["usage"]["input_tokens"] == 5
+assert proxy.from_cli("<tool_call>not json</tool_call>", None, "end_turn", "m")["content"][0]["type"] == "text"
+# A fake cmdc: streams NDJSON events like `cmdc -p --output-format json` and logs its argv.
+fake_dir = Path(tempfile.mkdtemp(prefix="fake-cmdc-"))
+(fake_dir / "cmdc.py").write_text(r'''import json, sys
+from pathlib import Path
+Path(__file__).with_name("argv.json").write_text(json.dumps(sys.argv[1:]))
+sys.stdin.read()
+model = sys.argv[sys.argv.index("--model") + 1]
+def event(**e): print(json.dumps({"type": "event", "event": e}), flush=True)
+if model == "broke":
+    sys.exit(10)
+flag = Path(__file__).with_name("flaky.done")
+if model == "flaky" and not flag.exists():  # the first run answers nothing (exit 9)
+    flag.write_text("")
+    event(type="thinking_delta", delta="...")
+    sys.exit(9)
+if model == "native":  # the model reached for cmdc's own tools: --max-turns 1 exits 8
+    event(type="message_end", content=[{"type": "text", "text": "Looking."},
+          {"type": "tool_use", "id": "c1", "name": "read_file", "input": {"filePath": "a.txt"}},
+          {"type": "tool_use", "id": "c2", "name": "herdr", "input": {}}])
+    event(type="turn_end", usage={"inputTokens": 7, "outputTokens": 2})
+    sys.exit(8)
+event(type="thinking_delta", delta="Hmm")
+event(type="text_delta", delta="Checking.\n<tool")
+event(type="text_delta", delta='_call>{"name": "Read", "input": {}}</tool_call>')
+print(json.dumps({"type": "result", "finalText": 'Checking.\n<tool_call>{"name": "Read", "input": {}}</tool_call>', "usage": {"inputTokens": 1}}))
+''', encoding="utf-8")
+(fake_dir / "cmdc.cmd").write_text(f'@"{sys.executable}" "%~dp0cmdc.py" %*\n', encoding="utf-8")
+proxy.commandcode_executable = lambda: str(fake_dir / "cmdc.cmd")
+argv = lambda: json.loads((fake_dir / "argv.json").read_text())
+adapter = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+threading.Thread(target=adapter.serve_forever, daemon=True).start()
+try:
+    url = f"http://127.0.0.1:{adapter.server_port}/commandcode-cli/v1/messages"
+    for stream in (False, True):
+        request = urllib.request.Request(url, data=json.dumps({**body, "model": "deepseek/deepseek-v4-flash", "stream": stream}).encode())
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = response.read()
+        assert argv()[0] == "-p" and "--max-turns" in argv() and "--effort" not in argv()
+        if stream:  # thinking and text arrive live; the <tool_call> text never shows
+            events = [json.loads(line[5:]) for line in result.decode().splitlines() if line.startswith("data:")]
+            deltas = [e["delta"] for e in events if e["type"] == "content_block_delta"]
+            assert [d.get("thinking") for d in deltas if d["type"] == "thinking_delta"] == ["Hmm"]
+            assert "".join(d["text"] for d in deltas if d["type"] == "text_delta") == "Checking.\n"
+            assert any(d["type"] == "input_json_delta" for d in deltas) and events[-1]["type"] == "message_stop"
+        else:
+            assert json.loads(result)["content"][1]["name"] == "Read"
+    request = urllib.request.Request(url, data=json.dumps({**body, "stream": False, "output_config": {"effort": "high"}}).encode())
+    urllib.request.urlopen(request, timeout=30).read()
+    assert argv()[-2:] == ["--effort", "high"]
+    # cmdc's own read_file becomes the client's Read; an unmatched tool is named, not an error.
+    request = urllib.request.Request(url, data=json.dumps({**body, "model": "native", "stream": False}).encode())
+    native = json.loads(urllib.request.urlopen(request, timeout=30).read())
+    assert native["content"][1] == {**native["content"][1], "name": "Read", "input": {"file_path": "a.txt"}}
+    assert "herdr" in native["content"][0]["text"] and native["stop_reason"] == "tool_use"
+    assert native["usage"]["input_tokens"] == 7
+    # An empty answer (exit 9) is run again instead of reaching Claude as an API error.
+    request = urllib.request.Request(url, data=json.dumps({**body, "model": "flaky", "stream": True}).encode())
+    flaky = urllib.request.urlopen(request, timeout=30).read()
+    assert b"input_json_delta" in flaky and b'"type": "error"' not in flaky and (fake_dir / "flaky.done").exists()
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, data=json.dumps({**body, "model": "broke", "stream": False}).encode()), timeout=30)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 402 and "out of credits" in json.load(exc)["error"]["message"]
+    else:
+        raise AssertionError("CLI failure was accepted")
+finally:
+    adapter.shutdown()
+    adapter.server_close()
 print("PASS: Messages conversion, streamed text/tools/usage, truncation detection, both provider routes, authentication, HTTP errors; no external requests.")
