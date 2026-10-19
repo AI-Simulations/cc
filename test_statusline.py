@@ -37,6 +37,14 @@ class PlanLabelTests(unittest.TestCase):
             self.assertNotIn("cache off", rendered)
             self.assertNotIn("cache read", rendered)
 
+    def test_adapter_route_shows_recorded_rate_limits(self):
+        saved = {"at": 1000, "rate_limits": {"req": {"used_percentage": 75, "resets_at": None}}}
+        with patch.object(statusline, "quota_source", return_value=None), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
+                patch.object(statusline, "load_json", side_effect=lambda name: saved if name == "ratelimit-gemini.json" else {}), patch.dict(os.environ, {"CC_MAIN_PROVIDER": "gemini"}):
+            rendered = statusline.render({"model": {"id": "gemini-2.5-pro"}})
+        self.assertIn("req", rendered)
+        self.assertIn("75%", rendered)
+
     def test_cached_label_display(self):
         quota = {"plan": "ChatGPT Prolite", "rate_limits": {"seven_day": {"used_percentage": 0}}}
         with patch.object(statusline, "quota_source", return_value="openai"), patch.object(statusline, "provider_quota", return_value=(quota, None)), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False):

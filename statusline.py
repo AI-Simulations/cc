@@ -160,6 +160,8 @@ def quota_source():
         return "openai"
     if "opencode.ai/zen/go" in url:
         return "opencode-go"
+    if "openrouter.ai" in url:
+        return "openrouter"
     if "charm.land" in url or url.endswith("/hyper"):
         return "hyper"
     return None
@@ -238,12 +240,25 @@ def hyper_quota():
     return {"plan": "Hyper", "rate_limits": {}, "extra": extra}
 
 
+def openrouter_quota():
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key and quota_source() == "openrouter":
+        key = os.environ["ANTHROPIC_AUTH_TOKEN"]
+    if not key:
+        with open(os.path.expanduser("~/.local/share/opencode/auth.json"), encoding="utf-8") as f:
+            key = json.load(f)["openrouter"]["key"]
+    d = fetch_json("https://openrouter.ai/api/v1/key", {"Authorization": "Bearer " + key})["data"]
+    left = d.get("limit_remaining")
+    extra = f"${left:.2f} left" if left is not None else f"${d.get('usage') or 0:.2f} used"
+    return {"plan": "OpenRouter", "rate_limits": {}, "extra": extra}
+
+
 QUOTA_FETCHERS = {"commandcode": commandcode_quota, "openai": openai_quota,
-                  "opencode-go": opencode_go_quota, "hyper": hyper_quota}
+                  "opencode-go": opencode_go_quota, "hyper": hyper_quota, "openrouter": openrouter_quota}
 QUOTA_TTL = 120
 # cc provider names (~/.config/cc/agents.json) that share a quota source; the rest have no quota API.
 CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "commandcode-cli": "commandcode",
-                    "openai-oauth": "openai", "opencode-go": "opencode-go"}
+                    "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
 def subagent_sources():
@@ -428,7 +443,9 @@ def render(d):
         q, cached_at = provider_quota(source, now)
         limits, plan, extra = q.get("rate_limits") or {}, q.get("plan"), q.get("extra")
     else:
-        limits, cached_at, plan = {}, None, None  # no quota API for this route
+        # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on the last reply.
+        q = load_json(f"ratelimit-{cc_main_provider(None)}.json")
+        limits, cached_at, plan = q.get("rate_limits") or {}, q.get("at"), None
     parts += quota_parts(plan, extra, limits, cached_at, now)
 
     # Configured targets are visible even on official Claude and even on the same provider.
