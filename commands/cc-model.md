@@ -1,5 +1,5 @@
 ---
-description: Switch this session's provider and model without restarting (adapter routes)
+description: Switch this session's provider and model without restarting (adapter routes). Only when the user asks for it (directly or relayed from their other session)
 argument-hint: [<provider> <model> | off]
 allowed-tools: Bash, PowerShell
 ---

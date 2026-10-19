@@ -1,5 +1,5 @@
 ---
-description: Set a cc subagent's reasoning effort (low, medium, high, xhigh, max, or default)
+description: Set a cc subagent's reasoning effort (low, medium, high, xhigh, max, or default). Only when the user asks for it (directly or relayed from their other session)
 argument-hint: <subagent> [low|medium|high|xhigh|max|default]
 allowed-tools: Bash, PowerShell
 ---

@@ -1,5 +1,5 @@
 ---
-description: Set a cc subagent's auto-compact threshold (1-100 percent of its context window, or default)
+description: Set a cc subagent's auto-compact threshold (1-100 percent of its context window, or default). Only when the user asks for it (directly or relayed from their other session)
 argument-hint: <subagent> [1-100|default]
 allowed-tools: Bash, PowerShell
 ---

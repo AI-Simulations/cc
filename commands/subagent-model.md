@@ -1,5 +1,5 @@
 ---
-description: Set a cc subagent's model, or list every model its provider offers
+description: Set a cc subagent's model, or list every model its provider offers. Only when the user asks for it (directly or relayed from their other session)
 argument-hint: <subagent> [model|default]
 allowed-tools: Bash, PowerShell
 ---
