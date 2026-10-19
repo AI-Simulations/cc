@@ -8,16 +8,49 @@
 # Only affects the current PowerShell session: env vars are applied by the
 # 'cc' PS function dot-sourcing apply.ps1 (a child process cannot set them).
 
-import json, os, re, subprocess, sys, time, urllib.request, winreg
+import contextlib, itertools, json, os, re, subprocess, sys, tempfile, time, urllib.request, uuid, winreg
 from pathlib import Path
 
 sys.path.insert(0, os.environ.get("AI_SUITE_DIR") or str(Path(__file__).resolve().parents[1] / "ai-suite"))
-from ai_suite.service import background_process_options, ensure_openai_oauth_proxy
-from ai_suite import providers as catalog  # book writer's menus, model facts and colors
+import importlib
+
+
+class _Lazy:
+    """Imports on first use: ai_suite pulls in openai and google.genai (~2 s), which hooks never need."""
+    def __init__(self, name):
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, attr):
+        return getattr(importlib.import_module(self._name), attr)
+
+    def __setattr__(self, attr, value):
+        # Writes reach the real module, so patching `catalog._arrow_menu` patches its callers too.
+        setattr(importlib.import_module(object.__getattribute__(self, "_name")), attr, value)
+
+    def __delattr__(self, attr):
+        delattr(importlib.import_module(object.__getattribute__(self, "_name")), attr)
+
+
+_service = _Lazy("ai_suite.service")
+catalog = _Lazy("ai_suite.providers")  # book writer's menus, model facts and colors
+
+
+def background_process_options():
+    return _service.background_process_options()
+
+
+def ensure_openai_oauth_proxy():
+    return _service.ensure_openai_oauth_proxy()
 
 CFG_DIR = os.path.expanduser(r"~\.config\cc")
 APPLY_FILE = os.path.join(CFG_DIR, "apply.ps1")
 STATE_FILE = os.path.join(CFG_DIR, "state.json")
+AGENTS_FILE = os.path.join(CFG_DIR, "agents.json")
+SESSION_AGENTS_FILE = os.path.join(CFG_DIR, "session-agents.json")
+ROUTES_FILE = os.path.join(CFG_DIR, "routes.json")
+KEYS_FILE = os.path.join(CFG_DIR, "keys.json")
+EFFORTS_FILE = os.path.join(CFG_DIR, "efforts.json")
+AGENTS_DIR = os.path.expanduser(r"~\.claude\agents")
 OPENCODE_AUTH = os.path.expanduser(r"~\.local\share\opencode\auth.json")
 OPENCODE_CONFIG = os.path.expanduser(r"~\.config\opencode\opencode.jsonc")
 OAUTH_PORT = 10531
@@ -28,26 +61,40 @@ CC_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
            "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_MODE_SERVER", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-           "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ENABLE_CLAUDEAI_MCP_SERVERS", "API_TIMEOUT_MS"]
+           "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ENABLE_CLAUDEAI_MCP_SERVERS", "API_TIMEOUT_MS",
+           "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"]
 # /model picker entries beyond the chosen model (which also takes Opus and Haiku, so
 # background work stays on it), filled with this provider's other models.
 PICKER_SLOTS = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION"]
 # Claude Code's own /effort levels (claude --help).
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+# Auto-compact thresholds offered by the menus; --autocompact takes any 1-100.
+AUTOCOMPACTS = [50, 60, 70, 80, 90, 95]
+AGENT_FLAGS = ("--provider", "--model", "--effort", "--autocompact", "--description")
 OAI_VARS = ["OPENAI_BASE_URL", "OPENAI_API_KEY"]
+CC_VARS += [slot + "_SUPPORTED_CAPABILITIES" for slot in ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", *PICKER_SLOTS]]
+CC_VARS += ["CC_AGENT_CHILD", "CC_LAUNCH_ID", "CC_MAIN_PROVIDER", "CC_WORKER_PROFILE", "CLAUDE_CODE_FORK_SUBAGENT"]
+CONTEXT_PREFIX = "CC_CONTEXT_V1 "
 
 PROVIDERS = {
     "commandcode": {"label": "Command Code API (needs Provider plan; Go plan is CLI-only)", "format": "anthropic", "base": "https://api.commandcode.ai/provider", "key": "commandcode"},
     "commandcode-cli": {"label": "Command Code subscription via cmdc CLI (Go plan; text tool protocol)", "format": "openai", "key": "cli"},
     "official":     {"label": "Claude official (claude.ai login)", "format": "anthropic", "base": ""},
-    "minimax":      {"label": "MiniMax (Anthropic API)", "format": "anthropic", "base": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY"},
+    "minimax":      {"label": "MiniMax (Anthropic API)", "format": "anthropic", "base": "https://api.minimax.io/anthropic", "key": "minimax"},
     "opencode-go":  {"label": "OpenCode Go subscription (x-api-key, live key)", "format": "anthropic", "base": "https://opencode.ai/zen/go", "key": "opencode-go", "header": "x-api-key"},
     "opencode-zen": {"label": "OpenCode Zen PAYG (needs account funds; free models are OpenCode-only)", "format": "anthropic", "base": "https://opencode.ai/zen", "key": "opencode", "header": "x-api-key"},
     "openai-oauth": {"label": "OpenAI OAuth proxy - ChatGPT account (OpenAI-format)", "format": "openai", "base": f"http://127.0.0.1:{OAUTH_PORT}/v1", "key": "oauth"},
     "openrouter":   {"label": "Claude Code via OpenRouter (API credits)", "format": "anthropic", "base": "https://openrouter.ai/api", "key": "openrouter", "auth": "bearer"},
     "nvidia":       {"label": "Claude Code via NVIDIA NIM", "format": "openai", "base": "https://integrate.api.nvidia.com/v1", "key": "nvidia"},
+    "gemini":       {"label": "Google Gemini API (OpenAI-format; opencode's google key)", "format": "openai", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key": "google"},
+    "ollama-cloud": {"label": "Ollama Cloud (OpenAI-format)", "format": "openai", "base": "https://ollama.com/v1", "key": "ollama-cloud"},
+    "lmstudio":     {"label": "LM Studio local server (:1234, start it first)", "format": "openai", "base": "http://127.0.0.1:1234/v1", "key": "lmstudio"},
     "gpt4free":     {"label": "gpt4free local API (free, best-effort; starts g4f on :1337)", "format": "openai", "base": f"http://127.0.0.1:{G4F_PORT}/v1", "key": "gpt4free"},
 }
+
+# Routes the adapter serves, so a session on one can fall back to another (cc fallback).
+FALLBACK_ROUTES = sorted(n for n, p in PROVIDERS.items() if p["format"] == "openai" and p.get("key") != "cli")
+FALLBACKS_FILE = os.path.join(CFG_DIR, "fallbacks.json")
 
 # go and zen are DIFFERENT gateways with different model catalogs
 FALLBACK_MODELS = {
@@ -92,6 +139,13 @@ def auth_key(name):
     key = os.environ.get(env_name) or user_env(env_name)
     if key:
         return key
+    try:
+        with open(KEYS_FILE, encoding="utf-8") as f:
+            stored = json.load(f).get(name)
+        if isinstance(stored, str) and stored:
+            return stored
+    except (OSError, ValueError):
+        pass
     if name == "commandcode":
         try:
             with open(os.path.expanduser(r"~\.commandcode\auth.json"), encoding="utf-8-sig") as f:
@@ -102,11 +156,50 @@ def auth_key(name):
         auth = json.load(open(OPENCODE_AUTH, encoding="utf-8"))
     except Exception:
         auth = {}
-    for c in [name]:
+    # opencode files a MiniMax Coding Plan key under its own provider id.
+    for c in {"minimax": ["minimax", "minimax-coding-plan"]}.get(name, [name]):
         e = auth.get(c)
         if e and e.get("type") == "api" and e.get("key"):
             return e["key"]
     return ""
+
+
+def key_env_name(name):
+    return {"commandcode": "CMD_API_KEY", "gpt4free": "G4F_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
+
+
+def save_key(name, value):
+    try:
+        with open(KEYS_FILE, encoding="utf-8") as f:
+            keys = json.load(f)
+    except (OSError, ValueError):
+        keys = {}
+    keys[name] = value
+    write_json(KEYS_FILE, keys, indent=1)
+    try:
+        os.chmod(KEYS_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def ensure_key(name):
+    """Ask for a missing provider key once, so the model menu can list its models."""
+    p = PROVIDERS.get(name, {})
+    key_id = p.get("key")
+    if not key_id or key_id in ("oauth", "cli", "gpt4free") or name == "lmstudio":
+        return
+    if auth_key(key_id):
+        return
+    if os.environ.get("CC_AGENT_CHILD") == "1" or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return  # route_env reports the missing key
+    print(f"No API key for {name}. Get one from its account page.", file=sys.stderr)
+    try:
+        value = input(f"{name} API key (Enter to cancel): ").strip()
+    except EOFError:
+        return
+    if not value:
+        return
+    save_key(key_id, value)
 
 
 def load_state():
@@ -116,9 +209,34 @@ def load_state():
         return {}
 
 
+def write_json(path, data, **dump):
+    # Replace, not rewrite: a Ctrl+C quit mid-save must not leave a truncated file.
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, **dump)
+    os.replace(path + ".tmp", path)
+
+
 def save_state(data):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+    write_json(STATE_FILE, data)
+
+
+def quit_on_ctrl_c():
+    """Ctrl+C quits at once. Python's KeyboardInterrupt cannot interrupt a Windows socket or
+    child-process wait, so a model listing would otherwise hold it until its timeout."""
+    if os.name != "nt" or not sys.stdin.isatty():
+        return
+    import ctypes
+
+    @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+    def handler(event):
+        if event != 0:  # CTRL_C_EVENT only
+            return 0
+        sys.__stdout__.write("\nNo change.\n")
+        sys.__stdout__.flush()
+        os._exit(0)  # nothing is half-written: saves replace whole files
+
+    quit_on_ctrl_c.handler = handler  # the console keeps calling it; keep it alive
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
 
 
 def fetch(url, headers=None, timeout=15):
@@ -138,8 +256,169 @@ def go_limits():
         return {}
 
 
+# Command Code's plans in ascending order and the categories each may use (its own tables):
+# a model's minimumPlan is the cheapest plan allowed to use it; without one, its category
+# decides. Purchased or free credits unlock every model, as in cmdc.
+CC_PLANS = ["individual-go", "individual-go-v1", "individual-goat", "individual-pro",
+            "individual-pro-v1", "individual-provider", "individual-max", "individual-ultra", "teams-pro"]
+CC_PLAN_CATEGORIES = {
+    "individual-go": {"opensource"}, "individual-go-v1": {"opensource"}, "individual-goat": {"opensource"},
+    "individual-pro": {"premium", "opensource"}, "individual-pro-v1": {"premium", "opensource"},
+    "individual-provider": {"premium", "opensource"}, "individual-max": {"premium", "opensource"},
+    "individual-ultra": {"premium", "opensource"}, "teams-pro": {"premium", "opensource"},
+}
+CC_ACTIVE_SUBSCRIPTIONS = {"active", "trialing", "past_due"}
+COMMANDCODE_API = "https://api.commandcode.ai"
+PLAN_TTL = 600
+_PLAN_CACHE = {}
+
+
+def commandcode_model_allowed(m, plan, rank):
+    """cmdc's access rule for one catalog row: plan rank, else the plan's categories."""
+    if m.get("hidden"):
+        return False
+    category = m.get("category")
+    if category not in ("premium", "opensource"):
+        return True  # a model cmdc cannot classify is not restricted
+    if "minimumPlan" not in m:
+        return category in CC_PLAN_CATEGORIES[plan]
+    minimum = m["minimumPlan"]
+    if minimum is None:
+        return False  # cmdc locks a null minimumPlan for every plan
+    if minimum in CC_PLANS:
+        return rank >= CC_PLANS.index(minimum)
+    return category in CC_PLAN_CATEGORIES[plan]  # a newer plan id than this cc knows
+
+
+_CATALOG_CACHE = {}
+
+
+def commandcode_catalog():
+    """The client catalog rows (plan, category, reasoning efforts), cached like the plan."""
+    cached = _CATALOG_CACHE.get("value")
+    if cached and time.time() - cached[0] < PLAN_TTL:
+        return cached[1]
+    try:
+        rows = fetch(f"{COMMANDCODE_API}/provider/v1/models?view=client",
+                     {"Authorization": "Bearer " + auth_key("commandcode")})["data"]
+    except Exception:
+        rows = None
+    _CATALOG_CACHE["value"] = (time.time(), rows)
+    return rows
+
+
+def _efforts_cache():
+    """{model id: efforts} fetched in the last day, or None when it must be refetched."""
+    try:
+        with open(EFFORTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - data.get("at", 0) < 86400:
+            return data.get("models") or {}
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def _efforts_save(models):
+    """The status line reads this instead of asking the network every refresh."""
+    try:
+        write_json(EFFORTS_FILE, {"at": time.time(), "models": models}, indent=1)
+    except OSError:
+        pass
+
+
+def commandcode_efforts(model_id):
+    """The reasoning efforts this model accepts ([] for none); None when it is not listed.
+
+    Every catalog row carries `reasoningEfforts`; models such as MiMo V2.6 Pro carry null,
+    which means they take no adjustable effort (cmdc exits 1 if `--effort` is passed).
+    """
+    key = (model_id or "").casefold()
+    cached = _efforts_cache()
+    if cached:
+        for mid, efforts in cached.items():
+            if str(mid).casefold() == key:
+                return efforts
+        return None  # a fresh, complete listing: an unlisted model takes no adjustable effort
+    rows = commandcode_catalog()
+    if rows is None:
+        return None
+    models = {}
+    for m in rows:
+        if isinstance(m, dict) and isinstance(m.get("id"), str):
+            efforts = m.get("reasoningEfforts")
+            models[m["id"]] = efforts if isinstance(efforts, list) else []
+    if models:  # never cache an empty listing over a transient failure
+        _efforts_save(models)
+    for mid, efforts in models.items():
+        if mid.casefold() == key:
+            return efforts
+    return None
+
+
+def codex_efforts(model_id):
+    """The reasoning efforts Codex's model cache lists for an OpenAI model; None when unknown."""
+    try:
+        path = os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "models_cache.json")
+        with open(path, encoding="utf-8") as f:
+            rows = json.load(f).get("models") or []
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("slug", "")).casefold() == (model_id or "").casefold():
+            levels = row.get("supported_reasoning_levels")
+            if not isinstance(levels, list):
+                return None
+            return [e["effort"] for e in levels if isinstance(e, dict) and isinstance(e.get("effort"), str)]
+    return None
+
+
+def model_efforts(name, model_id):
+    """Reasoning efforts this provider publishes for the model; None when it publishes none.
+
+    The status line maps a level's circles and colour onto this list, so `high` on a
+    model that tops out there reads as its maximum rather than three fifths of one.
+    """
+    if name in ("commandcode", "commandcode-cli"):
+        return commandcode_efforts(model_id)
+    if name == "openai-oauth":
+        return codex_efforts(model_id)
+    return None
+
+
+def commandcode_plan_models():
+    """This plan's model ids, casefolded; None when that cannot be determined.
+
+    The billing catalog and the route catalogs spell some ids differently
+    (`moonshotai/Kimi-K3` vs `moonshotai/kimi-k3`), so callers compare casefolded.
+    """
+    cached = _PLAN_CACHE.get("value")
+    if cached and time.time() - cached[0] < PLAN_TTL:
+        return cached[1]
+    try:
+        rows = commandcode_catalog()
+        if rows is None:
+            raise ValueError("no catalog")
+        headers = {"Authorization": "Bearer " + auth_key("commandcode")}
+        subscription = fetch(f"{COMMANDCODE_API}/alpha/billing/subscriptions", headers)["data"]
+        credits = fetch(f"{COMMANDCODE_API}/alpha/billing/credits", headers).get("credits") or {}
+        name, status = subscription.get("planId"), subscription.get("status")
+        if name not in CC_PLANS or status not in CC_ACTIVE_SUBSCRIPTIONS:
+            # cmdc trusts only an active subscription; anything else allows every model.
+            result = None
+        elif credits.get("purchasedCredits") or credits.get("freeCredits"):
+            result = {m["id"].casefold() for m in rows if not m.get("hidden")}
+        else:
+            rank = CC_PLANS.index(name)
+            result = {m["id"].casefold() for m in rows if commandcode_model_allowed(m, name, rank)}
+    except Exception:
+        result = None  # no data: keep every advertised model rather than hide working ones
+    _PLAN_CACHE["value"] = (time.time(), result)
+    return result
+
+
 def get_models(name):
-    models = []
+    models, filtered = [], False
     try:
         if name == "official":
             models = [{"id": mid, "name": "", "context": None, "output": None} for mid in catalog._provider_models("claude")]
@@ -147,11 +426,28 @@ def get_models(name):
             # Claude ids use /messages; the rest route through the adapter's /chat/completions.
             # Models serving neither (e.g. /responses only) cannot work from Claude Code.
             live = fetch("https://api.commandcode.ai/provider/v1/models", {"Authorization": "Bearer " + auth_key(name)})
+            allowed = commandcode_plan_models()
+            filtered = allowed is not None
+            efforts = {m["id"].casefold(): m.get("reasoningEfforts") for m in commandcode_catalog() or ()
+                       if isinstance(m, dict) and isinstance(m.get("id"), str)}
             for m in live["data"]:
+                if allowed is not None and m["id"].casefold() not in allowed:
+                    continue
                 if {"/messages", "/chat/completions"} & set(m.get("supported_endpoints", [])):
-                    models.append({"id": m["id"], "name": m.get("name", ""), "context": m.get("context_window") or m.get("context_length"), "output": None})
+                    models.append({"id": m["id"], "name": m.get("name", ""), "context": m.get("context_window") or m.get("context_length"),
+                                   "output": None, "efforts": efforts.get(m["id"].casefold())})
         elif name == "commandcode-cli":
-            models = [{"id": mid, "name": "", "context": None, "output": None} for mid in sorted(catalog._live_model_ids("commandcode") or ())]
+            # The plan applies to both Command Code routes. cmdc's own ids are the ones it
+            # accepts, so filter that listing rather than the billing catalog's spelling.
+            allowed = commandcode_plan_models()
+            filtered = allowed is not None
+            ids = sorted(catalog._live_model_ids("commandcode") or ())
+            if allowed is not None:
+                ids = [mid for mid in ids if mid.casefold() in allowed]
+            efforts = {m["id"].casefold(): m.get("reasoningEfforts") for m in commandcode_catalog() or ()
+                       if isinstance(m, dict) and isinstance(m.get("id"), str)}
+            models = [{"id": mid, "name": "", "context": None, "output": None,
+                       "efforts": efforts.get(mid.casefold())} for mid in ids]
         elif name == "opencode-go":
             live = fetch("https://opencode.ai/zen/go/v1/models", {"x-api-key": auth_key("opencode-go")})
             limits = go_limits()
@@ -179,6 +475,13 @@ def get_models(name):
                 if re.search(r"image|tts|embed", m["id"]):
                     continue
                 models.append({"id": m["id"], "name": "", "context": m.get("context_window") or m.get("context_length"), "output": None})
+        elif name in ("gemini", "ollama-cloud", "lmstudio"):
+            live = fetch(PROVIDERS[name]["base"] + "/models", {"Authorization": f"Bearer {auth_key(PROVIDERS[name]['key'])}"})
+            for m in live["data"]:
+                if re.search(r"image|tts|embed|imagen|veo|aqa", m["id"]):
+                    continue
+                # Gemini lists ids as models/<id>; its chat endpoint takes the bare id.
+                models.append({"id": m["id"].removeprefix("models/"), "name": "", "context": m.get("context_length"), "output": None})
         elif name == "gpt4free":
             ensure_g4f()
             live = fetch(f"http://127.0.0.1:{G4F_PORT}/v1/models", timeout=10)
@@ -204,7 +507,7 @@ def get_models(name):
     except Exception as e:
         print(f"  (model fetch failed: {e} - using fallback)", file=sys.stderr)
 
-    if not models:
+    if not models and not filtered:  # offline fallback must not re-offer plan-locked models
         models = [{"id": i, "name": n, "context": None, "output": None} for i, n in FALLBACK_MODELS.get(name, [])]
     return models
 
@@ -242,10 +545,17 @@ def ensure_g4f():
 
 def stop_port_owner(port):
     """Kill the process listening on 127.0.0.1:<port> and wait for the port to free."""
-    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True).stdout
-    for parts in map(str.split, out.splitlines()):
-        if len(parts) == 5 and parts[1] == f"127.0.0.1:{port}" and parts[3] == "LISTENING":
-            subprocess.run(["taskkill", "/F", "/PID", parts[4]], capture_output=True)
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+    pids = {parts[4] for parts in map(str.split, out.splitlines())
+            if len(parts) == 5 and parts[1] == f"127.0.0.1:{port}" and parts[3] == "LISTENING"} - {"0"}
+    if not pids and port == ADAPTER_PORT:
+        # Windows can report the listener as PID 0; find the adapter by its command line instead.
+        query = ("Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
+                 "Where-Object { $_.CommandLine -match 'cc-anthropic-proxy[.]py' } | ForEach-Object { $_.ProcessId }")
+        pids = set(subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True,
+                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout.split())
+    for pid in pids:
+        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     for _ in range(30):
         try:
             fetch(f"http://127.0.0.1:{port}/health", timeout=0.5)
@@ -257,7 +567,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 9}
+    expected = {"service": "cc-anthropic-proxy", "version": 18}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -269,9 +579,11 @@ def ensure_anthropic_proxy():
         stop_port_owner(ADAPTER_PORT)
     elif running is not None:
         die(f"Port {ADAPTER_PORT} is occupied by another service; free it before retrying.")
+    options = background_process_options()
+    # Below normal: every cmdc the adapter starts inherits it, so workers never starve the desktop.
+    options["creationflags"] = options.get("creationflags", 0) | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)
     subprocess.Popen([sys.executable, os.path.join(CFG_DIR, "cc-anthropic-proxy.py")],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     **background_process_options())
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
     for _ in range(40):
         try:
             if fetch(url, timeout=1) == expected:
@@ -285,14 +597,17 @@ def ensure_anthropic_proxy():
 # ---------------- menu ----------------
 # Same arrow menus, colors and model facts as book writer (ai_suite.providers).
 
-def provider_menu():
+def provider_menu(default=None, role="", skip="", only=None):
+    """skip: label of a leading "skip" row (returned as "skip"); only: the providers offered."""
     state = load_state()
-    default = state.get("provider") if state.get("provider") in PROVIDERS else "official"
-    names = sorted(PROVIDERS)
+    if default not in PROVIDERS and not (skip and default == "skip"):
+        default = state.get("provider") if not role and state.get("provider") in PROVIDERS else "official"
+    names = sorted(only or PROVIDERS)
     width = max(map(len, names))
     tag = "  " + catalog._color("default", "2")
-    picked = catalog._arrow_menu("Provider", [
-        (n, f"{n:<{width}}  {PROVIDERS[n]['label']}{tag if n == default else ''}") for n in names], default)
+    picked = catalog._arrow_menu(f"{role.capitalize()} provider" if role else "Provider", [
+        *([("skip", f"{'skip':<{width}}  {skip}")] if skip else []),
+        *((n, f"{n:<{width}}  {PROVIDERS[n]['label']}{tag if n == default else ''}") for n in names)], default, back=True)
     if picked is None:  # not a console: type it
         try:
             picked = input(f"Provider ({', '.join(names)}) [default: {default}]: ").strip().lower() or default
@@ -301,8 +616,9 @@ def provider_menu():
     return picked
 
 
-def model_menu(name):
+def model_menu(name, default=None, role=""):
     state = load_state()
+    ensure_key(name)
     with catalog._loading(f"{name} models"):
         models = get_models(name)
         catalog._models_dev()
@@ -311,7 +627,8 @@ def model_menu(name):
     if not ids:
         die(f"No {name} models available; check its login or network and retry.")
     catalog._refresh_missing_intelligence(ids)  # new AA scores show on the next menu
-    default = state.get("model") if state.get("provider") == name and state.get("model") in ids else ids[0]
+    if default not in ids:
+        default = state.get("model") if not role and state.get("provider") == name and state.get("model") in ids else ids[0]
     facts = {"official": "claude", "commandcode-cli": "commandcode"}.get(name, name)
     rows = []
     for m in models:
@@ -320,12 +637,180 @@ def model_menu(name):
             info = {**info, "limit": {**(info.get("limit") or {}), "context": m["context"]}}
         rows.append((m["id"], info))
     paid_by = "; your subscription pays" if name in ("official", "opencode-go", "openai-oauth", "commandcode-cli") else ""
-    return catalog._pick_model(PROVIDERS[name]["label"], rows, default, "", paid_by)
+    return catalog._pick_model(PROVIDERS[name]["label"], rows, default, role, paid_by, back=True)
 
 
-def effort_menu():
+def effort_menu(default=None):
     """Starting effort for the session ("" = Claude's default); /effort changes it later."""
-    return catalog._prompt_effort(EFFORTS, load_state().get("effort", ""))
+    return catalog._prompt_effort(EFFORTS, load_state().get("effort", "") if default is None else default,
+                                 back=True)
+
+
+def parse_pct(value):
+    """An --autocompact value: 1-100, or "" for "default" (Claude's own threshold)."""
+    if str(value).lower() == "default":
+        return ""
+    if not re.fullmatch(r"\d{1,3}", str(value)) or not 1 <= int(value) <= 100:
+        die(f"Auto-compact must be a whole percentage from 1 to 100 or 'default', not '{value}'.")
+    return int(value)
+
+
+def autocompact_menu(default, role=""):
+    """Auto-compact threshold as a percentage of the context window ("" = Claude's default)."""
+    title = f"{role.capitalize()} auto-compact" if role else "Auto-compact"
+    pcts = sorted({*AUTOCOMPACTS, *([default] if default else [])})
+    rows = [("default", "default  Claude's own threshold")] + [(str(p), f"{p}%  of the context window") for p in pcts]
+    picked = catalog._arrow_menu(title, rows, str(default or "default"), name=title, back=True)
+    # Off a console the remembered pick stands, as for effort.
+    return default if picked is None else parse_pct(picked)
+
+
+def load_fallbacks():
+    try:
+        with open(FALLBACKS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def set_fallback(launch, provider=None, model=None):
+    """Sets (or with no provider clears) a launch's fallback route; entries expire after 30 days."""
+    data = {k: v for k, v in load_fallbacks().items() if time.time() - v.get("at", 0) < 30 * 86400}
+    if provider:
+        data[launch] = {"provider": provider, "model": model, "at": time.time()}
+    else:
+        data.pop(launch, None)
+    write_json(FALLBACKS_FILE, data, indent=1)
+
+
+def load_routes():
+    try:
+        with open(ROUTES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def set_route(launch, provider=None, model=None):
+    """Sets (or with no provider clears) this launch's provider/model override."""
+    data = {k: v for k, v in load_routes().items() if time.time() - v.get("at", 0) < 86400}
+    if provider:
+        data[launch] = {"provider": provider, "model": model, "at": time.time()}
+    else:
+        data.pop(launch, None)
+    write_json(ROUTES_FILE, data, indent=1)
+
+
+def route_command(words):
+    """cc route [<provider> <model> | off | routes | models <provider>]: this session's model route."""
+    if words == ["routes"]:
+        for n in FALLBACK_ROUTES:
+            print(f"{n}\t{PROVIDERS[n]['label']}")
+        return
+    if len(words) == 2 and words[0] == "models":
+        if words[1] not in FALLBACK_ROUTES:
+            die(f"Unknown adapter provider '{words[1]}'. Valid: {', '.join(FALLBACK_ROUTES)}")
+        ensure_key(words[1])
+        for m in get_models(words[1]):
+            print(m["id"])
+        return
+    launch = os.environ.get("CC_LAUNCH_ID")
+    if not launch:
+        die(f"This session has no cc launch id; /cc-model needs a session started by cc on one of: {', '.join(FALLBACK_ROUTES)}.")
+    if os.environ.get("CC_MAIN_PROVIDER") not in FALLBACK_ROUTES:
+        # The adapter reads x-cc-launch; a direct Anthropic route never reaches it.
+        die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly; "
+            f"/cc-model works only on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
+    if words == ["off"]:
+        set_route(launch)
+    elif len(words) == 2 and words[0].lower() in FALLBACK_ROUTES:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", words[1]):
+            die("Invalid model id.")
+        set_route(launch, words[0].lower(), words[1])
+    elif words and not (len(words) == 2 and words[0] in FALLBACK_ROUTES):
+        die(f"Usage: cc route [<provider> <model> | off]; providers: {', '.join(FALLBACK_ROUTES)}")
+    target = load_routes().get(launch)
+    print(f"Route: {target['provider']}/{target['model']}" if target else "Route: launch default")
+
+
+def fallback_menu(name, current=None):
+    """The fallback route for this launch: none unless picked."""
+    enabled = catalog._arrow_menu("Add a fallback model?", [("no", "No (default)"), ("yes", "Yes")], "no", back=True)
+    if enabled != "yes":
+        return None
+    provider = provider_menu((current or {}).get("provider") or "skip", "fallback",
+                             "no fallback (default)", [n for n in FALLBACK_ROUTES if n != name])
+    if provider in (None, "skip"):
+        return None
+    return {"provider": provider, "model": model_menu(provider, (current or {}).get("model"), "fallback")}
+
+
+def fallback_command(words):
+    """cc fallback [<provider> <model> | off | routes | models <provider>]: this session's fallback route.
+    routes and models print rows for the /fallback picker."""
+    if words == ["routes"]:
+        for n in FALLBACK_ROUTES:
+            if n != os.environ.get("CC_MAIN_PROVIDER"):
+                print(f"{n}\t{PROVIDERS[n]['label']}")
+        return
+    if len(words) == 2 and words[0] == "models":
+        if words[1] not in FALLBACK_ROUTES:
+            die(f"Unknown fallback provider '{words[1]}'. Valid: {', '.join(FALLBACK_ROUTES)}")
+        for m in get_models(words[1]):
+            print(m["id"])
+        return
+    if words[:1] == ["subagent"]:
+        if len(words) < 2:
+            for name, profile in load_agents().items():
+                target = profile.get("fallback")
+                print(f"{name}: " + (f"{target['provider']}/{target['model']}" if target else "off"))
+            return
+        name, rest = words[1], words[2:]
+        profiles = load_agents()
+        if name not in profiles:
+            die(f"No subagent '{name}'.")
+        if rest == ["off"]:
+            profiles[name].pop("fallback", None)
+        elif len(rest) == 2 and rest[0] in FALLBACK_ROUTES:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", rest[1]):
+                die("Invalid fallback model id.")
+            profiles[name]["fallback"] = {"provider": rest[0], "model": rest[1]}
+        elif rest:
+            die("Usage: cc fallback subagent <name> [off | <provider> <model>]")
+        if rest:
+            save_agents(profiles)
+        target = profiles[name].get("fallback")
+        print(f"Fallback: {target['provider']}/{target['model']}" if target else "Fallback: off")
+        return
+    launch = os.environ.get("CC_LAUNCH_ID")
+    if not launch:
+        die(f"This session has no cc launch id; fallback needs a session started by cc on one of: {', '.join(FALLBACK_ROUTES)}.")
+    if os.environ.get("CC_MAIN_PROVIDER") not in FALLBACK_ROUTES:
+        die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly, so there is "
+            f"nothing to fall back from; fallback works on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
+    if words == ["off"]:
+        set_fallback(launch)
+    elif len(words) == 2 and words[0].lower() in FALLBACK_ROUTES:
+        set_fallback(launch, words[0].lower(), words[1])
+    elif words:
+        die(f"Usage: cc fallback [<provider> <model> | off]; providers: {', '.join(FALLBACK_ROUTES)}")
+    target = load_fallbacks().get(launch)
+    print(f"Fallback: {target['provider']}/{target['model']}" if target else "Fallback: off")
+
+
+def take_option(args, flag):
+    """Remove `flag value` or `flag=value` from args and return the value (None if absent)."""
+    for i, arg in enumerate(args):
+        if arg == flag:
+            if i + 1 == len(args):
+                die(f"{flag} needs a value.")
+            value = args[i + 1]
+            del args[i:i + 2]
+            return value
+        if arg.startswith(flag + "="):
+            del args[i]
+            return arg.split("=", 1)[1]
+    return None
 
 
 # ---------------- apply ----------------
@@ -351,34 +836,43 @@ def write_apply(env, delete, run_claude, claude_args=(), model=None):
         f.write("\n".join(lines) + "\n")
 
 
-def picker_models(name, model_id):
-    """This provider's recent picks, then its fallback list, for the /model picker."""
-    ids = [*load_state().get("recent", {}).get(name, []), *(i for i, _ in FALLBACK_MODELS.get(name, []))]
+def picker_models(name, model_id, models=None):
+    """This provider's recent picks then its live models, for the /model picker.
+
+    A live list is authoritative: a remembered or fallback id that is no longer usable
+    (plan lock, retired model) stays out, and the live spelling wins over a stale casing.
+    """
+    live = {m["id"].casefold(): m["id"] for m in models or ()}
+    ids = [*load_state().get("recent", {}).get(name, []),
+           *(m["id"] for m in models or ()),
+           *(i for i, _ in FALLBACK_MODELS.get(name, []))]
     # Command Code's Claude and other models live behind different base URLs.
     same_route = lambda m: name != "commandcode" or m.startswith("claude-") == model_id.startswith("claude-")
-    return [m for m in dict.fromkeys(ids) if m != model_id and same_route(m)]
+    picks = []
+    for mid in dict.fromkeys(ids):
+        if mid.casefold() == (model_id or "").casefold() or not same_route(mid):
+            continue
+        if live:
+            if mid.casefold() not in live:
+                continue
+            mid = live[mid.casefold()]
+        picks.append(mid)
+    return picks
 
 
-def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
+def route_env(name, model_id):
+    """Environment that points Claude Code at this provider and model."""
     p = PROVIDERS[name]
+    ensure_key(name)
     if name != "official" and (not isinstance(model_id, str) or not model_id.strip()):
         die("A nonempty model ID is required.")
     # Command Code serves Claude over /messages and everything else over /chat/completions.
     fmt = "openai" if name == "commandcode" and not model_id.startswith("claude-") else p["format"]
-    if name in ("opencode-go", "opencode-zen", "commandcode"):
-        # Only typed ids can miss: the menu lists usable models only.
-        known = [m["id"] for m in get_models(name)]
-        if known and model_id not in known:
-            warn(f"'{model_id}' is not in {name}'s usable model list - Claude Code may reject it.")
     env = {}
     if name == "official":
-        run_claude = not no_run
+        pass  # the normal claude.ai login: no route variables
     elif fmt == "anthropic":
         token = ""
-        if p.get("keyEnv"):
-            token = os.environ.get(p["keyEnv"]) or user_env(p["keyEnv"])
-            if not token:
-                die(f"{p['keyEnv']} is not set (it lives in your PowerShell profile).")
         if p.get("key"):
             key = auth_key(p["key"])
             if not key:
@@ -391,11 +885,13 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
         env["ANTHROPIC_AUTH_TOKEN"] = token
         if p.get("header") == "x-api-key":
             env["ANTHROPIC_CUSTOM_HEADERS"] = f"x-api-key: {token}"
+        if name == "opencode-go":
+            # Go answers 400 MissingSessionID without it; it routes a session's turns together.
+            env["ANTHROPIC_CUSTOM_HEADERS"] += f"\nx-opencode-session: {uuid.uuid4().hex}"
         if name == "opencode-zen":
             warn("opencode-zen bills the account balance (402 when empty); free models answer only the OpenCode client.")
         if name == "openrouter" and not model_id.startswith("anthropic/"):
             warn("Non-Claude models are experimental in Claude Code; usage is billed to OpenRouter, not your ChatGPT subscription.")
-        run_claude = not no_run
     else:
         key ="" if p["key"] in ("oauth", "cli") else auth_key(p["key"])
         if name == "openai-oauth":
@@ -404,13 +900,20 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
             warn("Each request runs cmdc once; tools use a text protocol, so expect slower, less reliable tool calls.")
         elif name == "gpt4free":
             ensure_g4f()  # the key is optional: only needed when g4f runs with --g4f-api-key
-        elif not key:
+        elif not key and name != "lmstudio":  # LM Studio runs keyless unless auth is on
             die(f"No API key configured for {name}.")
         ensure_anthropic_proxy()
         env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/{name}"
         env["ANTHROPIC_AUTH_TOKEN"] = key or name  # the adapter reads bearer or x-api-key
         env["ENABLE_TOOL_SEARCH"] = "false"
-        run_claude = not no_run
+
+    models = get_models(name) if name != "official" else []
+    if name in ("opencode-go", "opencode-zen", "commandcode", "commandcode-cli"):
+        # After the credentials: a missing key must fail without fetching the catalog.
+        # Only typed ids can miss: the menu lists usable models only.
+        known = {m["id"].casefold() for m in models}
+        if known and model_id.casefold() not in known:
+            warn(f"'{model_id}' is not in {name}'s usable model list - Claude Code may reject it.")
 
     if name != "official":
         # Gateways cannot perform Anthropic's server-side safety checks. Keep Claude's
@@ -426,27 +929,53 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
         env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] = env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = model_id
         # ponytail: CLAUDE_CODE_MAX_CONTEXT_TOKENS stays the chosen model's; a /model pick
         # with a smaller window can overflow before auto-compaction.
-        for slot, other in zip(PICKER_SLOTS, picker_models(name, model_id)):
+        for slot, other in zip(PICKER_SLOTS, picker_models(name, model_id, models)):
             env[slot] = env[slot + "_NAME"] = other
+        # Let Claude Code list the gateway's own models in /model (the adapter serves
+        # /<route>/v1/models). Not on the direct Command Code gateway: it advertises
+        # Claude models the plan locks, and its list cannot be filtered here.
+        if name != "commandcode":
+            env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
         # Claude Code keeps /effort off for model ids it does not know; the adapter
         # forwards it as reasoning_effort, Anthropic-format gateways get it as sent.
         env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] = "1"
-    if effort and run_claude:
-        claude_args = ["--effort", effort, *claude_args]
-
-    if name != "official":
-        context = next((m.get("context") for m in get_models(name) if m["id"] == model_id), None)
+        if name == "commandcode" and fmt == "anthropic":
+            # Command Code rejects mid-conversation system roles; retain reasoning controls.
+            for slot in ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", *PICKER_SLOTS]:
+                if slot in env:
+                    env[slot + "_SUPPORTED_CAPABILITIES"] = "thinking,adaptive_thinking,interleaved_thinking,effort,xhigh_effort,max_effort"
+        context = next((m.get("context") for m in models if m["id"] == model_id), None)
         if not (type(context) is int and context > 0):  # the menu's models.dev figure
             facts = {"commandcode-cli": "commandcode"}.get(name, name)
             context = (catalog._models_dev_facts(facts, model_id).get("limit") or {}).get("context")
         if type(context) is int and context > 0:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = context
+    return env
+
+
+def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autocompact=None, fallback=None, launch=None):
+    env = route_env(name, model_id)
+    # Every launch gets an id: subagent profiles and the optional route override are per session.
+    env["CC_LAUNCH_ID"] = launch = launch or os.environ.get("CC_LAUNCH_ID") or uuid.uuid4().hex
+    if name in FALLBACK_ROUTES:
+        # Names this launch to the adapter, so /fallback and /cc-model can change it mid-session.
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [env.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-launch: {launch}"]))
+        if fallback:
+            set_fallback(launch, fallback["provider"], fallback["model"])
+    env["CC_MAIN_PROVIDER"] = name
+    env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"
+    if autocompact:
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = autocompact
+    run_claude = not no_run
+    if effort and run_claude:
+        claude_args = ["--effort", effort, *claude_args]
 
     state = load_state()
     recent = state.get("recent", {})
     if model_id:
         recent[name] = list(dict.fromkeys([model_id, *recent.get(name, [])]))[:8]
-    save_state({**state, "provider": name, "model": model_id or "", "recent": recent, **({} if effort is None else {"effort": effort})})
+    save_state({**state, "provider": name, "model": model_id or "", "recent": recent, **({} if effort is None else {"effort": effort}),
+                **({} if autocompact is None else {"autocompact": autocompact})})
     # Clear every switcher variable this route does not set, so no earlier choice leaks in.
     write_apply(env, [v for v in CC_VARS + OAI_VARS if v not in env], run_claude, claude_args, model_id)
     print()
@@ -454,14 +983,1129 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None):
     print(f"Effective: ANTHROPIC_BASE_URL={env.get('ANTHROPIC_BASE_URL', '')}  "
           f"model={model_id or ''}  OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', '')}  "
           f"context={env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'Claude default')}  "
-          f"effort={effort or 'Claude default'} (/effort changes it)")
+          f"effort={effort or 'Claude default'} (/effort changes it)  "
+          f"autocompact={str(autocompact) + '%' if autocompact else 'Claude default'}  "
+          f"fallback={fallback['provider'] + '/' + fallback['model'] if fallback else 'off'} (/fallback changes it)")
+
+
+# ---------------- subagents ----------------
+# A Claude Code subagent shares its session's environment, so it cannot reach another
+# provider or compact at another threshold. Each profile in agents.json instead runs as
+# its own headless `claude -p`; `cc agents` writes a native subagent that relays to it.
+
+_STARTUP_LAUNCH = None  # the launch whose startup prompt runs in this process
+
+
+def session_launch():
+    """The launch a subagent edit belongs to: inside its Claude session or its startup prompt only.
+    apply.ps1 leaves CC_LAUNCH_ID in the terminal, and a later plain `cc agents` edits agents.json."""
+    launch = os.environ.get("CC_LAUNCH_ID", "")
+    return launch if launch and (os.environ.get("CLAUDECODE") == "1" or launch == _STARTUP_LAUNCH) else ""
+
+
+def _session_agents(launch=None):
+    """This launch's subagent overrides, or None when it has not edited any."""
+    launch = launch or session_launch()
+    if not launch:
+        return None
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            entry = json.load(f).get(launch)
+    except (OSError, ValueError):
+        return None
+    return entry.get("agents") if isinstance(entry, dict) and isinstance(entry.get("agents"), dict) else None
+
+
+def _latest_session_agents():
+    """The subagents the most recent launch picked, so the next startup prompt offers them again."""
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            entries = [e for e in json.load(f).values() if isinstance(e, dict) and isinstance(e.get("agents"), dict)]
+    except (OSError, ValueError, AttributeError):
+        return None
+    return max(entries, key=lambda e: e.get("at", 0))["agents"] if entries else None
+
+
+def all_agent_names():
+    """Profiles that some session or the global file still uses; none may be deleted."""
+    names = set()
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            names.update(json.load(f))
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            for entry in json.load(f).values():
+                if isinstance(entry, dict) and isinstance(entry.get("agents"), dict):
+                    names.update(entry["agents"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    return names
+
+
+def load_agents(session=True):
+    if session:
+        overrides = _session_agents()
+        if overrides is not None:
+            return check_agents(overrides)
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            agents = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except ValueError as e:
+        die(f"{AGENTS_FILE} is not valid JSON: {e}")
+    return check_agents(agents)
+
+
+def check_agents(agents):
+    for agent, a in agents.items():
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", agent):
+            die(f"Subagent name '{agent}' must use lowercase letters, digits and hyphens.")
+        if a.get("provider", "official") not in PROVIDERS:
+            die(f"Subagent '{agent}': unknown provider '{a.get('provider')}'.")
+        if a.get("effort") not in (None, *EFFORTS):
+            die(f"Subagent '{agent}': effort must be one of {', '.join(EFFORTS)}.")
+        pct = a.get("autocompact")
+        if pct is not None and not (type(pct) is int and 1 <= pct <= 100):
+            die(f"Subagent '{agent}': autocompact must be a whole percentage from 1 to 100.")
+        model = a.get("model")
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:\-@]*", model)):
+            die(f"Subagent '{agent}': invalid model id '{model}'.")
+        if not isinstance(a.get("args", []), list) or not all(isinstance(x, str) for x in a.get("args", [])):
+            die(f"Subagent '{agent}': args must be a list of Claude arguments.")
+    return agents
+
+
+def agent_summary(a):
+    return (f"{a.get('provider', 'official')}/{a.get('model') or 'Claude default'}, effort {a.get('effort') or 'default'}, "
+            f"autocompact {str(a['autocompact']) + '%' if a.get('autocompact') else 'default'}")
+
+
+def agent_options(args):
+    """Leading --provider/--model/--effort/--autocompact/--description options, and the rest."""
+    args, opts = list(args), {}
+    while args and args[0].split("=", 1)[0] in AGENT_FLAGS:
+        flag = args[0].split("=", 1)[0]
+        opts[flag[2:]] = take_option(args, flag)
+    return opts, args
+
+
+def with_options(a, opts):
+    """Profile `a` with option values applied; "default" removes model, effort or autocompact."""
+    a = dict(a)
+    for key, value in opts.items():
+        if key == "autocompact":
+            value = parse_pct(value)
+        if value in ("", "default") and key != "description":
+            a.pop(key, None)
+        else:
+            a[key] = value.lower() if key in ("provider", "effort") else value
+    if "provider" in opts and "model" not in opts:
+        a.pop("model", None)  # another provider's model id would not resolve
+    return a
+
+
+def agent_models(name=None, provider=None):
+    """Every model the profile's provider (or `provider`) offers, marking the profile's current pick."""
+    agents = load_agents()
+    if name is None:  # the slash command with no subagent named: list the profiles
+        if not agents:
+            print(f"No subagent profiles in {AGENTS_FILE}.")
+        for n, a in agents.items():
+            print(f"{n}: {agent_summary(a)}")
+        return
+    a = agents.get(name)
+    if a is None:
+        die(f"No subagent '{name}' in {AGENTS_FILE}.")
+    current = a.get("model")
+    print(f"{name}: {agent_summary(a)}")
+    if provider is not None and provider not in PROVIDERS:
+        die(f"Unknown provider '{provider}'.")
+    for m in get_models(provider or a.get("provider", "official")):
+        print(f"  {'*' if m['id'].casefold() == (current or '').casefold() else ' '} {m['id']}")
+
+
+def save_agents(agents):
+    check_agents(agents)
+    os.makedirs(CFG_DIR, exist_ok=True)
+    launch = session_launch()
+    if launch:
+        # The startup prompt and the in-session slash commands edit only this launch.
+        try:
+            with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        data = {k: v for k, v in data.items() if time.time() - (v.get("at", 0) if isinstance(v, dict) else 0) < 30 * 86400}
+        data[launch] = {"agents": agents, "at": time.time()}
+        write_json(SESSION_AGENTS_FILE, data, indent=1)
+    else:
+        write_json(AGENTS_FILE, agents, indent=2)
+    sync_agents()
+
+
+def subagents_menu():
+    """Edit subagent profiles from the startup prompt; Enter on "done" keeps them."""
+    agents = load_agents()
+    drafts = {}
+    selected = "done"
+    while True:
+        rows = ([("done", "done  keep these subagents")] + [(n, f"{n}  {agent_summary(a)}") for n, a in agents.items()]
+                + [("add", "add  a new subagent")])
+        picked = catalog._arrow_menu("Subagents", rows, selected, name="Subagents", back=True)
+        if picked in (None, "done"):
+            return
+        selected = picked
+        adding = picked == "add"
+        if adding:
+            picked = input("New subagent name (lowercase letters, digits, hyphens): ").strip().lower()
+            if not picked:
+                continue
+        while True:
+            if not adding:
+                try:
+                    action = catalog._arrow_menu(picked, [("edit", "edit"), ("remove", "remove")],
+                                                 "edit", name=picked, back=True)
+                except catalog.MenuBack:
+                    break
+                if action == "remove":
+                    del agents[picked]
+                    drafts.pop(picked, None)
+                    selected = "done"
+                    save_agents(agents)
+                    break
+            try:
+                edit_agent(agents, picked, draft=drafts.setdefault(picked, dict(agents.get(picked, {}))))
+            except catalog.MenuBack:
+                if not adding:
+                    continue
+            else:
+                selected = "done"
+            break
+
+
+def edit_agent(agents, agent, skip="", draft=None):
+    """Ask the subagent's provider, model, effort and auto-compact, then save."""
+    a = dict(agents.get(agent, {}))
+    draft = dict(a) if draft is None else draft
+    provider, model_id = draft.get("provider", "official"), draft.get("model")
+    effort, pct = draft.get("effort", ""), draft.get("autocompact")
+    step = 0
+    while step < 4:
+        try:
+            if step == 0:
+                picked = provider_menu(provider, "subagent", skip)
+                if picked == "skip":
+                    return
+                if picked not in PROVIDERS:
+                    die(f"Unknown provider '{picked}'.")
+                if picked != provider:
+                    model_id = None
+                provider = picked
+            elif step == 1:
+                model_id = model_menu(provider, model_id, "subagent")
+            elif step == 2:
+                effort = catalog._prompt_effort(EFFORTS, effort, "subagent", back=True)
+            else:
+                pct = autocompact_menu(pct, "subagent")
+            draft.update(provider=provider, model=model_id, effort=effort, autocompact=pct)
+            step += 1
+        except catalog.MenuBack:
+            if step == 0:
+                raise
+            step -= 1
+    agents[agent] = with_options(a, {"provider": provider, "model": model_id or "default",
+                                     "effort": effort or "default", "autocompact": pct or "default"})
+    save_agents(agents)
+
+
+def startup_subagent(navigation=None):
+    """Startup prompt after the main session's: one subagent's provider, model, effort, auto-compact.
+
+    With several profiles it first asks which; `cc agents` adds, removes and edits the rest."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return  # a piped run keeps its profiles, as the effort menu keeps its pick
+    agents = load_agents()
+    last = _latest_session_agents() if _session_agents() is None else None
+    if last and last != agents:
+        # Start from the last launch's picks; "keep" then keeps them for this launch too.
+        agents = check_agents(last)
+        with contextlib.redirect_stdout(open(os.devnull, "w")):  # the relay listing would break the menu
+            save_agents(agents)
+    navigation = {} if navigation is None else navigation
+    drafts = navigation.setdefault("drafts", {})
+    agent = navigation.get("agent")
+    if agent not in agents:
+        agent = next(iter(agents), "sub")
+    while True:
+        if len(agents) > 1:
+            agent = catalog._arrow_menu("Subagent", [(n, f"{n}  {agent_summary(a)}") for n, a in agents.items()],
+                                        agent, name="Subagent", back=True)
+        navigation["agent"] = agent
+        try:
+            edit_agent(agents, agent, skip=f"keep {agent_summary(agents[agent]) if agent in agents else 'no subagent'}",
+                       draft=drafts.setdefault(agent, dict(agents.get(agent, {}))))
+        except catalog.MenuBack:
+            if len(agents) > 1:
+                continue
+            raise
+        return
+
+
+def _context_entries(path, seen=None):
+    """Materialize native fork references without changing either source transcript."""
+    seen = set() if seen is None else seen
+    path = Path(path).resolve()
+    if path in seen:
+        raise ValueError("cyclic worker context")
+    seen.add(path)
+    with path.open(encoding="utf-8") as handle:
+        entries = (json.loads(line) for line in handle if line.strip())
+        first = next(entries, None)
+        if not isinstance(first, dict):
+            raise ValueError("empty worker context")
+        parent_id, cutoff = first.get("parentSessionId"), first.get("parentLastUuid")
+        if first.get("type") == "fork-context-ref":
+            uuid.UUID(parent_id)
+            parent = path.parents[2] / (parent_id + ".jsonl")
+            found = False
+            for entry in _context_entries(parent, seen):
+                yield entry
+                if entry.get("uuid") == cutoff:
+                    found = True
+                    break
+            if not found:
+                raise ValueError("previous fork's parent context cutoff is unavailable")
+        else:
+            entries = itertools.chain([first], entries)
+            parent_id, cutoff = first.get("sessionId"), None
+        linked = False
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") == "fork-context-ref":
+                raise ValueError("invalid worker context record")
+            entry = dict(entry)
+            if entry.get("message"):
+                entry["isSidechain"] = False
+                entry.pop("agentId", None)
+                if parent_id:
+                    entry["sessionId"] = parent_id
+                if cutoff and not linked:
+                    entry["parentUuid"] = cutoff
+                linked = True
+            yield entry
+
+
+@contextlib.contextmanager
+def _restorable_context(source):
+    path = Path(source)
+    if not path.is_absolute():
+        uuid.UUID(source)
+        yield source
+        return
+    # Always snapshot the source: a live parent may append records during restoration.
+    with tempfile.TemporaryDirectory(prefix="cc-worker-context-") as directory:
+        restored = Path(directory) / "context.jsonl"
+        with restored.open("w", encoding="utf-8") as handle:
+            for entry in _context_tail(list(_context_entries(path))):
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        yield str(restored)
+
+
+CONTEXT_BUDGET = 100_000  # tokens of parent conversation a worker inherits; cmdc re-sends it uncached every step
+
+
+def _is_prompt(entry):
+    """A user turn the person typed: a safe place to start a conversation (no tool_result without its call)."""
+    message = entry.get("message") or {}
+    if entry.get("type") != "user" or entry.get("isMeta") or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return isinstance(content, str) or (isinstance(content, list) and all(
+        isinstance(b, dict) and b.get("type") == "text" for b in content))
+
+
+def _context_tail(entries, budget=CONTEXT_BUDGET):
+    """The newest messages that fit `budget` (about 4 characters a token), cut at a typed prompt."""
+    size, start = 0, None
+    for i in range(len(entries) - 1, -1, -1):
+        message = entries[i].get("message")
+        if message:
+            size += len(json.dumps(message.get("content"), ensure_ascii=False)) // 4
+        if _is_prompt(entries[i]):
+            if size > budget and start is not None:
+                break
+            start = i
+    if not start:
+        return entries  # it all fits, or no prompt to cut at
+    tail = [dict(entry) for entry in entries[start:]]
+    # Key points of the older history: the parent's latest compaction summary from before the cut, as the root.
+    summary = next((dict(e) for e in reversed(entries[:start]) if e.get("isCompactSummary") and e.get("uuid")), None)
+    tail[0]["parentUuid"] = summary["uuid"] if summary else None
+    if summary:
+        summary["parentUuid"] = None
+        tail.insert(0, summary)
+    return tail
+
+
+def run_agent(agent, prompt, opts=None, require_context=False):
+    require_context = require_context or bool(os.environ.get("CLAUDECODE") and os.environ.get("CC_AGENT_CHILD") != "1")
+    if require_context and opts:
+        die("Delegated workers use their configured profile; per-run route overrides are not allowed.")
+    a = load_agents().get(agent)
+    if a is None:
+        die(f"No subagent '{agent}' in {AGENTS_FILE}.")
+    a = check_agents({agent: with_options(a, opts or {})})[agent]  # this run only
+    if not prompt.strip():
+        die("The subagent task is empty.")
+    if require_context and not prompt.startswith(CONTEXT_PREFIX):
+        die("The relay omitted its context envelope; refusing a fresh-session fallback.")
+    context = None
+    if prompt.startswith(CONTEXT_PREFIX):
+        header, separator, prompt = prompt.partition("\n")
+        try:
+            context = json.loads(header[len(CONTEXT_PREFIX):])
+            if not separator or not isinstance(context, dict):
+                raise ValueError("missing task or context")
+            source = context["source"]
+            uuid.UUID(context["token"])
+            mode = context["permission_mode"]
+            if mode not in ("default", "manual", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"):
+                raise ValueError("invalid permission mode")
+            if not (isinstance(source, str) and source and (
+                    (Path(source).is_absolute() and Path(source).is_file() and Path(source).suffix == ".jsonl")
+                    or str(uuid.UUID(source)) == source.lower())):
+                raise ValueError("context transcript is unavailable")
+        except (ValueError, KeyError, TypeError) as exc:
+            die(f"Invalid subagent context: {exc}; refusing a fresh-session fallback.")
+        if not prompt.strip():
+            die("The subagent task is empty.")
+    name, model_id = a.get("provider", "official"), a.get("model")
+    route = route_env(name, model_id)
+    effort = a.get("effort")
+    efforts = model_efforts(name, model_id) if model_id else None
+    if effort and efforts is not None and effort not in efforts:
+        # Some subscription models reject --effort (MiMo answers with exit 1 otherwise).
+        warn(f"{model_id} has no '{effort}' reasoning effort; running at its default.")
+        effort = None
+    # Drop the parent session's route and compaction threshold, and the marker that makes
+    # Claude refuse to start inside another Claude Code session.
+    env = {k: v for k, v in os.environ.items()
+           if k not in (*CC_VARS, *OAI_VARS, "CLAUDECODE", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")}
+    env.update({k: str(v) for k, v in route.items()})
+    if route.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/"):
+        # The local adapter rereads this profile's effort per request, so effort changes reach running workers.
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [route.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-worker-profile: {agent}", f"x-cc-launch: agent-{agent}"]))
+    env.update(CC_AGENT_CHILD="1", CC_WORKER_PROFILE=agent, CC_MAIN_PROVIDER=name,
+               CLAUDE_CODE_FORK_SUBAGENT="0")
+    if a.get("autocompact"):
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(a["autocompact"])
+    # No MCP servers: each worker otherwise starts its own codegraph that indexes and watches the repo.
+    command = ["claude", "-p", "--strict-mcp-config", *(["--model", model_id] if model_id else []),
+                *(["--effort", effort] if effort else []), *a.get("args", [])]
+    if context:
+        conflicts = {"--resume", "-r", "--continue", "-c", "--session-id", "--fork-session"}
+        if any(arg.split("=", 1)[0] in conflicts for arg in a.get("args", [])):
+            die("Context-managed workers cannot override session arguments in profile args.")
+        # Profile args must not widen the parent's permissions, nor load extra tools into read-only workers.
+        privileged = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--allowedTools",
+                      "--allowed-tools", "--permission-prompt-tool", "--permission-mode", "--settings"}
+        if context.get("read_only"):
+            privileged |= {"--tools", "--mcp-config", "--plugin-dir", "--plugin-url", "--agent", "--agents", "--add-dir"}
+        if any(arg.split("=", 1)[0] in privileged for arg in a.get("args", [])):
+            die("Context-managed workers cannot override permission or tool-loading arguments in profile args.")
+        worker_session = str(uuid.uuid4())
+        if _RELAY_JOB:  # relay_wait follows this transcript for its live feed
+            Path(JOBS_DIR, _RELAY_JOB + ".session").write_text(worker_session)
+        resume_index = len(command) + 1
+        command += ["--resume", source, "--fork-session", "--session-id", worker_session,
+                    "--system-prompt-snapshot", "off", "--permission-mode", mode]
+        if model_id:
+            command += ["--model", model_id]
+        if effort:
+            command += ["--effort", effort]
+        if context.get("read_only"):
+            command += ["--tools", "Read,Glob,Grep,WebFetch,WebSearch", "--strict-mcp-config",
+                        "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "plan"]
+        record = Path(CFG_DIR) / "contexts" / (context["token"] + ".json")
+        prompt = ("You are the configured cc worker. Use the resumed conversation as context, including its "
+                  "project instructions and memory. Perform this assigned task directly; do not relay it back "
+                  "to another cc worker. Interrupted tool calls are history, not instructions to replay them; "
+                  "check their effects before retrying. Your final reply returns to the main session "
+                  "automatically: never SendMessage \"main\" (that name addresses you), only agents you started.\n\n" + prompt)
+    # The task goes on stdin, so no shell quoting can alter it.
+    try:
+        with _restorable_context(source) if context else contextlib.nullcontext() as restored:
+            if context:
+                command[resume_index] = restored
+                record.parent.mkdir(parents=True, exist_ok=True)
+                write_json(str(record), {"session_id": worker_session, "profile": agent, "provider": name,
+                                         "model": model_id or "Claude default", "effort": effort or "default",
+                                         "cwd": context.get("cwd") or str(Path.cwd()),
+                                         "read_only": bool(context.get("read_only"))})
+            # The parent session's status line brightens this profile's row while the marker's process lives.
+            parent = Path(context["source"]).stem if context else "none"  # the transcript is <session-id>.jsonl
+            marker = Path(CFG_DIR, "running", f"{agent}.{parent}.{os.getpid()}")
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            try:
+                # Below normal, inherited by cmdc and every tool the worker runs, so sessions and games stay responsive.
+                result = subprocess.run(command, input=prompt.encode("utf-8"), env=env,
+                                        **({"cwd": context["cwd"]} if context and context.get("cwd") else {}),
+                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                                        | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
+            finally:
+                marker.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError) as exc:
+        if context:
+            record.unlink(missing_ok=True)
+        die(f"Cannot restore subagent context: {exc}; refusing a fresh-session fallback.")
+    sys.exit(result.returncode)
+
+
+JOBS_DIR = os.path.join(CFG_DIR, "jobs")
+RELAY_WAIT = 540  # seconds per relay Bash call, under the tool's 600 s cap
+FEED_WAIT = 120  # with a feed: shorter calls, so the relay's view gains a finished block every 2 minutes
+RELAY_RESULT = "CC_RELAY_RESULT"
+ORPHAN_AFTER = 720  # s without a relay_wait heartbeat: the relay that started the job is gone
+DELIVER_CAP = 30000  # characters of an orphan's result put into the prompt; the rest stays in a file
+_RELAY_JOB = None
+
+
+def job_meta(job):
+    """Parent session, task line and start time of a relay job; derived from its .in once, then kept."""
+    meta = Path(JOBS_DIR, job + ".meta")
+    try:
+        return json.loads(meta.read_text())
+    except (OSError, ValueError):
+        pass
+    source = Path(JOBS_DIR, job + ".in")
+    try:
+        text, started = source.read_bytes().decode("utf-8", "replace"), source.stat().st_mtime
+    except OSError:
+        return {}
+    header, _, task = text.partition("\n")
+    try:
+        context = json.loads(header[len(CONTEXT_PREFIX):]) if header.startswith(CONTEXT_PREFIX) else {}
+        parent, token = Path(context["source"]).stem, str(uuid.UUID(context["token"]))
+    except (ValueError, KeyError, TypeError):
+        parent, token = "", ""
+    info = {"parent": parent, "token": token, "task": _feed_text(task, 80), "started": started}
+    try:
+        meta.write_text(json.dumps(info))
+    except OSError:
+        pass
+    return info
+
+
+def orphan_jobs(parent):
+    """This session's relay jobs whose relay stopped waiting: still running, or finished and unread."""
+    found = []
+    for out in sorted(Path(JOBS_DIR).glob("*.out")) if parent and os.path.isdir(JOBS_DIR) else []:
+        job, meta = out.stem, job_meta(out.stem)
+        if not re.fullmatch(r"[0-9a-f-]{36}", job) or meta.get("parent") != parent:
+            continue
+        wait = Path(JOBS_DIR, job + ".wait")
+        try:
+            beat = wait.stat().st_mtime
+        except OSError:
+            beat = meta.get("started") or 0
+        if time.time() - beat < ORPHAN_AFTER:
+            continue
+        session = ""
+        try:
+            session = Path(JOBS_DIR, job + ".session").read_text().strip()
+        except OSError:
+            try:  # jobs started before .session existed: the worker's context record names it
+                session = json.loads(Path(CFG_DIR, "contexts", meta.get("token", "") + ".json").read_text())["session_id"]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        found.append({"job": job, **meta, "done": Path(JOBS_DIR, job + ".rc").exists(), "session": session})
+    return found
+
+
+def _close_job(job):
+    for name in (".out", ".rc", ".feed", ".session", ".meta", ".wait", ".nag"):
+        try:
+            Path(JOBS_DIR, job + name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def deliver_orphans(parent):
+    """Hook text for the main session: finished orphan results (each delivered once) and the ones still running."""
+    notes = []
+    for item in orphan_jobs(parent):
+        if not item["done"]:
+            notes.append(f"- cc worker job {item['job']} ({item['task']}) is still running after its relay stopped "
+                         "waiting. Its result reaches you on a later prompt when it ends; do not start the task again.")
+            continue
+        try:
+            text = Path(JOBS_DIR, item["job"] + ".out").read_bytes().decode("utf-8", "replace")
+            code = Path(JOBS_DIR, item["job"] + ".rc").read_text().strip() or "1"
+        except OSError:
+            continue
+        kept = ""
+        if len(text) > DELIVER_CAP:
+            full = Path(JOBS_DIR, item["job"] + ".result.txt")
+            full.write_text(text, encoding="utf-8")
+            text, kept = text[-DELIVER_CAP:], f" Only its last {DELIVER_CAP} characters are below; the whole result is in {full}."
+        notes.append(f"- cc worker job {item['job']} ({item['task']}) finished with exit code {code} after its relay "
+                     f"stopped waiting.{kept} Its result:\n{text.strip()}")
+        _close_job(item["job"])
+    return ("Uncollected cc worker results for this session:\n" + "\n".join(notes)) if notes else ""
+
+
+def _feed_text(value, width=160):
+    text = " ".join(str(value).split())
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def _feed_result(content):
+    if isinstance(content, list):
+        content = "\n".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    lines = [line for line in str(content or "").splitlines() if line.strip()]
+    if not lines:
+        return "  ⎿  (no output)"
+    more = f" … +{len(lines) - 1} lines" if len(lines) > 1 else ""
+    return f"  ⎿  {_feed_text(lines[0], 140)}{more}"
+
+
+def _feed_tool(block):
+    args = block.get("input") if isinstance(block.get("input"), dict) else {}
+    main = next((args[k] for k in ("command", "file_path", "pattern", "url", "query", "description", "prompt")
+                 if args.get(k)), "")
+    return f"● {block.get('name', 'tool')}({_feed_text(main, 120)})"
+
+
+def _feed_stamp(entry):
+    try:
+        return time.mktime(time.strptime(entry["timestamp"][:19], "%Y-%m-%dT%H:%M:%S"))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def feed_lines(entries, state):
+    """The worker's transcript entries as Claude Code's own transcript lines; state carries the
+    last timestamp (for "Thought for Ns") and the message ids already shown."""
+    out, shown = [], set(state.setdefault("shown", []))
+    for entry in entries:
+        stamp, message = _feed_stamp(entry), entry.get("message") or {}
+        content = message.get("content")
+        if entry.get("type") == "assistant" and isinstance(content, list):
+            for block in content:
+                key = f"{message.get('id')}:{block.get('type')}:{block.get('id') or len(block.get('text') or block.get('thinking') or '')}"
+                if key in shown:
+                    continue  # one streamed message is written as several entries
+                shown.add(key)
+                if block.get("type") == "thinking":
+                    took = f" for {int(stamp - state['last'])}s" if stamp and state.get("last") else ""
+                    thought = _feed_text(block.get("thinking") or "", 200)
+                    out.append(f"✻ Thought{took}" + (f"\n  ∴ {thought}" if thought else ""))
+                elif block.get("type") == "text" and (block.get("text") or "").strip():
+                    out.append("● " + _feed_text(block["text"], 400))
+                elif block.get("type") == "tool_use":
+                    out.append(_feed_tool(block))
+        elif entry.get("type") == "user" and isinstance(content, list):
+            out += [_feed_result(b.get("content")) for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+        if stamp and entry.get("type") in ("user", "assistant"):
+            state["last"] = stamp
+    state["shown"] = list(shown)[-500:]
+    return out
+
+
+def _feed(job, state, quiet):
+    """Prints the worker's new transcript lines; a lone "✻ Thinking…" when it has waited on the model a while."""
+    try:
+        session = Path(JOBS_DIR, job + ".session").read_text().strip()
+        uuid.UUID(session)
+        path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{session}.jsonl"))
+        with path.open("rb") as handle:
+            handle.seek(state.get("offset", 0))
+            data = handle.read()
+    except (OSError, ValueError, StopIteration):
+        return False
+    complete = data[:data.rfind(b"\n") + 1]  # a line still being written waits for the next pass
+    state["offset"] = state.get("offset", 0) + len(complete)
+    entries = []
+    for line in complete.splitlines():
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    lines = feed_lines(entries, state)
+    if lines:
+        state["thinking"] = False
+        print("\n".join(lines), flush=True)
+    elif quiet >= 15 and not state.get("thinking"):
+        state["thinking"] = True
+        print("✻ Thinking…", flush=True)
+    return bool(lines)
+
+
+def relay_start(agent, prompt, feed=False):
+    """Run the worker as a detached job so no single relay call hits the Bash timeout."""
+    job = str(uuid.uuid4())
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    if feed:
+        # Relays written before the feed would paste its lines into their reply; only new ones ask for it.
+        Path(JOBS_DIR, job + ".feed").write_text("{}")
+    for stale in Path(JOBS_DIR).glob("*"):
+        try:
+            if time.time() - stale.stat().st_mtime > 86400:
+                stale.unlink()
+        except OSError:
+            pass
+    Path(JOBS_DIR, job + ".in").write_bytes(prompt)
+    job_meta(job)  # .in is gone once the worker ends; the status line and hook still need its parent
+    with open(os.path.join(JOBS_DIR, job + ".out"), "wb") as out:
+        subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "agent-job", agent, job],
+                         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                         | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    relay_wait(job)
+
+
+def relay_job(agent, job):
+    """The detached half: run the worker, then record its exit code for relay_wait."""
+    if not re.fullmatch(r"[0-9a-f-]{36}", job):
+        die("Invalid job id.")
+    global _RELAY_JOB
+    _RELAY_JOB = job
+    code = 1
+    try:
+        prompt = Path(JOBS_DIR, job + ".in").read_bytes().decode("utf-8")
+        run_agent(agent, prompt, require_context=True)
+        code = 0
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    finally:
+        sys.stdout.flush()
+        Path(JOBS_DIR, job + ".in").unlink(missing_ok=True)
+        Path(JOBS_DIR, job + ".rc").write_text(str(code))
+
+
+def relay_wait(job):
+    """Print the job's output once it ends, or a pending line telling the relay to wait again."""
+    if not re.fullmatch(r"[0-9a-f-]{36}", job):
+        die("Invalid job id.")
+    rc, out = Path(JOBS_DIR, job + ".rc"), Path(JOBS_DIR, job + ".out")
+    if not out.exists():
+        die(f"No relay job {job}.")
+    feed = Path(JOBS_DIR, job + ".feed")
+    state = None
+    if feed.exists():
+        try:
+            state = json.loads(feed.read_text() or "{}")
+        except ValueError:
+            state = {}
+    deadline, quiet = time.time() + (FEED_WAIT if state is not None else RELAY_WAIT), 0
+    beat = Path(JOBS_DIR, job + ".wait")  # a relay is waiting: orphan_jobs leaves the job alone
+    beat.touch()
+    while not rc.exists() and time.time() < deadline:
+        time.sleep(1)
+        beat.touch()
+        if state is not None:
+            quiet = 0 if _feed(job, state, quiet) else quiet + 1
+    if state is not None:
+        _feed(job, state, 0)  # the lines written just before the worker ended
+        feed.write_text(json.dumps(state))
+    if not rc.exists():
+        print(f"CC_RELAY_PENDING {job}")
+        return
+    if state is not None:
+        print(RELAY_RESULT)
+    sys.stdout.write(out.read_bytes().decode("utf-8", errors="replace"))
+    code = int(rc.read_text() or 1)
+    for done in (out, rc, feed, *(Path(JOBS_DIR, job + name) for name in (".session", ".meta", ".wait", ".nag"))):
+        try:
+            done.unlink(missing_ok=True)
+        except OSError:
+            pass  # the job process may still hold its output open for a moment; relay_start sweeps it
+    sys.exit(code)
+
+
+def sync_agents():
+    """Write one native relay subagent per profile and list them."""
+    agents = load_agents()
+    # The relay file is shared by every session, so its text comes from the shared profile: one
+    # session's route must never relabel another session's picker. Session-only names still get
+    # a relay, and each session reads its own settings from its overlay at call time.
+    written = {**agents, **load_agents(session=False)}
+
+    def label(a):
+        route = f"{a.get('provider', 'official')}/{a.get('model') or 'Claude default'}"
+        return route, f"effort {a.get('effort') or 'default'}, autocompact {str(a['autocompact']) + '%' if a.get('autocompact') else 'default'}"
+
+    os.makedirs(AGENTS_DIR, exist_ok=True)
+    for file in Path(AGENTS_DIR).glob("cc-*.md"):
+        # Only relays this command wrote, for profiles that no session or the global file uses.
+        if file.stem[3:] not in all_agent_names() and re.search(r'cc-switch\.py" agent(?:-relay)? ', file.read_text(encoding="utf-8", errors="replace")):
+            file.unlink()
+    for agent, a in written.items():
+        # No route here: each session may run this profile elsewhere, and its context hook names that route.
+        description = (a.get("description") or "General task") + f" Runs the task on this session's cc-{agent} route; inherits the supplied conversation context and project memory. Use this configured worker for delegation."
+        body = f"""---
+name: cc-{agent}
+description: {json.dumps(description)}
+model: haiku
+tools: Bash
+---
+You relay one task to another Claude Code process. Do not do the task yourself.
+
+Run this with the Bash tool and a 600000 ms timeout, putting the entire prompt you were given,
+including its leading CC_CONTEXT_V1 line, complete and unchanged, between the two markers.
+That line supplies the previous conversation and worker context; never omit or rewrite it:
+
+python "$HOME/.config/cc/cc-switch.py" agent-relay --feed {agent} <<'CC_TASK_END'
+<the complete prompt, including its context line>
+CC_TASK_END
+
+The output shows the worker's progress live, then ends with `CC_RELAY_PENDING <job>` while the
+worker is still running: run `python "$HOME/.config/cc/cc-switch.py" agent-wait <job>` with a
+600000 ms timeout, and repeat until the output no longer ends with that line. Never start the
+task a second time. Do not comment on the progress lines between calls.
+
+When it finishes, reply with everything after the `{RELAY_RESULT}` line verbatim, and nothing
+before it (the progress lines are for the user's view only). If it fails, reply with the error
+text; do not retry.
+"""
+        with open(os.path.join(AGENTS_DIR, f"cc-{agent}.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+        shown_route, shown_settings = label(agents.get(agent, a))
+        print(f"  cc-{agent}: {shown_route}, {shown_settings}")
+    # Relays read agents.json on every call, so only a new or removed profile needs a reload.
+    source = SESSION_AGENTS_FILE if session_launch() else AGENTS_FILE
+    print(f"{len(agents)} subagent(s) in {AGENTS_DIR} from {source}. Model, effort and autocompact apply to the "
+          "next worker call; running local-adapter workers take a new effort on their next request. "
+          "New or removed profiles appear after a Claude Code restart.")
+
+
+def _agent_files(data, agent_id):
+    if not isinstance(agent_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", agent_id):
+        raise ValueError("invalid previous worker id")
+    transcript = Path(data["transcript_path"])
+    folder = transcript.parent.parent if transcript.parent.name == "subagents" else transcript.with_suffix("")
+    return folder / "subagents" / f"agent-{agent_id}"
+
+
+def _recorded_context(transcript, strict=False):
+    """Find the latest cc worker without loading the conversation into memory."""
+    context = None
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                entry = json.loads(line)
+                if entry.get("type") != "user":
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                texts = [content] if isinstance(content, str) else [
+                    c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text"]
+                for text in texts:
+                    if text.startswith(CONTEXT_PREFIX):
+                        context = json.loads(text.split("\n", 1)[0][len(CONTEXT_PREFIX):])
+        if context is None:
+            return {}  # a legacy relay did not record an external worker session
+        uuid.UUID(context["token"])
+        path = Path(CFG_DIR) / "contexts" / (context["token"] + ".json")
+        with path.open(encoding="utf-8") as saved:
+            record = json.load(saved)
+        if not isinstance(record, dict):
+            raise ValueError("invalid saved worker context")
+        uuid.UUID(record["session_id"])
+    except (OSError, ValueError, KeyError, TypeError):
+        if strict:
+            raise ValueError("latest worker context is unavailable") from None
+        return {}
+    return record
+
+
+def agent_hook(data):
+    """Enforce configured worker types without bypassing native permission rules."""
+    if os.environ.get("CC_AGENT_CHILD") == "1" or data.get("tool_name") not in ("Agent", "Task"):
+        return {}
+
+    def deny(reason):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                        "permissionDecisionReason": reason}}
+
+    try:
+        profiles = load_agents()
+        if not profiles:
+            return deny("No configured cc subagents. Configure `cc agents`; native delegation is blocked.")
+        choices = ", ".join("cc-" + name for name in profiles)
+        original = data.get("tool_input") or {}
+        kind = original.get("subagent_type") or "general-purpose"
+        if kind not in {"cc-" + name for name in profiles}:
+            return deny(f"Use configured subagent {choices} instead of {kind}. Resubmit the complete task "
+                        "with that subagent_type. For an old worker keep its resume id: cc will hand off its "
+                        "transcript into the configured worker. Do not retry a native type. Specialized "
+                        "read-only/custom agents must keep their original restrictions; use main-session "
+                        "read-only tools when no matching configured worker exists.")
+        context = {"token": str(uuid.uuid4()), "source": data.get("transcript_path"),
+                   "permission_mode": data.get("permission_mode") or "default"}
+        updated = dict(original)
+        if original.get("resume"):
+            path = _agent_files(data, original["resume"])
+            with path.with_suffix(".meta.json").open(encoding="utf-8") as handle:
+                previous = json.load(handle).get("agentType")
+            if previous not in ("fork", "general-purpose", "claude", "Explore", "Plan", kind):
+                return deny("Cannot migrate a custom agent without its instructions and memory. "
+                            "Give the configured worker a self-contained task and its original agent definition.")
+            history = path.with_suffix(".jsonl")
+            if previous == kind:
+                saved = _recorded_context(history, strict=True)
+                if saved and saved.get("profile") != kind[3:]:
+                    raise ValueError("previous worker belongs to another profile")
+                context["source"] = saved.get("session_id") or str(history)
+                context["read_only"] = bool(saved.get("read_only"))
+                if saved.get("cwd"):
+                    context["cwd"] = saved["cwd"]
+            else:
+                context["source"] = str(history)
+                context["read_only"] = previous in ("Explore", "Plan")
+                updated.pop("resume", None)  # fresh relay; the real worker resumes an isolated copy of the old context
+            if not history.is_file():
+                raise ValueError("previous worker transcript is unavailable")
+            if not context.get("cwd"):
+                with history.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        entry = json.loads(line)
+                        if entry.get("cwd"):
+                            context["cwd"] = entry["cwd"]
+                            break
+        if not context.get("source"):
+            raise ValueError("previous conversation transcript is unavailable")
+        if context["permission_mode"] == "plan":
+            context["read_only"] = True
+        # The relay model retypes this line and tends to collapse JSON's doubled backslashes; Windows takes "/".
+        for key in ("source", "cwd"):
+            if isinstance(context.get(key), str):
+                context[key] = context[key].replace("\\", "/")
+        prompt = original.get("prompt") or "Continue the assigned task using the previous worker context."
+        # A retried call may already carry an envelope. Always rebuild it from current hook fields.
+        if prompt.startswith(CONTEXT_PREFIX):
+            prompt = prompt.partition("\n")[2]
+        updated["prompt"] = CONTEXT_PREFIX + json.dumps(context, separators=(",", ":")) + "\n" + prompt
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
+    except (Exception, SystemExit):
+        return deny("Previous worker context or cc configuration could not be verified. Native delegation "
+                    "is blocked; give a configured cc worker a self-contained task after checking its context.")
+
+
+SLASH_COMMANDS = {"fallback": "fallback", "cc-model": "route"}  # answered by `cc <subcommand> <args>` as typed
+SLASH_FLAGS = {"subagent-model": ("--model", "<model-id|default>"),
+               "subagent-effort": ("--effort", "<low|medium|high|xhigh|max|default>"),
+               "subagent-autocompact": ("--autocompact", "<1-100|default>")}
+
+
+def hook_command(data):
+    """Answer /subagent-* here, before expansion, so they change settings without a model turn."""
+    name = str(data.get("command_name") or "").split(":")[-1].lstrip("/")
+    if name not in SLASH_FLAGS and name not in SLASH_COMMANDS:
+        return {}
+    flag, values = SLASH_FLAGS.get(name, ("", ""))
+    words, note = str(data.get("command_args") or "").split(), ""
+    if name in SLASH_COMMANDS:
+        args = [SLASH_COMMANDS[name], *words]
+    elif len(words) > 2:
+        args, note = ["agents", "models"], f"Usage: /{name} <subagent> {values}"
+    elif words and words[0].lower() not in load_agents():
+        # Never create a profile by accident.
+        args, note = ["agents", "models"], f"No subagent '{words[0]}'."
+    elif len(words) == 2:
+        args = ["agents", "set", words[0], flag, words[1]]
+    else:
+        # The subagent-picker mod answers these first with a menu; this only runs without it.
+        args = ["agents", "models", *words[:1]]
+        note = f"Usage: /{name} {words[0] if words else '<subagent>'} {values}"
+    result = subprocess.run([sys.executable, "-B", os.path.abspath(__file__), *args], capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=60,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    text = "\n".join(filter(None, [note, result.stdout.strip(), result.stderr.strip()]))
+    return {"decision": "block", "reason": text or f"/{name} produced no output.",
+            "hookSpecificOutput": {"hookEventName": "UserPromptExpansion"}}
+
+
+def subagent_stop(data):
+    """Keep a cc relay alive when its worker outlived the first agent-relay call.
+
+    A weak relay model sometimes treats CC_RELAY_PENDING as its final answer. One
+    blocked stop per job hands it the agent-wait command without looping forever."""
+    kind = data.get("agent_type")
+    path = data.get("agent_transcript_path")
+    if not isinstance(kind, str) or not kind.startswith("cc-") or not isinstance(path, str):
+        return {}
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    for job in reversed(re.findall(r"CC_RELAY_PENDING ([0-9a-f-]{36})", text)):
+        out, rc = Path(JOBS_DIR, job + ".out"), Path(JOBS_DIR, job + ".rc")
+        if rc.exists() or not out.exists():
+            continue  # finished, or already collected and cleaned
+        nag = Path(JOBS_DIR, job + ".nag")
+        if nag.exists():
+            return {}  # one nudge per job; never trap the relay in a loop
+        try:
+            nag.touch()
+        except OSError:
+            pass
+        return {"decision": "block",
+                "reason": (f"The cc worker job {job} is still running. Do not finish. Run this with the Bash tool "
+                           f"and a 600000 ms timeout:\n\npython \"$HOME/.config/cc/cc-switch.py\" agent-wait {job}\n\n"
+                           "Repeat until the output no longer ends with CC_RELAY_PENDING. Never start the task again.")}
+    return {}
+
+
+def hook_context(data):
+    if os.environ.get("CC_AGENT_CHILD") == "1":
+        return {}
+    profiles = load_agents()
+    choices = "; ".join(f"cc-{name}: {agent_summary(a)}" for name, a in profiles.items())
+    orphans = deliver_orphans(data.get("session_id") or "") if isinstance(data.get("session_id"), str) else ""
+    return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
+            "additionalContext": "Delegate only through configured cc subagents: " + (choices or "none configured") +
+            ". Native fork/general-purpose/custom worker calls are blocked. Use a cc-* subagent_type and "
+            "a complete task; cc copies previous conversation/project memory. To continue an old worker, "
+            "use a configured cc-* type with its resume id; do not restart it as a native fork."
+            + ("\n\n" + orphans if orphans else "")}}
+
+
+def _worker_tokens(record):
+    """The external worker's own token use, read from its transcript: the relay only counts its own."""
+    try:
+        uuid.UUID(record["session_id"])
+        path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{record['session_id']}.jsonl"))
+        seen, out, ctx, total, cached = set(), 0, 0, 0, 0
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"usage"' not in line:
+                    continue
+                message = json.loads(line).get("message") or {}
+                usage = message.get("usage") or {}
+                if message.get("id") in seen or not usage:
+                    continue  # one message spans several transcript lines
+                seen.add(message.get("id"))
+                out += usage.get("output_tokens") or 0
+                sent = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                ctx = sent or ctx  # a synthetic closing message reports zero usage
+                total += sent  # every request resends the context: this is what the quota pays for
+                cached += usage.get("cache_read_input_tokens") or 0
+    except (StopIteration, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    k = lambda n: f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+    hit = f" ({cached * 100 // total}% cached)" if total else ""
+    return f"ctx {k(ctx)} ↑ {k(total)}{hit} ↓ {k(out)}" if seen else ""
+
+
+def agent_statusline(data):
+    try:
+        profiles = load_agents()
+    except (Exception, SystemExit):
+        profiles = {}
+    columns = data.get("columns")
+    width = max(20, min(columns, 2000)) if type(columns) is int else 160
+    for task in data.get("tasks") or []:
+        if not isinstance(task, dict) or not task.get("id"):
+            continue
+        kind = task.get("agentType") or "unknown"
+        profile = profiles.get(kind[3:]) if isinstance(kind, str) and kind.startswith("cc-") else None
+        if isinstance(kind, str) and kind.startswith("cc-"):
+            saved = {}
+            try:
+                saved = _recorded_context(_agent_files(data, task["id"]).with_suffix(".jsonl"))
+            except (ValueError, KeyError, TypeError):
+                pass
+            if saved and saved.get("profile") != kind[3:]:
+                saved = {}
+            route = saved or profile
+            # Only what the row is for: the model doing the work, its usage, the task.
+            model = (route.get("model") or f"{route.get('provider', 'official')} default") if route else "route unavailable"
+            label = " · ".join(filter(None, [model, _worker_tokens(saved)]))
+        else:
+            label = task.get("model") or "model pending"
+        label += f" · {task.get('description') or ''}"
+        label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:width]
+        if task.get("status") == "running":
+            label = f"\x1b[1;97m{label}\x1b[0m"  # Claude dims every row; a running one stands out
+        yield {"id": task["id"], "content": label}
 
 
 def main():
+    args = sys.argv[1:]
+    if args[:1] in (["hook-agent"], ["hook-context"], ["hook-command"], ["agent-statusline"]):
+        try:
+            data = json.load(sys.stdin)
+            if not isinstance(data, dict):
+                raise ValueError("hook input must be an object")
+            if args[0] == "agent-statusline":
+                for row in agent_statusline(data):
+                    print(json.dumps(row))
+            else:
+                handler = {"hook-agent": agent_hook, "hook-command": hook_command}.get(args[0], hook_context)
+                print(json.dumps(handler(data)))
+        except (Exception, SystemExit):
+            if args[0] == "hook-agent":
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                      "permissionDecision": "deny", "permissionDecisionReason": "cc routing input is invalid; native fallback blocked."}}))
+        return
+    if args[:2] == ["agent-relay", "--feed"] and len(args) == 3:
+        return relay_start(args[2], sys.stdin.buffer.read(), feed=True)
+    if args[:1] == ["agent-relay"] and len(args) == 2:
+        return relay_start(args[1], sys.stdin.buffer.read())
+    if args[:1] == ["agent-wait"] and len(args) == 2:
+        return relay_wait(args[1])
+    if args[:1] == ["agent-job"] and len(args) == 3:
+        return relay_job(args[1], args[2])
+    if args[:1] in (["agent"], ["agent-relay"]) and len(args) >= 2:
+        # Before the apply-file cleanup: a relay must not touch a terminal's pending launch.
+        opts, task = agent_options(args[2:])
+        return run_agent(args[1], " ".join(task) or sys.stdin.buffer.read().decode("utf-8"), opts,
+                         require_context=args[0] == "agent-relay")
+    if args[:1] == ["fallback"]:
+        return fallback_command(args[1:])
+    if args[:1] == ["route"]:
+        return route_command(args[1:])
+    if args[:1] == ["hook-subagent-stop"]:
+        try:
+            data = json.load(sys.stdin)
+            print(json.dumps(subagent_stop(data if isinstance(data, dict) else {})))
+        except (Exception, SystemExit):
+            pass
+        return
+    if args[:2] == ["agents", "set"] and len(args) >= 3:
+        opts, rest = agent_options(args[3:])
+        if rest or not opts:
+            die(f"Usage: cc agents set <name> {' '.join(f + ' <value>' for f in AGENT_FLAGS)}")
+        agents = load_agents()
+        agents[args[2].lower()] = with_options(agents.get(args[2].lower(), {}), opts)
+        return save_agents(agents)
+    if args[:2] == ["agents", "models"] and len(args) in (2, 3, 4):
+        return agent_models(args[2].lower() if len(args) >= 3 else None, *args[3:])
+    if args == ["agents", "providers"]:
+        for n, p in PROVIDERS.items():
+            print(f"{n}	{p['label']}")
+        return
+    if args[:2] == ["agents", "remove"] and len(args) == 3:
+        agents = load_agents()
+        if agents.pop(args[2].lower(), None) is None:
+            die(f"No subagent '{args[2]}' in {AGENTS_FILE}.")
+        return save_agents(agents)
+    if args == ["agents"]:
+        quit_on_ctrl_c()
+        try:
+            subagents_menu()
+        except (KeyboardInterrupt, catalog.MenuBack):
+            print("No change.")
+            return
+        return sync_agents()
+    quit_on_ctrl_c()
     for f in (APPLY_FILE,):
         if os.path.exists(f):
             os.remove(f)
-    args = sys.argv[1:]
     no_run, pos = False, []
     while args:
         if args[0].lower() in ("-norun", "--norun"):
@@ -472,11 +2116,17 @@ def main():
         else:
             pos.append(args.pop(0))
     claude_args = args[1:] if args[:1] == ["--"] else args
+    autocompact = take_option(claude_args, "--autocompact")  # cc's own, not Claude's
+    autocompact = None if autocompact is None else parse_pct(autocompact)
     if no_run and claude_args:
         die("-NoRun cannot be combined with Claude launch arguments.")
     if not pos and claude_args in (["--help"], ["-h"]):
-        print("Usage: cc [provider] [model] [-NoRun] [Claude arguments]")
+        print("Usage: cc [provider] [model] [-NoRun] [--autocompact <1-100|default>] [Claude arguments]")
         print("cc --resume [session-id-or-name] | cc --continue | cc status")
+        print("cc agents (edit menu, then write subagents) | cc agents set <name> [--provider P] [--model M]")
+        print("    [--effort E|default] [--autocompact N|default] [--description D] | cc agents models <name> [provider]")
+        print("    | cc agents remove <name>")
+        print("cc agent <name> [same options, this run only] [task, else stdin]")
         print("Every launch, resume included, asks for the provider and model unless both are given.")
         return
 
@@ -487,23 +2137,69 @@ def main():
         print(f"  ANTHROPIC_MODEL    : {os.environ.get('ANTHROPIC_MODEL', '')}")
         print(f"  Context tokens     : {os.environ.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'Claude default')}")
         print(f"  OPENAI_BASE_URL    : {os.environ.get('OPENAI_BASE_URL', '')}")
+        print(f"  Auto-compact       : {os.environ.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'Claude default')}")
         if state:
             print(f"  Last chosen         : {state.get('provider')} / {state.get('model')}")
         return
 
     try:
-        name = pos[0].lower() if pos else provider_menu()
-        if name not in PROVIDERS:
+        name = pos[0].lower() if pos else None
+        if name is not None and name not in PROVIDERS:
             die(f"Unknown provider '{name}'. Valid: {', '.join(sorted(PROVIDERS))}, status")
-        model_id = pos[1] if len(pos) > 1 else model_menu(name)
+        model_id = pos[1] if len(pos) > 1 else None
         # Asked with the menus only; a typed `cc <provider> <model>` passes --effort itself.
-        effort = effort_menu() if len(pos) < 2 and not no_run and not any(
-            a == "--effort" or a.startswith("--effort=") for a in claude_args) else None
-    except KeyboardInterrupt:
+        menus = len(pos) < 2 and not no_run
+        effort = None
+        steps = ([] if pos else ["provider"]) + (["model"] if len(pos) < 2 else [])
+        if menus and not any(a == "--effort" or a.startswith("--effort=") for a in claude_args):
+            steps.append("effort")
+        if menus and autocompact is None:
+            steps.append("autocompact")
+        global _STARTUP_LAUNCH
+        launch = _STARTUP_LAUNCH = uuid.uuid4().hex
+        os.environ["CC_LAUNCH_ID"] = launch  # the startup subagent prompt edits this launch only
+        fallback, backing = None, False
+        if menus:
+            steps.append("fallback")
+        if menus:
+            steps.append("subagent")
+        subagent_navigation = {}
+        step = 0
+        while step < len(steps):
+            try:
+                if steps[step] == "provider":
+                    picked = provider_menu(name)
+                    if picked not in PROVIDERS:
+                        die(f"Unknown provider '{picked}'. Valid: {', '.join(sorted(PROVIDERS))}, status")
+                    if picked != name:
+                        model_id = None
+                    name = picked
+                elif steps[step] == "model":
+                    model_id = model_menu(name, model_id) if model_id else model_menu(name)
+                elif steps[step] == "effort":
+                    effort = effort_menu(effort)
+                elif steps[step] == "autocompact":
+                    autocompact = autocompact_menu(load_state().get("autocompact", "")
+                                                  if autocompact is None else autocompact)
+                elif steps[step] == "fallback":
+                    if name not in FALLBACK_ROUTES:  # only adapter routes can fall back
+                        step += -1 if backing else 1
+                        continue
+                    fallback = fallback_menu(name, fallback)
+                else:
+                    startup_subagent(subagent_navigation)
+                backing = False
+                step += 1
+            except catalog.MenuBack:
+                if step == 0:
+                    raise
+                backing = True
+                step -= 1
+    except (KeyboardInterrupt, catalog.MenuBack):
         print("No change.")  # a cancel is not a failure: the PowerShell wrapper must not throw
         return
 
-    apply(name, model_id, no_run, claude_args=claude_args, effort=effort)
+    apply(name, model_id, no_run, claude_args=claude_args, effort=effort, autocompact=autocompact, fallback=fallback)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ try:
             requests.clear()
             env['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:%s/%s' % (bridge.server_port, provider)
             command = [str(Path.home() / '.local/bin/claude.exe'), '--bare', '--safe-mode', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json', '--model', 'gpt-6-astra', '--tools', 'Read', '--allowedTools', 'Read', '--system-prompt', 'Use Read then respond.', '-p', 'Read the fixture then finish.']
-            result = subprocess.run(command, cwd=tmp, env=env, capture_output=True, text=True, timeout=55)
+            result = subprocess.run(command, cwd=tmp, env=env, capture_output=True, text=True, timeout=55, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             assert result.returncode == 0, (result.returncode, result.stderr[-1500:])
             assert 'MOCK_ADAPTER_OK' in result.stdout, (result.stdout[-1500:], result.stderr[-1500:])
             usage = json.loads(result.stdout)['modelUsage']

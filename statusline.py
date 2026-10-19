@@ -69,16 +69,56 @@ def last_usage(path):
 
 
 STATE_DIR = os.path.expanduser("~/.claude/statusline")
+# Reasoning steps, coolest to hottest. The five named levels are the ramp's anchors; the ladder
+# a provider publishes for one model (it may add `off` or `ultra`) is scaled onto that ramp.
 EFFORT_HUES = {"low": 200, "medium": 140, "high": 50, "xhigh": 25, "max": 350}  # cool -> hot
+EFFORT_ORDER = ["off", "low", "medium", "high", "xhigh", "max", "ultra"]
+EFFORT_RAMP = [EFFORT_HUES[level] for level in ("low", "medium", "high", "xhigh", "max")]
 CLAUDE_HUE = 15  # Anthropic clay
 WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d", "month": "mo", "seven_day_opus": "7d opus", "seven_day_sonnet": "7d sonnet"}
 CLAUDE_ALIASES =("claude", "opus", "sonnet", "haiku", "fable", "mythos")
 
 
-def effort_indicator(effort, dim=False, label=True):
-    level = list(EFFORT_HUES).index(effort) + 1 if effort in EFFORT_HUES else 0
+def effort_hue(fraction):
+    """0 = the coolest hue, 1 = the hottest, sampled along the low -> max ramp."""
+    t = min(max(float(fraction), 0.0), 1.0) * (len(EFFORT_RAMP) - 1)
+    i = min(int(t), len(EFFORT_RAMP) - 2)
+    step = t - i
+    a = colorsys.hsv_to_rgb(EFFORT_RAMP[i] / 360, 1, 1)
+    b = colorsys.hsv_to_rgb(EFFORT_RAMP[i + 1] / 360, 1, 1)
+    r, g, blue = (a[c] + (b[c] - a[c]) * step for c in range(3))
+    return colorsys.rgb_to_hsv(r, g, blue)[0] * 360
+
+
+def effort_ladder(levels):
+    """The model's reasoning steps in order, or the usual Claude ladder when it publishes none."""
+    if levels == []:
+        return []  # the model takes no adjustable reasoning effort
+    if not isinstance(levels, (list, tuple)):
+        return list(EFFORT_HUES)  # an unreadable cache must not invent a ladder
+    names = [name for name in levels if isinstance(name, str)]
+    if not names:
+        return list(EFFORT_HUES)
+    rank = {name: i for i, name in enumerate(EFFORT_ORDER)}
+    return [name for _, name in sorted(enumerate(names), key=lambda pair: (rank.get(pair[1], len(EFFORT_ORDER)), pair[0]))]
+
+
+def effort_indicator(effort, dim=False, label=True, levels=None):
+    """One circle per step up the model's own reasoning ladder, in that ladder's own colour.
+
+    `levels` is the list the provider publishes for this model: None keeps the usual Claude
+    ladder, and [] renders `default`, since the model has no adjustable reasoning effort.
+    """
+    if levels == []:
+        return DIM + "default" + RESET
+    ladder = effort_ladder(levels)
+    if not effort or effort not in ladder:
+        level, hue = 0, 280
+    else:
+        rank = ladder.index(effort)
+        level, hue = rank + 1, effort_hue(rank / (len(ladder) - 1) if len(ladder) > 1 else 1.0)
     text = (effort + " " if label else "") + "●" * level
-    return rgb(EFFORT_HUES.get(effort, 280), val=0.55 if dim else 0.9) + text + RESET
+    return rgb(hue, val=0.55 if dim else 0.9) + text + RESET
 
 
 def load_json(name):
@@ -96,6 +136,41 @@ def save_json(name, data):
             json.dump(data, f)
     except OSError:
         pass
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def effort_levels(provider, model_id):
+    """The reasoning efforts the provider publishes for this model; None when it publishes none.
+
+    Local reads only: Codex's model cache for the OpenAI route, the copy cc-switch.py keeps of
+    Command Code's catalog for its two. The status line never waits on a network call.
+    """
+    if not model_id:
+        return None
+    key = str(model_id).casefold()
+    if provider == "openai-oauth":
+        rows = read_json(os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"),
+                                      "models_cache.json")).get("models") or ()
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("slug", "")).casefold() == key:
+                levels = row.get("supported_reasoning_levels")
+                if not isinstance(levels, list):
+                    return None
+                return [e["effort"] for e in levels if isinstance(e, dict) and isinstance(e.get("effort"), str)]
+        return None
+    if provider in ("commandcode", "commandcode-cli"):
+        models = read_json(os.path.expanduser("~/.config/cc/efforts.json")).get("models") or {}
+        for mid, levels in models.items():
+            if str(mid).casefold() == key:
+                return levels if isinstance(levels, list) else None
+    return None
 
 
 def claude_json():
@@ -261,13 +336,28 @@ CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "comm
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
-def subagent_sources():
-    """{quota source: [cc subagent names]} for cc's own-process subagents."""
+def cc_agents():
+    """This session's subagent profiles, or the shared defaults."""
     try:
         with open(os.path.expanduser("~/.config/cc/agents.json"), encoding="utf-8") as f:
             agents = json.load(f)
     except (OSError, ValueError):
         return {}
+    launch = os.environ.get("CC_LAUNCH_ID")
+    if launch:
+        try:
+            with open(os.path.expanduser("~/.config/cc/session-agents.json"), encoding="utf-8") as f:
+                entry = json.load(f).get(launch) or {}
+            if isinstance(entry.get("agents"), dict):
+                return entry["agents"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    return agents if isinstance(agents, dict) else {}
+
+
+def subagent_sources():
+    """{quota source: [cc subagent names]} for cc's own-process subagents."""
+    agents = cc_agents()
     found = {}
     for name, a in agents.items() if isinstance(agents, dict) else ():
         source = CC_QUOTA_SOURCES.get((a if isinstance(a, dict) else {}).get("provider", "official"))
@@ -277,12 +367,22 @@ def subagent_sources():
 
 
 def cc_profiles():
+    return {name: profile for name, profile in cc_agents().items() if isinstance(profile, dict)}
+
+
+def cc_orphans(session_id):
+    """This session's relay jobs nobody waits on any more (cc-switch's orphan_jobs), with the worker's tokens."""
+    if not isinstance(session_id, str) or not session_id:
+        return []
     try:
-        with open(os.path.expanduser("~/.config/cc/agents.json"), encoding="utf-8") as handle:
-            profiles = json.load(handle)
-        return {name: profile for name, profile in profiles.items() if isinstance(profile, dict)} if isinstance(profiles, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        return [{**item, "tokens": cc._worker_tokens({"session_id": item["session"]}) if item["session"] else ""}
+                for item in cc.orphan_jobs(session_id)]
+    except Exception:  # a status line never fails over an optional row
+        return []
 
 
 def cc_routing_enabled():
@@ -310,9 +410,13 @@ def provider_quota(source, now):
         return saved, saved.get("at") if saved.get("tried", 0) > saved.get("at", 0) else None
     try:
         q = {**QUOTA_FETCHERS[source](), "at": now}
-    except Exception:
-        save_json(name, {**saved, "tried": now})  # don't retry (and block 3s) every render
-        return saved, saved.get("at")
+    except Exception as e:
+        # Keep why it failed: an expired key otherwise just makes the bars vanish.
+        body = e.read().decode("utf-8", "replace") if isinstance(e, urllib.error.HTTPError) else ""
+        error = ("key expired" if "api_key_expired" in body else f"auth failed (HTTP {e.code})" if getattr(e, "code", None) in (401, 403)
+                 else "no credentials" if isinstance(e, (OSError, KeyError)) and not isinstance(e, urllib.error.URLError) else "usage unavailable")
+        save_json(name, {**saved, "tried": now, "error": error})  # don't retry (and block 3s) every render
+        return {**saved, "error": error}, saved.get("at")
     save_json(name, q)
     return q, None
 
@@ -403,8 +507,8 @@ def render(d):
     hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split("/")[0].encode()) % 360
     head = f"{rgb(hue, 0.45)}{BOLD}{model.get('display_name') or mid or '?'}{RESET}"
     if effort:
-        # Colored word plus one dot per level, cool for low effort, hot for max.
-        head += " " + effort_indicator(effort)
+        # One circle per step up the model's own reasoning ladder, cool for low, hot for its top.
+        head += " " + effort_indicator(effort, levels=effort_levels(cc_main_provider(None), mid))
     if ultra:
         # Rainbow letters; the start hue drifts with the clock so each refresh shimmers.
         word, start = "ULTRACODE", time.time() * 40
@@ -446,7 +550,8 @@ def render(d):
         # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on the last reply.
         q = load_json(f"ratelimit-{cc_main_provider(None)}.json")
         limits, cached_at, plan = q.get("rate_limits") or {}, q.get("at"), None
-    parts += quota_parts(plan, extra, limits, cached_at, now)
+    shown = quota_parts(plan, extra, limits, cached_at, now)
+    parts += shown or ([f"{YELLOW}{q['error']}{RESET}"] if source and source != "anthropic" and q.get("error") else [])
     # The session's fallback route (cc fallback); yellow while it served within the last 5 minutes.
     launch = os.environ.get("CC_LAUNCH_ID")
     fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
@@ -454,6 +559,10 @@ def render(d):
         served = load_json(f"fallback-{launch}.json").get("at") or 0
         label = f"fallback {fallback['provider']}/{fallback['model']}"
         parts.append(f"{YELLOW}↪ {label} active{RESET}" if now - served < 300 else f"{DIM}↪ {label}{RESET}")
+    # /cc-model's per-session provider override, shown beside the launch route.
+    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
+    if route:
+        parts.append(f"{CYAN}model {route['provider']}/{route['model']}{RESET}")
 
     # Configured targets are visible even on official Claude and even on the same provider.
     # Live worker rows separately identify native workers and the real cc relay/worker route.
@@ -473,7 +582,8 @@ def render(d):
                       'gemini': 'Gemini', 'ollama-cloud': 'Ollama', 'lmstudio': 'LM Studio'}
             route = 'same provider' if provider == main_provider else labels.get(provider, provider)
             effort = profile.get('effort')
-            dots = effort_indicator(effort, dim=True, label=False) if effort else DIM + 'default' + RESET
+            dots = (effort_indicator(effort, dim=True, label=False, levels=effort_levels(provider, mid))
+                    if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
             seg = [f"{DIM}↳ {name}:{RESET} {rgb(hue, 0.45, 0.6)}{target}{RESET} {dots} · {route}"]
             sub_source = CC_QUOTA_SOURCES.get(provider)
@@ -487,7 +597,12 @@ def render(d):
                 else:
                     q, sub_cached = provider_quota(sub_source, now)
                 plan = (q.get('plan') or '').removeprefix('ChatGPT ')
-                seg += quota_parts(plan, q.get('extra'), q.get('rate_limits') or {}, sub_cached, now)
+                shown = quota_parts(plan, q.get('extra'), q.get('rate_limits') or {}, sub_cached, now)
+                seg += shown or ([f"{YELLOW}{q['error']}{RESET}"] if q.get('error') else [])
+            elif not sub_source and provider != main_provider:
+                # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on its last reply.
+                q = load_json(f"ratelimit-{provider}.json")
+                seg += quota_parts(None, None, q.get('rate_limits') or {}, q.get('at'), now)
             sub_lines.append(SEP.join(seg))
     for sub_source, names in ({} if configured or child or source == "anthropic" else subagent_sources()).items():
         if sub_source == source:
@@ -504,6 +619,12 @@ def render(d):
         seg = quota_parts(q.get("plan"), q.get("extra"), q.get("rate_limits") or {}, sub_cached, now)
         if seg:
             sub_lines.append(f"{DIM}↳ subagent {', '.join(names)}{RESET}" + SEP + SEP.join(seg))
+
+    for item in [] if child else cc_orphans(d.get("session_id")):
+        state = (f"{BOLD}result unread{RESET} · reaches Claude with your next message" if item["done"]
+                 else "running, relay gone")
+        tokens = f" · {DIM}{item['tokens']}{RESET}" if item.get("tokens") else ""
+        sub_lines.append(f"{DIM}↳ worker {item['job'][:8]}:{RESET} {state} · {item.get('task') or ''}{tokens}")
 
     cost = d.get("cost") or {}
     if is_third_party(model.get("id")):

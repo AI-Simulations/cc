@@ -32,7 +32,9 @@ python -B install-resume.py
 
 This copies the runtime and checks to `~/.config/cc`, backs up existing files,
 and registers the launcher in the default Windows PowerShell and PowerShell 7
-profiles under `~/Documents`. Run the installer from the checkout, not from
+profiles under `~/Documents`. It also installs the status line and global Claude
+delegation hooks, preserving unrelated settings, hooks, and permission rules.
+Run the installer from the checkout, not from
 the installation directory. Redirected Documents folders or custom host profiles
 require adding the function below to the profile shown by `$PROFILE` manually:
 
@@ -95,7 +97,16 @@ Command Code reads `CMD_API_KEY` or the existing login in
 `~/.commandcode/auth.json`. Its Messages endpoint serves Claude models only; other
 models go through the local adapter's Chat Completions route. The menu hides models
 that serve neither endpoint (for example Responses-only), and a typed model outside
-that list gets a warning.
+that list gets a warning. Both Command Code routes also hide models the account's plan
+cannot use: the menu reads the active plan from the billing subscription and each model's
+`minimumPlan` (or its category when that is absent) from the client catalog, exactly as
+`cmdc` ranks them (Go, GOAT, Pro, Provider, Max, Ultra). Purchased or free credits unlock
+every model; when the plan or catalog cannot be read, every advertised model stays listed.
+The `/model` picker also gets up to three extra entries from that live, plan-filtered list,
+and on adapter routes Claude Code discovers the gateway's own `/v1/models` (served by the
+adapter). A remembered pick the plan no longer allows stays out. Claude Code keeps only
+Claude-named ids from that discovery, so a non-Claude model is chosen by typing its id in
+`/model` or with `/subagent-model`.
 
 `commandcode-cli` serves the Command Code subscription (the Go plan works only
 through its own CLI). The adapter route `http://127.0.0.1:10532/commandcode-cli`
@@ -193,7 +204,146 @@ custom route sets `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1`, because Claude Code hide
 for model ids it does not know. Claude sends it as `output_config.effort`; Anthropic-format
 gateways receive it unchanged, and the adapter forwards it as `reasoning_effort` (`max`
 becomes `xhigh`, OpenAI's top level) or as `cmdc --effort` on the `commandcode-cli` route.
-A model without reasoning levels may reject it; pick `default` there.
+Command Code publishes each model's `reasoningEfforts`; a model that publishes none (MiMo
+V2.6 Pro, for example) is run without an effort so `cmdc` does not reject it. Other providers
+do not publish this, so their models keep whatever level you pick.
+
+## Fallback route
+
+Off by default. Sessions on an adapter route (gemini, gpt4free, lmstudio, nvidia, ollama-cloud,
+openai-oauth) can name a second route that the adapter retries once when the first answers 429,
+402 or 5xx: pick it in the launch menus (after auto-compact) or change it mid-session with
+`/fallback <provider> <model>`, `/fallback off`, or `/fallback` to show it. The setting belongs to
+that launch only (`~/.config/cc/fallbacks.json`). The fallback model answers under the session's
+model name, so the transcript does not show the switch.
+
+A key out of quota can also rotate: put spare keys, comma-separated, in `<KEY>_API_KEYS`
+(e.g. `GOOGLE_API_KEYS`); a key that got 429/402 rests until its retry-after.
+
+### In-session model route
+
+`/cc-model <provider> <model>` switches an adapter session to another provider/model without
+restarting Claude Code; `/cc-model` opens a provider then model menu, and `/cc-model off`
+returns to the route chosen at launch. The adapter applies it per launch id, so other sessions
+and workers keep their own route. Only adapter routes are listed (`python cc-switch.py route
+routes`); a session that connects directly (official, Command Code, MiniMax, OpenCode,
+OpenRouter) must be relaunched to change provider.
+The model picker's default sort is the aggregate score, and rows missing a displayed fact
+(`ctx ?`, `$?`, `AA ?`) are always listed last. If a provider has no key, `cc` asks for one
+once and stores it in `~/.config/cc/keys.json` (gitignored, user-only permissions).
+
+## Subagents on other providers
+
+Claude Code subagents share their session's environment, so they cannot reach a different
+provider or use a different auto-compact threshold. `cc` instead runs each profile in
+`~/.config/cc/agents.json` as its own headless `claude -p`:
+
+```json
+{
+  "cheap": {"provider": "openai-oauth", "model": "gpt-6-luna", "effort": "low",
+            "autocompact": 60, "args": ["--permission-mode", "auto"],
+            "description": "Bulk mechanical edits."},
+  "deep":  {"provider": "official", "model": "claude-opus-5-5", "effort": "max", "autocompact": 85}
+}
+```
+
+`provider` defaults to `official`; `model`, `effort` (`low` to `max`), `autocompact`
+(percentage for `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) and `args` (extra Claude arguments) are
+optional. The child process drops the parent's route variables and auto-compact override, so
+an unset `autocompact` means Claude's default, not the main session's value.
+
+```powershell
+cc agents                    # edit profiles in a menu, then write ~/.claude/agents/cc-<name>.md
+cc agents set cheap --provider nvidia --model deepseek-ai/deepseek-v4-pro --effort low --autocompact 60
+cc agents set cheap --autocompact default   # "default" removes model, effort or autocompact
+cc agents remove cheap
+cc agent cheap "task text"   # run one task directly; without text the task is read from stdin
+cc agent cheap --model other-id --autocompact 40 "task"   # options before the task apply to this run only
+```
+
+Every menu launch (provider and model not typed) asks the main session's provider, model,
+effort and auto-compact, then the subagent's provider, model, effort and auto-compact, and
+rewrites the relays. Edits made at the startup prompt or with the `/subagent-*` commands are
+stored per launch in `~/.config/cc/session-agents.json`, so another session keeps its own
+profiles; `cc agents` from a plain shell edits the shared defaults in `agents.json`. The first row of the subagent provider menu, `skip`, keeps the profiles
+unchanged. With no profile the answers create `sub`; with several, a menu first asks which one.
+`cc agents` opens a list to add, edit or remove profiles. Esc returns to the previous
+selection prompt, keeping the answers already chosen; at the first prompt it cancels.
+Changing the provider clears the previous provider's model. This also applies to the
+subagent prompts and the profile editor. Ctrl+C at any prompt, model loading
+included, quits with "No change."; saves replace whole files, so nothing is left half-written.
+Changing a profile's provider without a model drops the old model id. `--description` sets the
+text the main session reads when choosing the subagent.
+
+Three slash commands in every Claude Code session wrap the same CLI:
+
+```text
+/subagent-model <name> [model|default]        # no model: list every model the provider offers
+/subagent-effort <name> [low|medium|high|xhigh|max|default]
+/subagent-autocompact <name> [1-100|default]
+```
+
+They run `cc agents models <name>` (plan-filtered, current pick marked with `*`) and
+`cc agents set`, so their output matches the terminal. With no subagent name they list the
+profiles. The model command lists the provider's live catalog rather than a fixed set.
+
+The main session's auto-compact threshold is set the same way: the startup prompt asks for it
+after the effort and remembers the pick, or `cc <provider> <model> --autocompact 70` sets it for
+that launch (`default` clears it). `cc` owns `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and clears it on
+launches that set none, so a value set elsewhere in your profile does not carry over.
+
+Each generated `cc-<name>` subagent is a Haiku relay with Bash only. It sends the task on
+stdin to `cc agent <name>` and returns the output verbatim. On a custom main route, the Haiku
+slot is the main model. The relay still uses that session's provider; the actual task runs
+on the configured worker's provider/model/effort. Removing a profile also removes its relay.
+One relay run is limited by the Bash tool's 10-minute timeout. If the worker outlives that
+call, the installed `SubagentStop` hook blocks the relay once with the `agent-wait` command,
+so a relay model that would otherwise stop at `CC_RELAY_PENDING` keeps waiting. `agent-wait`
+is bounded by the same 10-minute tool timeout and can be repeated.
+
+The global hooks tell new and existing sessions to use the configured `cc-*` types and block
+native fork, general-purpose, and custom delegation instead of silently falling back to
+the main model. They preserve normal permission evaluation. User settings and hooks reload
+in existing sessions; startup environment changes require a new launch. An already-running
+native request keeps its original model until it finishes. Disabled hooks or clients that
+do not load user settings cannot enforce this policy.
+
+The hook adds a context envelope to each task. The relay must pass it unchanged. The worker
+resumes an isolated copy of the parent conversation, reloads current project instructions
+and project auto-memory, and uses the configured route. Original transcripts are never
+rewritten. To continue an old native worker, use a configured `cc-*` type with its old
+`resume` ID: cc restores its parent context up to the original fork cutoff plus its own
+subsequent work. Repeated configured-worker resumes use the latest worker session and
+working directory. Missing or invalid context fails explicitly without starting fresh.
+Interrupted tool calls are context, not replayed commands; workers must check effects before
+retrying them. A direct `cc agent <name> "task"` without an envelope still starts fresh.
+
+Old Explore/Plan workers retain a read-only tool set, no MCP tools, and plan permissions.
+Unknown custom-agent migrations are blocked because their role, tool policy, hooks, and
+private agent memory cannot safely be inferred from a transcript. Supply their definition
+and relevant memory in a self-contained task, preserving their restrictions. Legacy cc
+relays created before context records existed can recover only their available relay
+transcript, not a previously unrecorded external worker conversation. Context-window and
+provider tool support still apply; these checks do not guarantee model quality.
+
+The main status line always lists configured worker provider/model/effort, including
+official main sessions and profiles without quota APIs. It explicitly marks `same provider`
+when applicable, for example `↳ sub: gpt-6.1-sol xhigh · openai-oauth`. Quota bars are omitted
+when they duplicate the main account. Different account quota bars remain visible; model,
+provider, and plan labels are shortened. Effort draws one circle per step up that model's own
+reasoning ladder — the provider publishes it (Command Code's `reasoningEfforts`, Codex's
+`supported_reasoning_levels`) and `~/.config/cc/efforts.json` caches it for the status line — and
+colours it on the same cool-to-hot ramp, so a model that tops out at `high` shows three filled
+circles in the hottest colour while `high` on a full ladder stays at three fifths. A model with
+no adjustable effort renders `default`. The worker row reuses the main model's mapping at lower
+brightness, for example `↳ sub: 6.1 sol ●●●● · OAuth`. A failed quota fetch names its cause
+(`key expired`, `auth failed`) instead of dropping the bars; adapter routes show the rate-limit
+windows the adapter last saw. Agent rows show only the model doing the work (the recorded or
+configured worker route, never the native relay model), the worker's token use and the task;
+running rows are drawn bright. Existing native rows
+keep their actual native model; changing a profile does not relabel those agents. Worker
+session IDs and route snapshots are local files under `~/.config/cc/contexts`, excluded from
+Git; they contain no prompts or credentials.
 
 ## Verification
 
@@ -201,11 +351,14 @@ A model without reasoning levels may reject it; pick `default` there.
 python -B test_cc_switch.py
 python -B test_cc_resume.py
 python -B test_cc_proxy.py
+python -B test_cc_relay.py
+python -B test_statusline.py
+python -B test_cc_session.py
 python -B critic_mock_check.py
 ```
 
-Run these commands from the checkout. The first three checks run offline with
-fake credentials and fake Claude and Codex commands. The optional fourth check
+Run these commands from the checkout. The first six checks run offline with
+fake credentials and fake Claude and Codex commands. The optional last check
 requires Claude Code at `~/.local/bin/claude.exe` and uses local mock providers.
 It tests credential isolation, model filtering, environment switching, shell
 quoting, cleanup, invalid input, returning to official Claude, OAuth/NVIDIA Claude

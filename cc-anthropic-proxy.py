@@ -1,4 +1,5 @@
 """Loopback-only Messages adapter for cc's OpenAI-format providers (stdlib)."""
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import queue
@@ -11,6 +12,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.environ.get("AI_SUITE_DIR") or str(Path(__file__).resolve().parents[1] / "ai-suite"))
@@ -23,11 +25,24 @@ UPSTREAMS = {
     "nvidia": "https://integrate.api.nvidia.com/v1",
     "commandcode": "https://api.commandcode.ai/provider/v1",
     "gpt4free": "http://127.0.0.1:1337/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "ollama-cloud": "https://ollama.com/v1",
+    "lmstudio": "http://127.0.0.1:1234/v1",
 }
+# The status line reads ratelimit-<route>.json from its own state folder.
+RATE_DIR = os.path.expanduser("~/.claude/statusline")
+RATE_RE = re.compile(r"x-ratelimit-(limit|remaining|reset)-(requests|tokens)(-1h)?$", re.I)
+DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
+# (route, key) -> when a key that hit 429/402 may be tried again.
+COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 9}
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 18}
+# MiMo also closes with `</tool_call_<hash>>`, or not at all at the end of its reply.
+TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call[^>]*>|$)", re.S)
+XML_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.S)
+XML_PARAMETER_RE = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.S)
+JSONISH_RE = re.compile(r"-?\d+(?:\.\d+)?|true|false|null|\[.*\]|\{.*\}", re.S)
 TOOL_PROTOCOL = """You are the model behind a client application that runs tools for you.
 Your own built-in tools are disabled: never call them, and never claim to have run anything yourself.
 Ignore the working directory and environment your own instructions describe; the client's system prompt describes the real ones.
@@ -53,8 +68,10 @@ def content_parts(content):
             url = source["url"] if source["type"] == "url" else (
                 f"data:{source['media_type']};base64,{source['data']}")
             result.append({"type": "image_url", "image_url": {"url": url}})
-        elif kind in ("thinking", "redacted_thinking"):
-            # Provider-specific signatures cannot be replayed to another API.
+        elif kind in ("thinking", "redacted_thinking", "tool_addition", "tool_removal"):
+            # Provider-specific signatures cannot be replayed to another API. Claude Code
+            # records MCP/connector tools it added mid-session as content blocks; they are
+            # tool-list bookkeeping, not text (the active tool list arrives in `tools`).
             continue
         else:
             raise ValueError(f"Unsupported content block: {kind}")
@@ -68,7 +85,9 @@ def to_chat(body):
         raise ValueError("messages must be a nonempty list")
     messages = []
     if body.get("system"):
-        messages.append({"role": "system", "content": content_parts(body["system"])})
+        system = content_parts(body["system"])
+        if system:  # bookkeeping-only blocks must not become an empty system message
+            messages.append({"role": "system", "content": system})
     for message in body["messages"]:
         role = message["role"]
         if role not in ("user", "assistant", "system"):
@@ -126,6 +145,13 @@ def to_chat(body):
     if effort:
         request["reasoning_effort"] = effort
     return request
+
+
+def cache_key(body):
+    """One prompt_cache_key per Claude Code session (its metadata.user_id names the session),
+    so the Codex backend sends each turn to the cache the previous turn filled; None without one."""
+    user = (body.get("metadata") or {}).get("user_id")
+    return hashlib.sha256(user.encode()).hexdigest()[:32] if isinstance(user, str) and user else None
 
 
 def openai_effort(body):
@@ -273,7 +299,9 @@ def to_prompt(body):
         tools = json.dumps([{k: t.get(k) for k in ("name", "description", "input_schema")} for t in body["tools"]])
         sections.append(TOOL_PROTOCOL.format(tools=tools, choice=rule))
     if body.get("system"):
-        sections.append(f"<system>\n{cli_text(body['system'])}\n</system>")
+        system = cli_text(body["system"])
+        if system:  # bookkeeping-only blocks leave no empty section
+            sections.append(f"<system>\n{system}\n</system>")
     for message in body["messages"]:
         content = message["content"]
         lines = []
@@ -284,7 +312,7 @@ def to_prompt(body):
             elif kind == "tool_result":
                 error = ' is_error="true"' if block.get("is_error") else ""
                 lines.append(f'<tool_result id="{block["tool_use_id"]}"{error}>\n{cli_text(block.get("content", ""))}\n</tool_result>')
-            elif kind not in ("thinking", "redacted_thinking"):
+            elif kind not in ("thinking", "redacted_thinking", "tool_addition", "tool_removal"):
                 lines.append(cli_text([block]))
         sections.append(f"<{message['role']}>\n" + "\n".join(lines) + f"\n</{message['role']}>")
     sections.append("Write the next assistant turn only.")
@@ -337,14 +365,43 @@ def native_calls(content, tools):
     return calls, skipped
 
 
+def _loads_unclosed(raw):
+    """json.loads, forgiving the one or two final braces MiMo sometimes drops from a call."""
+    for tail in ("", "}", "}}"):
+        try:
+            return json.loads(raw + tail)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_call(raw):
+    """A text tool call as {name, input}: our JSON protocol, or the XML form MiMo sometimes falls back to
+    (<function=Bash><parameter=command>...</parameter></function>)."""
+    call = _loads_unclosed(raw)
+    if call is not None:
+        return call
+    function = XML_FUNCTION_RE.match(raw)
+    if not function:
+        return None
+    args = {}
+    for key, value in XML_PARAMETER_RE.findall(function.group(2)):
+        if JSONISH_RE.fullmatch(value.strip()):
+            try:
+                value = json.loads(value)  # numbers, flags and lists keep their JSON types
+            except ValueError:
+                pass
+        args[key] = value
+    return {"name": function.group(1), "input": args}
+
+
 def from_cli(text, tokens, stop, model, native=(), tools=()):
     calls, skipped = native_calls(native, tools)
     if skipped:
         text += f"\n\n(Command Code's own tool {', '.join(map(str, skipped))} has no match among this client's tools.)"
     for raw in TOOL_CALL_RE.findall(text):
-        try:
-            call = json.loads(raw)
-        except ValueError:
+        call = _parse_call(raw)
+        if call is None:
             continue
         if isinstance(call, dict) and isinstance(call.get("name"), str) and isinstance(call.get("input", {}), dict):
             calls.append({"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex, "name": call["name"], "input": call.get("input", {})})
@@ -364,8 +421,11 @@ def cmdc_events(body):
     # --max-turns 1: one model call; if the model reaches for cmdc's own tools, it exits 8.
     args = [commandcode_executable(), "-p", "--output-format", "json", "--model", body["model"], "--max-turns", "1",
             "--skip-onboarding", "--no-skills", "--no-session", "--no-auto-update"]
-    if openai_effort(body):
-        args += ["--effort", openai_effort(body)]
+    # cmdc takes Claude's own effort names (low..max); `off`/`max` come straight from the
+    # catalog, so no OpenAI spelling is applied here.
+    effort = (body.get("output_config") or {}).get("effort")
+    if isinstance(effort, str) and effort and effort_supported(CLI_ROUTE, body["model"], effort):
+        args += ["--effort", effort]
     flags = background_process_options()
     # Neutral directory, prompt on stdin (Windows caps argv at 32k), as ai_suite's _run_cli.
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -485,6 +545,196 @@ def cli_stream(body):
     yield {"type": "message_stop"}
 
 
+_cc_switch = None
+
+
+def reset_seconds(value, default=60.0):
+    """Seconds until a rate-limit window resets: OpenAI sends "6m0s", Nous plain seconds,
+    OpenRouter epoch milliseconds."""
+    value = (value or "").strip()
+    try:
+        number = float(value)
+    except ValueError:
+        parts = DURATION_RE.findall(value)
+        if not parts:
+            return default
+        return sum(float(n) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit] for n, unit in parts)
+    if number > 1e12:
+        return max(0.0, number / 1000 - time.time())
+    if number > 1e9:
+        return max(0.0, number - time.time())
+    return number
+
+
+def record_rate_limits(route, headers):
+    """Saves the x-ratelimit-* windows an upstream reported, for the status line's quota bars."""
+    windows = {}
+    for name, value in (headers or {}).items():
+        match = RATE_RE.match(name)
+        if match:
+            label = {"requests": "req", "tokens": "tok"}[match[2].lower()] + (" 1h" if match[3] else "")
+            windows.setdefault(label, {})[match[1].lower()] = value
+    now, limits = time.time(), {}
+    for label, w in windows.items():
+        try:
+            limit, left = float(w["limit"]), float(w["remaining"])
+        except (KeyError, ValueError):
+            continue
+        if limit > 0:
+            limits[label] = {"used_percentage": max(0, min(100, round(100 - left * 100 / limit))),
+                             "resets_at": now + reset_seconds(w.get("reset"), 0) if w.get("reset") else None}
+    if not limits:
+        return
+    try:
+        os.makedirs(RATE_DIR, exist_ok=True)
+        path = os.path.join(RATE_DIR, f"ratelimit-{route}.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"at": now, "rate_limits": limits}, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass  # the status line just keeps its last figure
+
+
+def open_upstream(route, request, key, strict=False):
+    """Opens the route's chat completion. Like Hermes's credential pool, a key out of quota
+    (429/402) rests until its retry-after while the next key in <KEY>_API_KEYS serves.
+    strict: with every key resting, refuse at once (a fallback is waiting) instead of asking anyway."""
+    keys = list(dict.fromkeys([key, *spare_keys(route)]))
+    ready = [k for k in keys if COOLDOWN.get((route, k), 0) <= time.time()]
+    if strict and not ready:
+        raise urllib.error.HTTPError(UPSTREAMS[route], 429, "Every key is resting after a 429/402", {}, None)
+    failure = None
+    for attempt in ready or keys[:1]:
+        service = AIService(allow_auth_prompt=False, config_overrides={
+            "provider": "http", "base_url": UPSTREAMS[route], "api_key": attempt,
+            "use_openai_client": False, "timeout": 240,
+            "usage_state_path": "", "groq_rate_state_path": "",
+        })
+        try:
+            response = service.chat_completion_response(request)
+        except urllib.error.HTTPError as exc:
+            record_rate_limits(route, exc.headers)
+            if exc.code not in (402, 429):
+                raise
+            COOLDOWN[(route, attempt)] = time.time() + reset_seconds(exc.headers.get("retry-after"))
+            failure = exc
+            continue
+        record_rate_limits(route, response.headers)
+        return response
+    raise failure
+
+
+def fallback_for(launch):
+    """{provider, model, key} of the launch's fallback route, or None (the default)."""
+    if not launch:
+        return None
+    try:
+        cc = _load_cc_switch()
+        target = (cc.load_agents().get(launch[6:], {}).get("fallback") if launch.startswith("agent-")
+                  else cc.load_fallbacks().get(launch))
+        if not target or target.get("provider") not in UPSTREAMS:
+            return None
+        name = cc.PROVIDERS[target["provider"]]["key"]
+        key = "" if name in ("oauth", "cli") else cc.auth_key(name)
+    except Exception:
+        return None
+    return {**target, "key": key or target["provider"]}
+
+
+def route_for(launch):
+    """{provider, model, key} of the launch's /cc-model override, or None."""
+    if not launch:
+        return None
+    try:
+        target = _load_cc_switch().load_routes().get(launch)
+    except Exception:
+        return None
+    if not isinstance(target, dict):
+        return None
+    provider, model = target.get("provider"), target.get("model")
+    if provider not in UPSTREAMS or not isinstance(model, str) or not model:
+        return None
+    key = ""
+    try:
+        key_id = _load_cc_switch().PROVIDERS[provider].get("key")
+        key = _load_cc_switch().auth_key(key_id) if key_id and key_id not in ("oauth", "gpt4free", "lmstudio") else ""
+    except Exception:
+        pass
+    return {"provider": provider, "model": model, "key": key or provider}
+
+
+def note_fallback(launch, target):
+    """Tells the status line the fallback just answered, so the switch is visible."""
+    try:
+        os.makedirs(RATE_DIR, exist_ok=True)
+        with open(os.path.join(RATE_DIR, f"fallback-{launch}.json"), "w", encoding="utf-8") as f:
+            json.dump({"at": time.time(), "provider": target["provider"], "model": target["model"]}, f)
+    except OSError:
+        pass
+
+
+def spare_keys(route):
+    """Extra keys for a route from <KEY>_API_KEYS (comma-separated), tried in turn after a 429/402."""
+    try:
+        cc = _load_cc_switch()
+        env = cc.PROVIDERS[route]["key"].upper().replace("-", "_") + "_API_KEYS"
+        listed = os.environ.get(env) or cc.user_env(env) or ""
+    except Exception:
+        return []
+    return [k.strip() for k in listed.split(",") if k.strip()]
+
+
+def _load_cc_switch():
+    """Import cc-switch.py beside this file, once: it owns the plan and effort metadata."""
+    global _cc_switch
+    if _cc_switch is None:
+        import importlib.util
+        directory = str(Path(__file__).resolve().parent)
+        if directory not in sys.path:
+            sys.path.insert(0, directory)  # cc-switch imports the vendored ai_suite beside it
+        spec = importlib.util.spec_from_file_location("cc_switch_models", Path(directory, "cc-switch.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _cc_switch = module
+    return _cc_switch
+
+
+def cc_models(provider):
+    """The provider's plan-filtered models from cc-switch.py, when it sits beside this file."""
+    try:
+        return _load_cc_switch().get_models(provider)
+    except Exception:
+        return []  # a standalone adapter simply offers no discovery list
+
+
+def live_worker_effort(body, profile):
+    """Apply the profile's current effort to a running cc worker's next request; its context is untouched."""
+    try:
+        agent = _load_cc_switch().load_agents().get(profile)
+    except (Exception, SystemExit):
+        return  # an unreadable agents.json keeps the effort the worker started with
+    if agent is None:
+        return
+    config = body.setdefault("output_config", {})
+    if agent.get("effort"):
+        config["effort"] = agent["effort"]
+    else:
+        config.pop("effort", None)
+
+
+def effort_supported(provider, model, effort):
+    """False only when the provider says this model takes no such reasoning effort."""
+    try:
+        supported = _load_cc_switch().model_efforts(provider, model)
+    except Exception:
+        return True  # unknown: keep the request as the client sent it
+    if supported is None or not isinstance(effort, str):
+        return True
+    # Claude's max is OpenAI's xhigh, so compare in the provider's own spelling.
+    candidates = {effort, openai_effort({"output_config": {"effort": effort}}) or effort} if provider in UPSTREAMS else {effort}
+    return bool(candidates & set(supported))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Never log prompts or credentials.
@@ -498,7 +748,45 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self):
-        self.send_json(200 if self.path == "/health" else 404, IDENTITY if self.path == "/health" else {"error": "Not found"})
+        path = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+        if self.path == "/health":
+            self.send_json(200, IDENTITY)
+        elif len(path) == 3 and path[0] in (*UPSTREAMS, CLI_ROUTE) and path[1:] == ["v1", "models"]:
+            self.gateway_models(path[0])
+        else:
+            self.send_json(404, {"error": "Not found"})
+
+    def gateway_models(self, provider):
+        """Claude Code's /model discovery: this route's models, or none when it cannot ask."""
+        override = route_for(self.headers.get("x-cc-launch"))
+        if override:
+            # /cc-model pinned this session's model: list exactly the one it serves, so /model
+            # cannot offer picks the adapter would ignore.
+            self.send_json(200, {"data": [{"id": override["model"], "display_name": override["model"]}],
+                                 "has_more": False})
+            return
+        if provider == CLI_ROUTE:
+            # cc-switch.py sits beside this file and owns the plan filter; without it,
+            # listing the CLI's models could offer ones the subscription cannot use.
+            self.send_json(200, {"data": [{"id": m["id"], "display_name": m["id"]} for m in cc_models(provider)],
+                                 "has_more": False})
+            return
+        if self.headers.get("Origin"):
+            self.send_json(403, {"error": "Browser requests are not allowed"})
+            return
+        key = self.headers.get("x-api-key") or self.headers.get("Authorization", "").removeprefix("Bearer ")
+        headers = {"Authorization": "Bearer " + key, "x-api-key": key}
+        models = []
+        try:
+            request = urllib.request.Request(UPSTREAMS[provider] + "/models", headers=headers)
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+            for model in payload.get("data") or []:
+                if isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"]:
+                    models.append({"id": model["id"], "display_name": model.get("name") or model["id"]})
+        except Exception:
+            pass  # discovery is optional: Claude Code keeps its env-defined options
+        self.send_json(200, {"data": models, "has_more": False})
 
     def do_POST(self):
         streaming = False
@@ -514,37 +802,64 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 32 * 1024 * 1024:
                 raise ValueError("Invalid request size (maximum 32 MiB)")
             body = json.loads(self.rfile.read(length))
-            if route[0] == CLI_ROUTE:
+            if self.headers.get("x-cc-worker-profile"):
+                live_worker_effort(body, self.headers["x-cc-worker-profile"])
+            launch = self.headers.get("x-cc-launch")
+            override = route_for(launch)
+            active = override["provider"] if override else route[0]
+            if override:
+                # /cc-model switched this session without restarting Claude Code.
+                body["model"] = override["model"]
+            if active == CLI_ROUTE:
                 self.answer_cli(body)
                 return
             request = to_chat(body)
-            key = self.headers.get("x-api-key") or self.headers.get("Authorization", "").removeprefix("Bearer ")
+            if active == "openai-oauth" and cache_key(body):
+                request["prompt_cache_key"] = cache_key(body)
+            raw_effort = (body.get("output_config") or {}).get("effort")
+            if request.get("reasoning_effort") and raw_effort and not effort_supported(active, body["model"], raw_effort):
+                # MiMo and similar models reject a reasoning effort they cannot adjust.
+                request.pop("reasoning_effort")
+            key = override["key"] if override else (
+                self.headers.get("x-api-key") or self.headers.get("Authorization", "").removeprefix("Bearer "))
             if not key:
                 self.send_json(401, {"type": "error", "error": {"type": "authentication_error", "message": "API key required"}})
                 return
-            service = AIService(allow_auth_prompt=False, config_overrides={
-                "provider": "http", "base_url": UPSTREAMS[route[0]], "api_key": key,
-                "use_openai_client": False, "timeout": 240,
-                "usage_state_path": "", "groq_rate_state_path": "",
-            })
-            with service.chat_completion_response(request) as response:
+            target = fallback_for(launch)
+            served = body["model"]  # the reply is attributed to the model that answered it
+            try:
+                response = open_upstream(active, request, key, strict=bool(target))
+            except OSError as exc:
+                # The session's fallback (cc fallback, off unless chosen) gets one try at what the route refused.
+                if not target or (isinstance(exc, urllib.error.HTTPError) and exc.code not in (402, 429) and exc.code < 500):
+                    raise
+                request["model"] = target["model"]
+                request.pop("prompt_cache_key", None)
+                if request.get("reasoning_effort") and raw_effort and not effort_supported(target["provider"], target["model"], raw_effort):
+                    request.pop("reasoning_effort")
+                response = open_upstream(target["provider"], request, target["key"])
+                served = target["model"]
+                note_fallback(launch, target)
+            with response:
                 if request["stream"]:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
                     self.end_headers()
                     streaming = True
-                    for event in stream_events(response, body["model"]):
+                    for event in stream_events(response, served):
                         self.wfile.write(("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode())
                         self.wfile.flush()
                 else:
-                    self.send_json(200, to_message(json.load(response), body["model"]))
+                    self.send_json(200, to_message(json.load(response), served))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None) or (400 if isinstance(exc, (ValueError, KeyError, TypeError, AttributeError)) and not streaming else 502)
+            # A ValueError describes the request this adapter built or converted, never
+            # credentials or upstream payloads: name the cause so the fix is diagnosable.
             error = {"type": "error", "error": {"type": "invalid_request_error" if status == 400 else "api_error",
-                "message": str(exc) if getattr(exc, "public", False) else
+                "message": str(exc) if getattr(exc, "public", False) or isinstance(exc, ValueError) else
                 f"Adapter request failed ({type(exc).__name__}); check model access and provider availability."}}
             if streaming:
                 self.wfile.write(("event: error\ndata: " + json.dumps(error) + "\n\n").encode())

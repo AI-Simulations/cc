@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -184,6 +185,17 @@ class SubagentLineTests(unittest.TestCase):
         self.assertIn("↳ subagent sub", self.render(None, {"commandcode": ["sub"]}))
 
 
+class QuotaErrorTests(unittest.TestCase):
+    def test_an_expired_key_is_named_instead_of_hiding_the_bars(self):
+        body = io.BytesIO(b'{"error":{"code":"api_key_expired"}}')
+        expired = statusline.urllib.error.HTTPError("https://x", 401, "Unauthorized", {}, body)
+        with patch.dict(statusline.QUOTA_FETCHERS, {"opencode-go": lambda: (_ for _ in ()).throw(expired)}), \
+             patch.object(statusline, "load_json", return_value={}), patch.object(statusline, "save_json") as saved:
+            q, _ = statusline.provider_quota("opencode-go", 1000.0)
+        self.assertEqual(q["error"], "key expired")
+        self.assertEqual(saved.call_args.args[1]["error"], "key expired")
+
+
 class ConfiguredAgentLineTests(unittest.TestCase):
     def render(self, main, profiles, quota=None, ansi=False):
         hooks = {'PreToolUse': [{'matcher': 'Agent|Task', 'hooks': [
@@ -241,6 +253,55 @@ class ConfiguredAgentLineTests(unittest.TestCase):
                 line = self.render('official', {'sub': {'provider': 'nvidia', 'model': 'gpt-test', 'effort': effort}}, ansi=True).splitlines()[-1]
                 self.assertIn(statusline.rgb(hue, val=0.55) + '●' * number, line)
                 self.assertNotIn(statusline.rgb(hue) + '●' * number, line)
+
+
+class EffortLevelTests(unittest.TestCase):
+    def test_default_ladder_keeps_the_historical_circles_and_hues(self):
+        for number, (effort, hue) in enumerate(statusline.EFFORT_HUES.items(), 1):
+            with self.subTest(effort=effort):
+                got = statusline.effort_indicator(effort, label=False)
+                self.assertEqual(got, statusline.rgb(hue, val=0.9) + '●' * number + statusline.RESET)
+                self.assertEqual(got, statusline.effort_indicator(effort, label=False, levels=list(statusline.EFFORT_HUES)))
+
+    def test_circles_and_hue_follow_the_models_own_ladder(self):
+        three = ['low', 'medium', 'high']
+        top = statusline.effort_indicator('high', label=False, levels=three)
+        self.assertEqual(top, statusline.rgb(statusline.EFFORT_HUES['max'], val=0.9) + '●' * 3 + statusline.RESET)
+        mid = statusline.effort_indicator('medium', label=False, levels=three)
+        self.assertEqual(mid, statusline.rgb(statusline.EFFORT_HUES['high'], val=0.9) + '●' * 2 + statusline.RESET)
+        self.assertEqual(statusline.effort_indicator('max', label=True, levels=three),
+                         statusline.rgb(280, val=0.9) + 'max ' + statusline.RESET)
+
+    def test_off_is_the_step_below_low_on_models_that_offer_it(self):
+        ladder = ['off', 'high', 'max']
+        self.assertEqual(statusline.effort_indicator('off', label=False, levels=ladder),
+                         statusline.rgb(statusline.EFFORT_HUES['low'], val=0.9) + '●' + statusline.RESET)
+        self.assertEqual(statusline.effort_indicator('max', label=False, levels=ladder),
+                         statusline.rgb(statusline.EFFORT_HUES['max'], val=0.9) + '●●●' + statusline.RESET)
+
+    def test_model_without_adjustable_effort_renders_default(self):
+        self.assertEqual(statusline.effort_indicator('high', label=False, levels=[]),
+                         statusline.DIM + 'default' + statusline.RESET)
+
+    def test_hue_ramp_is_cool_at_the_bottom_and_hot_at_the_top(self):
+        self.assertAlmostEqual(statusline.effort_hue(0.0), statusline.EFFORT_HUES['low'], places=3)
+        self.assertAlmostEqual(statusline.effort_hue(1.0), statusline.EFFORT_HUES['max'], places=3)
+        self.assertAlmostEqual(statusline.effort_hue(0.5), statusline.EFFORT_HUES['high'], places=3)
+
+    def test_levels_are_read_from_the_provider_that_serves_the_model(self):
+        cache = {"models": [{"slug": "gpt-x", "supported_reasoning_levels": [
+            {"effort": "low"}, {"effort": "high"}, {"effort": "max"}]},
+            {"slug": "gpt-y", "supported_reasoning_levels": [{"effort": "low"}]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'models_cache.json').write_text(json.dumps(cache), encoding='utf-8')
+            with patch.dict(os.environ, {'CODEX_HOME': tmp}):
+                self.assertEqual(statusline.effort_levels('openai-oauth', 'GPT-X'), ['low', 'high', 'max'])
+                self.assertIsNone(statusline.effort_levels('openai-oauth', 'gpt-z'))
+        saved = {'at': time.time(), 'models': {'MiniMax-M3': ['low', 'medium', 'high'], 'mimo': []}}
+        with patch.object(statusline, 'read_json', return_value=saved):
+            self.assertEqual(statusline.effort_levels('commandcode-cli', 'minimax-m3'), ['low', 'medium', 'high'])
+            self.assertEqual(statusline.effort_levels('commandcode', 'mimo'), [])
+            self.assertIsNone(statusline.effort_levels('nvidia', 'minimax-m3'))
 
 
 if __name__ == "__main__":

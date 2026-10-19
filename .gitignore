@@ -9,3 +9,8 @@ auth.json
 *credentials*
 backup*/
 *.log
+contexts/
+fallbacks.json
+session-agents.json
+routes.json
+keys.json

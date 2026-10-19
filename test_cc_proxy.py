@@ -15,6 +15,40 @@ spec = importlib.util.spec_from_file_location("proxy", Path(__file__).with_name(
 proxy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proxy)
 
+key = proxy.cache_key({"metadata": {"user_id": "user_x_session_1"}})
+assert key and key == proxy.cache_key({"metadata": {"user_id": "user_x_session_1"}}), "One stable key per session"
+assert key != proxy.cache_key({"metadata": {"user_id": "user_x_session_2"}}) and proxy.cache_key({}) is None
+
+# The CLI route's discovery list comes from cc-switch.py beside the adapter.
+with tempfile.TemporaryDirectory() as tmp:
+    Path(tmp, "cc-switch.py").write_text("def get_models(provider):\n    return [{'id': provider + '-model'}]\n", encoding="utf-8")
+    original_file, proxy.__file__ = proxy.__file__, str(Path(tmp) / "cc-anthropic-proxy.py")
+    try:
+        assert proxy.cc_models("cli") == [{"id": "cli-model"}]
+        proxy._cc_switch = None  # a fresh adapter process
+        Path(tmp, "cc-switch.py").unlink()
+        assert proxy.cc_models("cli") == [], "Without the sibling script discovery is empty"
+    finally:
+        proxy.__file__ = original_file
+        proxy._cc_switch = None
+
+# A running worker's request takes its profile's current effort, or none when the profile has none.
+class _Agents:
+    efforts = {"sub": "low", "plain": None}
+    def load_agents(self):
+        return {name: {"effort": effort} for name, effort in self.efforts.items()}
+proxy._cc_switch = _Agents()
+try:
+    body = {"output_config": {"effort": "xhigh"}, "messages": ["kept"]}
+    proxy.live_worker_effort(body, "sub")
+    assert body == {"output_config": {"effort": "low"}, "messages": ["kept"]}
+    proxy.live_worker_effort(body, "plain")
+    assert "effort" not in body["output_config"]
+    proxy.live_worker_effort(body := {"output_config": {"effort": "high"}}, "gone")
+    assert body["output_config"]["effort"] == "high", "an unknown profile keeps the started effort"
+finally:
+    proxy._cc_switch = None
+
 body = {"model": "gpt-6-astra", "max_tokens": 100, "stream": True,
     "system": [{"type": "text", "text": "System", "cache_control": {"type": "ephemeral"}}],
     "messages": [{"role": "user", "content": "Read it"},
@@ -39,6 +73,20 @@ except ValueError:
     pass
 else:
     raise AssertionError("Unsupported content silently discarded")
+# Claude Code records dynamically added tools (MCP connectors) as system content blocks.
+# They are metadata, not content: they must not fail the request nor reach the model.
+dynamic = {**body, "messages": [
+    {"role": "system", "content": [{"type": "tool_addition", "tool": {"type": "tool_definition",
+        "definition": {"name": "mcp__docs__batch", "input_schema": {"type": "object"}}}}]},
+    *body["messages"]]}
+assert [m["role"] for m in proxy.to_chat(dynamic)["messages"]] == ["system", "user", "assistant", "tool", "user"]
+assert "mcp__docs__batch" not in proxy.to_prompt(dynamic)
+# The same bookkeeping can arrive in the top-level system field: no empty system message.
+assert "system" not in [m["role"] for m in proxy.to_chat({**body, "system": [{"type": "tool_addition", "tool": {}}]})["messages"]]
+assert "<system>" not in proxy.to_prompt({**body, "system": [{"type": "tool_addition", "tool": {}}]})
+# And it leaves no blank line in the CLI prompt.
+assert "<user>\ngo\n</user>" in proxy.to_prompt({**body, "system": None, "tools": None, "messages": [
+    {"role": "user", "content": [{"type": "tool_addition", "tool": {}}, {"type": "text", "text": "go"}]}]})
 
 chunks = [
     {"choices": [{"delta": {"reasoning_content": "Plan: "}}]},
@@ -72,22 +120,42 @@ else:
     raise AssertionError("Truncated stream reported success")
 
 received = []
+# Discovery and effort metadata come from cc-switch; the suites stub that boundary.
+proxy.effort_supported = lambda provider, model, effort: True
 class Upstream(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def do_GET(self):
+        if self.path == "/v1/models" and self.headers.get("Authorization") == "Bearer ":
+            self.send_response(401)
+            self.end_headers()
+        elif self.path == "/v1/models":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"data": [{"id": "claude-alpha", "name": "Alpha"}, {"id": "gpt-x"}]}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         received.append((self.path, self.headers.get("Authorization"), data))
-        if data["model"] == "fail":
+        if data["model"] == "fail" or self.headers.get("Authorization") == "Bearer spent":
             self.send_response(429)
+            self.send_header("retry-after", "30")
             self.end_headers()
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream" if data["stream"] else "application/json")
+        self.send_header("x-ratelimit-limit-requests", "100")
+        self.send_header("x-ratelimit-remaining-requests", "25")
+        self.send_header("x-ratelimit-reset-requests", "6m0s")
         self.end_headers()
         self.wfile.write(wire if data["stream"] else json.dumps({"choices": [{"message": {"content": "Ready"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode())
 
+proxy.RATE_DIR = tempfile.mkdtemp()  # never the real status line folder
 upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
 adapter = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
 for server in (upstream, adapter):
@@ -104,6 +172,44 @@ try:
             assert received[-1][1] == "Bearer fake-" + provider
             assert received[-1][2]["model"] == body["model"]
             assert b"message_stop" in result if stream else json.loads(result)["content"][0]["text"] == "Ready"
+        # Claude Code's /model discovery reads the same route's model list.
+        request = urllib.request.Request(f"http://127.0.0.1:{adapter.server_port}/{provider}/v1/models?limit=1000", headers={"x-api-key": "fake"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            discovered = json.loads(response.read())
+        assert [m["id"] for m in discovered["data"]] == ["claude-alpha", "gpt-x"]
+        # A rejected key (or an unreachable upstream) leaves discovery empty, not an error.
+        request = urllib.request.Request(f"http://127.0.0.1:{adapter.server_port}/{provider}/v1/models?limit=1000")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert json.loads(response.read())["data"] == []
+    # A model with no adjustable effort (MiMo) must not receive reasoning_effort.
+    proxy.effort_supported = lambda provider, model, effort: False
+    request = urllib.request.Request(url, data=json.dumps({**body, "stream": False, "output_config": {"effort": "high"}}).encode(), headers={"x-api-key": "fake"})
+    urllib.request.urlopen(request, timeout=10).read()
+    assert "reasoning_effort" not in received[-1][2]
+    proxy.effort_supported = lambda provider, model, effort: True
+    # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
+    # x-ratelimit-* headers land where the status line reads them.
+    proxy.spare_keys = lambda route: ["spare"]
+    for _ in range(2):  # the second request skips the resting key outright
+        request = urllib.request.Request(url, data=json.dumps({**body, "stream": False}).encode(), headers={"x-api-key": "spent"})
+        assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
+        assert received[-1][1] == "Bearer spare"
+    assert [r[1] for r in received[-3:]] == ["Bearer spent", "Bearer spare", "Bearer spare"]
+    saved = json.loads(Path(proxy.RATE_DIR, f"ratelimit-{provider}.json").read_text(encoding="utf-8"))
+    window = saved["rate_limits"]["req"]
+    assert window["used_percentage"] == 75 and 350 < window["resets_at"] - saved["at"] <= 360
+    proxy.spare_keys = lambda route: []
+    assert proxy.reset_seconds("1.5s") == 1.5 and proxy.reset_seconds("20ms") == 0.02 and proxy.reset_seconds("bogus") == 60
+    # A refused request gets one try on the session's fallback route; other sessions keep the error.
+    proxy.fallback_for = lambda launch: {"provider": "nvidia", "model": "backup", "key": "fb"} if launch == "L" else None
+    request = urllib.request.Request(url, data=json.dumps({**body, "model": "fail", "stream": False}).encode(), headers={"x-api-key": "fake", "x-cc-launch": "L"})
+    assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
+    assert received[-1][1] == "Bearer fb" and received[-1][2]["model"] == "backup"
+    assert json.loads(Path(proxy.RATE_DIR, "fallback-L.json").read_text(encoding="utf-8"))["provider"] == "nvidia"
+    # While the refused key rests, the next request goes straight to the fallback.
+    sent = len(received)
+    assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
+    assert len(received) == sent + 1 and received[-1][1] == "Bearer fb"
     for model, status in [("", 400), ("fail", 429)]:
         request = urllib.request.Request(url, data=json.dumps({**body, "model": model}).encode(), headers={"x-api-key": "fake"})
         try:
@@ -113,6 +219,15 @@ try:
             assert json.load(exc)["type"] == "error"
         else:
             raise AssertionError("Invalid input/upstream error was accepted")
+    # A rejected block names itself: the generic adapter message hid this class of failure.
+    bad = {**body, "messages": [{"role": "user", "content": [{"type": "document"}]}]}
+    request = urllib.request.Request(url, data=json.dumps(bad).encode(), headers={"x-api-key": "fake"})
+    try:
+        urllib.request.urlopen(request, timeout=10)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 400 and "Unsupported content block: document" in json.load(exc)["error"]["message"]
+    else:
+        raise AssertionError("Unsupported content block was accepted")
 finally:
     for server in (adapter, upstream):
         server.shutdown()
@@ -153,6 +268,7 @@ print(json.dumps({"type": "result", "finalText": 'Checking.\n<tool_call>{"name":
 ''', encoding="utf-8")
 (fake_dir / "cmdc.cmd").write_text(f'@"{sys.executable}" "%~dp0cmdc.py" %*\n', encoding="utf-8")
 proxy.commandcode_executable = lambda: str(fake_dir / "cmdc.cmd")
+proxy.cc_models = lambda provider: [{"id": "claude-x"}]  # the plan-filtered list cc-switch owns
 argv = lambda: json.loads((fake_dir / "argv.json").read_text())
 adapter = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
 threading.Thread(target=adapter.serve_forever, daemon=True).start()
@@ -174,6 +290,12 @@ try:
     request = urllib.request.Request(url, data=json.dumps({**body, "stream": False, "output_config": {"effort": "high"}}).encode())
     urllib.request.urlopen(request, timeout=30).read()
     assert argv()[-2:] == ["--effort", "high"]
+    # The same request against a model that publishes no efforts: cmdc's --effort is omitted.
+    proxy.effort_supported = lambda provider, model, effort: False
+    request = urllib.request.Request(url, data=json.dumps({**body, "stream": False, "output_config": {"effort": "high"}}).encode())
+    urllib.request.urlopen(request, timeout=30).read()
+    assert "--effort" not in argv(), 'A model without adjustable effort gets no --effort'
+    proxy.effort_supported = lambda provider, model, effort: True
     # cmdc's own read_file becomes the client's Read; an unmatched tool is named, not an error.
     request = urllib.request.Request(url, data=json.dumps({**body, "model": "native", "stream": False}).encode())
     native = json.loads(urllib.request.urlopen(request, timeout=30).read())
@@ -190,6 +312,9 @@ try:
         assert exc.code == 402 and "out of credits" in json.load(exc)["error"]["message"]
     else:
         raise AssertionError("CLI failure was accepted")
+    with urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{adapter.server_port}/commandcode-cli/v1/models?limit=1000", headers={"x-api-key": "x"}), timeout=10) as response:
+        assert json.loads(response.read())["data"] == [{"id": "claude-x", "display_name": "claude-x"}], 'The CLI route offers its plan-filtered ids'
 finally:
     adapter.shutdown()
     adapter.server_close()
