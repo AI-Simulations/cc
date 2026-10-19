@@ -45,6 +45,22 @@ class PlanLabelTests(unittest.TestCase):
         self.assertIn("req", rendered)
         self.assertIn("75%", rendered)
 
+    def test_fallback_shown_and_highlighted_while_serving(self):
+        files = {"fallbacks.json": {"L": {"provider": "gemini", "model": "gemini-2.5-flash"}}}
+        def load(name):
+            return files.get(os.path.basename(name), {})
+        with patch.object(statusline, "quota_source", return_value=None), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
+                patch.object(statusline, "load_json", side_effect=load), patch.dict(os.environ, {"CC_MAIN_PROVIDER": "nvidia", "CC_LAUNCH_ID": "L"}):
+            idle = statusline.render({"model": {"id": "deepseek-v4-pro"}})
+            files["fallback-L.json"] = {"at": time.time()}
+            serving = statusline.render({"model": {"id": "deepseek-v4-pro"}})
+            os.environ["CC_LAUNCH_ID"] = "other"
+            unset = statusline.render({"model": {"id": "deepseek-v4-pro"}})
+        self.assertIn("↪ fallback gemini/gemini-2.5-flash", idle)
+        self.assertNotIn("active", idle)
+        self.assertIn("fallback gemini/gemini-2.5-flash active", serving)
+        self.assertNotIn("fallback", unset)
+
     def test_cached_label_display(self):
         quota = {"plan": "ChatGPT Prolite", "rate_limits": {"seven_day": {"used_percentage": 0}}}
         with patch.object(statusline, "quota_source", return_value="openai"), patch.object(statusline, "provider_quota", return_value=(quota, None)), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False):

@@ -447,6 +447,13 @@ def render(d):
         q = load_json(f"ratelimit-{cc_main_provider(None)}.json")
         limits, cached_at, plan = q.get("rate_limits") or {}, q.get("at"), None
     parts += quota_parts(plan, extra, limits, cached_at, now)
+    # The session's fallback route (cc fallback); yellow while it served within the last 5 minutes.
+    launch = os.environ.get("CC_LAUNCH_ID")
+    fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
+    if fallback:
+        served = load_json(f"fallback-{launch}.json").get("at") or 0
+        label = f"fallback {fallback['provider']}/{fallback['model']}"
+        parts.append(f"{YELLOW}↪ {label} active{RESET}" if now - served < 300 else f"{DIM}↪ {label}{RESET}")
 
     # Configured targets are visible even on official Claude and even on the same provider.
     # Live worker rows separately identify native workers and the real cc relay/worker route.
