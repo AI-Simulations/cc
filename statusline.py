@@ -281,7 +281,7 @@ def cc_main_provider(source):
     if os.environ.get("CC_MAIN_PROVIDER"):
         return os.environ["CC_MAIN_PROVIDER"]
     url = os.environ.get("ANTHROPIC_BASE_URL", "").lower().rstrip("/")
-    for provider in ("commandcode-cli", "commandcode", "nvidia", "minimax", "openrouter", "opencode-zen", "gpt4free"):
+    for provider in ("commandcode-cli", "commandcode", "nvidia", "minimax", "openrouter", "opencode-zen", "gpt4free", "gemini", "ollama-cloud", "lmstudio"):
         if provider in url:
             return provider
     return {"anthropic": "official", "openai": "openai-oauth", "opencode-go": "opencode-go"}.get(source)
@@ -445,7 +445,8 @@ def render(d):
             target = re.sub(r'^(opus|sonnet|haiku)-(\d+)-(\d+)', r'\1 \2.\3', target).replace('-', ' ')
             labels = {'openai-oauth': 'OAuth', 'official': 'Claude', 'nvidia': 'NIM',
                       'commandcode': 'CmdC', 'commandcode-cli': 'CmdC CLI', 'minimax': 'MiniMax',
-                      'opencode-go': 'Go', 'opencode-zen': 'Zen', 'openrouter': 'OpenRouter', 'gpt4free': 'g4f'}
+                      'opencode-go': 'Go', 'opencode-zen': 'Zen', 'openrouter': 'OpenRouter', 'gpt4free': 'g4f',
+                      'gemini': 'Gemini', 'ollama-cloud': 'Ollama', 'lmstudio': 'LM Studio'}
             route = 'same provider' if provider == main_provider else labels.get(provider, provider)
             effort = profile.get('effort')
             dots = effort_indicator(effort, dim=True, label=False) if effort else DIM + 'default' + RESET
