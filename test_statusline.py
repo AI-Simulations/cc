@@ -173,7 +173,8 @@ class SubagentLineTests(unittest.TestCase):
         # The gate above depends on this mapping: a typo would re-enable the subagent line.
         for env, expected in (({}, "anthropic"),
                               ({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, "anthropic"),
-                              ({"ANTHROPIC_BASE_URL": "http://127.0.0.1:10532/commandcode"}, "commandcode")):
+                              ({"ANTHROPIC_BASE_URL": "http://127.0.0.1:10532/commandcode"}, "commandcode"),
+                              ({"ANTHROPIC_BASE_URL": "http://127.0.0.1:10532/opencode-go"}, "opencode-go")):
             with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
                 self.assertEqual(statusline.quota_source(), expected)
 

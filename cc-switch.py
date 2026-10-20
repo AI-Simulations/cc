@@ -108,7 +108,7 @@ FALLBACK_MODELS = {
     "openrouter":   [("anthropic/claude-opus-5.5", ""), ("anthropic/claude-fable-5.1", ""),
                      ("openai/gpt-6-sol", ""), ("deepseek/deepseek-v4.1-flash", "")],
     "commandcode-cli": [("deepseek/deepseek-v4.1-flash", ""), ("moonshotai/kimi-k3", ""), ("zai-org/glm-5.3", "")],
-    "nvidia":       [("deepseek-ai/deepseek-v4-pro", "")],
+    "nvidia":       [("deepseek-ai/deepseek-v4.1-flash", ""), ("z-ai/glm-5.3", ""), ("moonshotai/kimi-k2.6", "")],
     "openai-oauth": [("gpt-6-sol", ""), ("gpt-6-luna", "")],
     "minimax":      [("MiniMax-M3", ""), ("MiniMax-M2.7", "")],
     "gpt4free":     [("deepseek-v4-pro", ""), ("deepseek-v4.1-flash", ""), ("glm-5.3", ""), ("kimi-k3", "")],
@@ -182,13 +182,37 @@ def save_key(name, value):
         pass
 
 
+_OPENCODE_CHECKED = set()
+
+
+def renew_opencode_key(key):
+    """Replace a rejected OpenCode key from the signed-in Chrome profile (see opencode_key.py)."""
+    import opencode_key
+    # Only opencode's own auth.json is renewed; an env or keys.json key stays the user's call.
+    if key != opencode_key.stored_key() or opencode_key.key_ok(key) is not False:
+        return
+    print("OpenCode rejected its API key; creating a new one from the console...", file=sys.stderr)
+    interactive = os.environ.get("CC_AGENT_CHILD") != "1" and sys.stdin.isatty() and sys.stdout.isatty()
+    try:
+        new = opencode_key.renew(interactive)
+    except Exception as exc:
+        warn(f"OpenCode key renewal failed: {exc}. Run: python {opencode_key.__file__}")
+        return
+    if auth_key("opencode-go") != new:
+        warn("OPENCODE_GO_API_KEY or keys.json overrides the renewed key in opencode's auth.json.")
+
+
 def ensure_key(name):
     """Ask for a missing provider key once, so the model menu can list its models."""
     p = PROVIDERS.get(name, {})
     key_id = p.get("key")
     if not key_id or key_id in ("oauth", "cli", "gpt4free") or name == "lmstudio":
         return
-    if auth_key(key_id):
+    key = auth_key(key_id)
+    if key and key_id in ("opencode", "opencode-go") and key_id not in _OPENCODE_CHECKED:
+        _OPENCODE_CHECKED.add(key_id)
+        renew_opencode_key(key)
+    if key:
         return
     if os.environ.get("CC_AGENT_CHILD") == "1" or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return  # route_env reports the missing key
@@ -567,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 18}
+    expected = {"service": "cc-anthropic-proxy", "version": 19}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -860,14 +884,26 @@ def picker_models(name, model_id, models=None):
     return picks
 
 
+def go_messages(model_id):
+    """True when OpenCode Go serves this model over Anthropic /messages (models.dev's npm)."""
+    m = ((catalog._models_dev().get("opencode-go") or {}).get("models") or {}).get(model_id) or {}
+    npm = (m.get("provider") or {}).get("npm")
+    if npm:
+        return npm == "@ai-sdk/anthropic"
+    # shortcut: models.dev unreachable or the model unlisted; these families spoke /messages on 2026-10-20.
+    return model_id.startswith(("claude-", "minimax-", "qwen"))
+
+
 def route_env(name, model_id):
     """Environment that points Claude Code at this provider and model."""
     p = PROVIDERS[name]
     ensure_key(name)
     if name != "official" and (not isinstance(model_id, str) or not model_id.strip()):
         die("A nonempty model ID is required.")
-    # Command Code serves Claude over /messages and everything else over /chat/completions.
-    fmt = "openai" if name == "commandcode" and not model_id.startswith("claude-") else p["format"]
+    # Command Code serves Claude over /messages and everything else over /chat/completions;
+    # OpenCode Go likewise answers /messages only for some models.
+    fmt = ("openai" if (name == "commandcode" and not model_id.startswith("claude-"))
+           or (name == "opencode-go" and not go_messages(model_id)) else p["format"])
     env = {}
     if name == "official":
         pass  # the normal claude.ai login: no route variables

@@ -352,3 +352,32 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
             else:
                 raise AssertionError(f'Invalid auto-compact accepted: {bad}')
 print('PASS: subagent profiles route, effort, autocompact override, env isolation, relay files, validation, set/remove/run options, main --autocompact.')
+
+# A rejected key from opencode's auth.json is renewed once per process; other keys are never touched.
+import opencode_key
+cc._OPENCODE_CHECKED.clear()
+with patch.object(cc, 'auth_key', return_value='stored'), patch.object(opencode_key, 'stored_key', return_value='stored'), \
+        patch.object(opencode_key, 'key_ok', return_value=False), patch.object(opencode_key, 'renew', return_value='stored') as renew, \
+        contextlib.redirect_stderr(io.StringIO()):
+    cc.ensure_key('opencode-go')
+    cc.ensure_key('opencode-go')
+    assert renew.call_count == 1
+cc._OPENCODE_CHECKED.clear()
+with patch.object(cc, 'auth_key', return_value='env-key'), patch.object(opencode_key, 'stored_key', return_value='stored'), \
+        patch.object(opencode_key, 'key_ok') as ok, patch.object(opencode_key, 'renew') as renew:
+    cc.ensure_key('opencode-go')
+    assert not ok.called and not renew.called
+assert opencode_key.KEY_RE.search('Copy oc_sk_abc123def456_' + 'x' * 30 + ' Copy')
+print('opencode key renewal ok')
+
+# OpenCode Go: /messages models go direct, chat-only ones (MiMo, GLM, ...) through the adapter.
+dev = {'opencode-go': {'models': {'mimo-v2.6-pro': {'provider': {'api': 'x'}},
+                                  'minimax-m3': {'provider': {'npm': '@ai-sdk/anthropic'}}}}}
+with patch.object(cc.catalog, '_models_dev', return_value=dev), patch.object(cc, 'auth_key', return_value='test'), \
+        patch.object(cc, 'get_models', return_value=[]), patch.object(cc, 'ensure_anthropic_proxy'), \
+        contextlib.redirect_stderr(io.StringIO()):
+    assert cc.route_env('opencode-go', 'mimo-v2.6-pro')['ANTHROPIC_BASE_URL'].endswith('/opencode-go')
+    direct = cc.route_env('opencode-go', 'minimax-m3')
+    assert direct['ANTHROPIC_BASE_URL'] == 'https://opencode.ai/zen/go' and 'x-opencode-session' in direct['ANTHROPIC_CUSTOM_HEADERS']
+    assert cc.go_messages('qwen3.9-unlisted') and not cc.go_messages('glm-9-unlisted')
+print('opencode-go protocol split ok')

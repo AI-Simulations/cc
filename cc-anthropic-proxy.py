@@ -24,6 +24,8 @@ UPSTREAMS = {
     "openai-oauth": "http://127.0.0.1:10531/v1",
     "nvidia": "https://integrate.api.nvidia.com/v1",
     "commandcode": "https://api.commandcode.ai/provider/v1",
+    # Go serves most models (MiMo, GLM, Kimi, DeepSeek) only over /chat/completions.
+    "opencode-go": "https://opencode.ai/zen/go/v1",
     "gpt4free": "http://127.0.0.1:1337/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "ollama-cloud": "https://ollama.com/v1",
@@ -37,7 +39,7 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 18}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 19}
 # MiMo also closes with `</tool_call_<hash>>`, or not at all at the end of its reply.
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call[^>]*>|$)", re.S)
 XML_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.S)

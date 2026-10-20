@@ -232,6 +232,18 @@ The model picker's default sort is the aggregate score, and rows missing a displ
 (`ctx ?`, `$?`, `AA ?`) are always listed last. If a provider has no key, `cc` asks for one
 once and stores it in `~/.config/cc/keys.json` (gitignored, user-only permissions).
 
+When OpenCode rejects the Go/Zen key stored in opencode's `auth.json` (for example
+`api_key_expired`), `cc` creates a new personal API key in the OpenCode console and stores
+it there for both routes. It uses a signed-in Chrome profile at
+`~/.config/cc/browser_profile/opencode` (`CC_OPENCODE_PROFILE`), headless. If that session
+has expired and `cc` runs in a terminal, a plain Chrome window opens for sign-in; close it to
+continue. `python opencode_key.py` checks and renews by hand (`--force` always renews).
+Keys from `OPENCODE_GO_API_KEY` or `keys.json` are never replaced.
+
+OpenCode Go answers Anthropic `/messages` only for some models (MiniMax, Qwen, Claude;
+per models.dev). `cc opencode-go` sends the rest (MiMo, GLM, Kimi, DeepSeek, ...) through
+the local adapter's `/chat/completions`, like Command Code's non-Claude models.
+
 ## Subagents on other providers
 
 Claude Code subagents share their session's environment, so they cannot reach a different

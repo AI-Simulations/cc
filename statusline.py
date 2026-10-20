@@ -233,7 +233,7 @@ def quota_source():
         return "commandcode"
     if url.endswith("/openai-oauth"):
         return "openai"
-    if "opencode.ai/zen/go" in url:
+    if "opencode.ai/zen/go" in url or url.endswith("/opencode-go"):  # direct, or via the adapter
         return "opencode-go"
     if "openrouter.ai" in url:
         return "openrouter"
