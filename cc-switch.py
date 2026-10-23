@@ -795,12 +795,13 @@ def fallback_command(words):
             die(f"No subagent '{name}'.")
         if rest == ["off"]:
             profiles[name].pop("fallback", None)
-        elif len(rest) == 2 and rest[0] in FALLBACK_ROUTES:
+        elif len(rest) in (2, 3) and (rest[0] in FALLBACK_ROUTES or rest[0] == "official"):
+            # official (Claude) can't be proxied mid-request; relay_job reruns a failed worker on it instead.
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", rest[1]):
                 die("Invalid fallback model id.")
-            profiles[name]["fallback"] = {"provider": rest[0], "model": rest[1]}
+            profiles[name]["fallback"] = {"provider": rest[0], "model": rest[1], **({"effort": rest[2]} if len(rest) == 3 else {})}
         elif rest:
-            die("Usage: cc fallback subagent <name> [off | <provider> <model>]")
+            die("Usage: cc fallback subagent <name> [off | <provider> <model> [effort]]")
         if rest:
             save_agents(profiles)
         target = profiles[name].get("fallback")
@@ -1030,13 +1031,18 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autoco
 # its own headless `claude -p`; `cc agents` writes a native subagent that relays to it.
 
 _STARTUP_LAUNCH = None  # the launch whose startup prompt runs in this process
+_AGENT_OVERRIDE = None  # relay_job: the fallback profile a failed worker reruns on
 
 
 def session_launch():
     """The launch a subagent edit belongs to: inside its Claude session or its startup prompt only.
     apply.ps1 leaves CC_LAUNCH_ID in the terminal, and a later plain `cc agents` edits agents.json."""
     launch = os.environ.get("CC_LAUNCH_ID", "")
-    return launch if launch and (os.environ.get("CLAUDECODE") == "1" or launch == _STARTUP_LAUNCH) else ""
+    if launch and (os.environ.get("CLAUDECODE") == "1" or launch == _STARTUP_LAUNCH):
+        return launch
+    # A Claude session not started by cc still gets its own subagent setup, keyed by its session id.
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "") if os.environ.get("CLAUDECODE") == "1" else ""
+    return f"claude-{sid}" if sid else ""
 
 
 def _session_agents(launch=None):
@@ -1392,6 +1398,8 @@ def run_agent(agent, prompt, opts=None, require_context=False):
     a = load_agents().get(agent)
     if a is None:
         die(f"No subagent '{agent}' in {AGENTS_FILE}.")
+    if _AGENT_OVERRIDE:
+        a = {**{k: v for k, v in a.items() if k != "fallback"}, **_AGENT_OVERRIDE}
     a = check_agents({agent: with_options(a, opts or {})})[agent]  # this run only
     if not prompt.strip():
         die("The subagent task is empty.")
@@ -1713,7 +1721,16 @@ def relay_job(agent, job):
     code = 1
     try:
         prompt = Path(JOBS_DIR, job + ".in").read_bytes().decode("utf-8")
-        run_agent(agent, prompt, require_context=True)
+        try:
+            run_agent(agent, prompt, require_context=True)
+        except SystemExit as exc:
+            fallback = (load_agents().get(agent) or {}).get("fallback")
+            if not fallback or fallback.get("provider") != "official" or exc.code in (0, None):
+                raise
+            print(f"[cc] worker failed; rerunning once on its fallback {fallback['provider']}/{fallback['model']}", flush=True)
+            global _AGENT_OVERRIDE
+            _AGENT_OVERRIDE = {k: v for k, v in fallback.items() if k in ("provider", "model", "effort")}
+            run_agent(agent, prompt, require_context=True)
         code = 0
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
