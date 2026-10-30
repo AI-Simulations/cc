@@ -285,6 +285,7 @@ print(json.dumps({"type": "result", "finalText": 'Checking.\n<tool_call>{"name":
 proxy.commandcode_executable = lambda: str(fake_dir / "cmdc.cmd")
 proxy.cc_models = lambda provider: [{"id": "claude-x"}]  # the plan-filtered list cc-switch owns
 argv = lambda: json.loads((fake_dir / "argv.json").read_text())
+proxy.os.environ["CC_CMDC_TEXT"] = "1"  # the cmdc text-protocol path; /alpha/generate is tested below
 adapter = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
 threading.Thread(target=adapter.serve_forever, daemon=True).start()
 try:
@@ -330,6 +331,44 @@ try:
     with urllib.request.urlopen(urllib.request.Request(
             f"http://127.0.0.1:{adapter.server_port}/commandcode-cli/v1/models?limit=1000", headers={"x-api-key": "x"}), timeout=10) as response:
         assert json.loads(response.read())["data"] == [{"id": "claude-x", "display_name": "claude-x"}], 'The CLI route offers its plan-filtered ids'
+    # Default path: /alpha/generate on the CLI's login, native tool calls, cache tokens passed through.
+    del proxy.os.environ["CC_CMDC_TEXT"]
+    posted = []
+
+    class Generate(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            posted.append((self.headers, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self.send_response(200)
+            self.end_headers()
+            for part in ({"type": "reasoning-delta", "text": "Hmm"}, {"type": "text-delta", "text": "Reading."},
+                         {"type": "tool-call", "toolCallId": "c9", "toolName": "Read", "input": {"file_path": "a.txt"}},
+                         {"type": "finish", "finishReason": "tool-calls", "totalUsage": {"inputTokens": 100, "outputTokens": 3,
+                          "inputTokenDetails": {"noCacheTokens": 10, "cacheReadTokens": 90}}}):
+                self.wfile.write((json.dumps(part) + "\n").encode())
+
+    generate = ThreadingHTTPServer(("127.0.0.1", 0), Generate)
+    threading.Thread(target=generate.serve_forever, daemon=True).start()
+    proxy.GENERATE_URL = f"http://127.0.0.1:{generate.server_port}/alpha/generate"
+    proxy.cmdc_login = lambda: ("login-key", "9.9.9")
+    history = {**body, "model": "deepseek/deepseek-v4-flash", "metadata": {"user_id": "session-1"}, "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "t"}, {"type": "tool_use", "id": "c1", "name": "Read", "input": {"file_path": "b"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": [{"type": "text", "text": "data"}]}, {"type": "text", "text": "go"}]}]}
+    for stream in (False, True):
+        result = urllib.request.urlopen(urllib.request.Request(url, data=json.dumps({**history, "stream": stream}).encode()), timeout=30).read()
+        message = proxy.collect([json.loads(line[5:]) for line in result.decode().splitlines() if line.startswith("data:")], "m") if stream else json.loads(result)
+        assert [b["type"] for b in message["content"]] == ["thinking", "text", "tool_use"] and message["content"][2]["input"] == {"file_path": "a.txt"}
+        assert message["stop_reason"] == "tool_use" and message["usage"]["input_tokens"] == 10 and message["usage"]["cache_read_input_tokens"] == 90
+    headers, sent = posted[-1]
+    assert headers["Authorization"] == "Bearer login-key" and headers["x-command-code-version"] == "9.9.9"
+    assert [m["role"] for m in sent["params"]["messages"]] == ["user", "assistant", "tool", "user"]
+    assert sent["params"]["messages"][1]["content"] == [{"type": "reasoning", "text": "t"}, {"type": "tool-call", "toolCallId": "c1", "toolName": "Read", "input": {"file_path": "b"}}]
+    assert sent["params"]["messages"][2]["content"][0]["output"] == {"type": "text", "value": "data"} and sent["params"]["messages"][2]["content"][0]["toolName"] == "Read"
+    assert posted[0][1]["threadId"] == sent["threadId"] == headers["x-session-id"], 'One thread per Claude Code session keeps the cache warm'
+    generate.shutdown()
 finally:
     adapter.shutdown()
     adapter.server_close()

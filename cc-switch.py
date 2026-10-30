@@ -78,7 +78,7 @@ CONTEXT_PREFIX = "CC_CONTEXT_V1 "
 
 PROVIDERS = {
     "commandcode": {"label": "Command Code API (needs Provider plan; Go plan is CLI-only)", "format": "anthropic", "base": "https://api.commandcode.ai/provider", "key": "commandcode"},
-    "commandcode-cli": {"label": "Command Code subscription via cmdc CLI (Go plan; text tool protocol)", "format": "openai", "key": "cli"},
+    "commandcode-cli": {"label": "Command Code subscription on the cmdc CLI login (Go plan; native tools, prompt cache)", "format": "openai", "key": "cli"},
     "official":     {"label": "Claude official (claude.ai login)", "format": "anthropic", "base": ""},
     "minimax":      {"label": "MiniMax (Anthropic API)", "format": "anthropic", "base": "https://api.minimax.io/anthropic", "key": "minimax"},
     "opencode-go":  {"label": "OpenCode Go subscription (x-api-key, live key)", "format": "anthropic", "base": "https://opencode.ai/zen/go", "key": "opencode-go", "header": "x-api-key"},
@@ -591,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 23}
+    expected = {"service": "cc-anthropic-proxy", "version": 24}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -959,7 +959,7 @@ def route_env(name, model_id, passthrough=False):
         if name == "openai-oauth":
             ensure_oauth_proxy()
         elif name == "commandcode-cli":
-            warn("Each request runs cmdc once; tools use a text protocol, so expect slower, less reliable tool calls.")
+            pass  # the adapter posts to /alpha/generate on the CLI's login (CC_CMDC_TEXT=1: one cmdc run per request)
         elif name == "gpt4free":
             ensure_g4f()  # the key is optional: only needed when g4f runs with --g4f-api-key
         elif not key and name != "lmstudio":  # LM Studio runs keyless unless auth is on

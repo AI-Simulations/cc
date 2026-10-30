@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 import os
 import re
@@ -39,7 +40,7 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 23}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 24}
 # `cc official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
 # until /model routes its launch to another provider.
 OFFICIAL_ROUTE = "official"
@@ -504,6 +505,154 @@ def cmdc_retrying(body, tries=3):
                 raise
 
 
+GENERATE_URL = "https://api.commandcode.ai/alpha/generate"
+
+
+def generate_body(body):
+    """Claude's /v1/messages as the body cmdc itself posts to /alpha/generate (its toWireMessages):
+    native tools and the server's prompt cache, unlike one cmdc run per request."""
+    system = body.get("system") or []
+    if isinstance(system, str):
+        system = [{"type": "text", "text": system}]
+    messages, names = [], {}
+    for message in body.get("messages") or []:
+        content = message.get("content")
+        content = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
+        if message.get("role") == "assistant":
+            parts = []
+            for block in content:
+                if block.get("type") == "text" and block.get("text"):
+                    parts.append({"type": "text", "text": block["text"]})
+                elif block.get("type") == "thinking" and block.get("thinking"):
+                    parts.append({"type": "reasoning", "text": block["thinking"]})
+                elif block.get("type") == "tool_use":
+                    names[block["id"]] = block["name"]
+                    parts.append({"type": "tool-call", "toolCallId": block["id"], "toolName": block["name"], "input": block.get("input") or {}})
+            messages.append({"role": "assistant", "content": parts or [{"type": "text", "text": "(no content)"}]})
+            continue
+        results, user = [], []
+        for block in content:
+            if block.get("type") == "text" and block.get("text"):
+                user.append({"type": "text", "text": block["text"]})
+            elif block.get("type") == "image" and (block.get("source") or {}).get("type") == "base64":
+                source = block["source"]
+                user.append({"type": "image", "image": f"data:{source['media_type']};base64,{source['data']}", "mimeType": source["media_type"]})
+            elif block.get("type") == "tool_result":
+                value = block.get("content")
+                value = value if isinstance(value, str) else "\n".join(b.get("text", "") for b in value or [] if b.get("type") == "text")
+                results.append({"type": "tool-result", "toolCallId": block["tool_use_id"], "toolName": names.get(block["tool_use_id"], "unknown"),
+                                "output": {"type": "text", "value": value}})
+        if results:
+            messages.append({"role": "tool", "content": results})
+        if user:
+            messages.append({"role": "user", "content": user})
+    params = {"model": body["model"], "messages": messages, "stream": True, "max_tokens": body.get("max_tokens") or 64000,
+              "tools": [{"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("input_schema") or {"type": "object"}}
+                        for t in body.get("tools") or [] if t.get("name")],
+              "system": [{"type": "text", "text": b.get("text", ""), **({"cache_control": {"type": "ephemeral"}} if b.get("cache_control") else {})}
+                         for b in system if b.get("type") == "text"]}
+    effort = (body.get("output_config") or {}).get("effort")
+    if isinstance(effort, str) and effort and effort_supported(CLI_ROUTE, body["model"], effort):
+        params["reasoning_effort"] = effort
+    if isinstance(body.get("temperature"), (int, float)):
+        params["temperature"] = body["temperature"]
+    # One thread per Claude Code session, as cmdc keeps one per conversation.
+    thread = str(uuid.uuid5(uuid.NAMESPACE_URL, cache_key(body) or uuid.uuid4().hex))
+    config = {"workingDir": tempfile.gettempdir(), "date": time.strftime("%Y-%m-%d"), "environment": sys.platform, "structure": [],
+              "isGitRepo": False, "currentBranch": "", "mainBranch": "", "gitStatus": "", "recentCommits": []}
+    return thread, {"config": config, "memory": None, "taste": None, "skills": None, "permissionMode": "standard",
+                    "threadId": thread, "params": params}
+
+
+def cmdc_login():
+    """The key and version of the signed-in Command Code CLI, as its own requests send them."""
+    key = json.loads(Path.home().joinpath(".commandcode", "auth.json").read_text(encoding="utf-8")).get("apiKey")
+    if not key:
+        raise RuntimeError("Command Code CLI is not signed in; run cmdc once and log in.")
+    try:
+        version = json.loads(Path(commandcode_executable()).resolve().parent.joinpath("node_modules", "command-code", "package.json")
+                             .read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError, RuntimeError):
+        version = "1.88.2"  # the CLI version this was written against
+    return key, version
+
+
+def generate_stream(body):
+    """/alpha/generate's NDJSON (AI SDK stream parts) as Claude stream events."""
+    thread, request = generate_body(body)
+    key, version = cmdc_login()
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": "cli",
+               "x-cli-environment": "production", "x-command-code-version": version, "x-session-id": thread}
+    try:
+        response = urllib.request.urlopen(urllib.request.Request(GENERATE_URL, json.dumps(request).encode(), headers), timeout=CLI_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(2000).decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        failure = RuntimeError(f"Command Code {exc.code}: {detail}"[:400])
+        failure.status_code, failure.public = exc.code, True
+        raise failure from None
+    yield message_start(body["model"])
+    blocks, calls, tokens, finish = Blocks(), [], {}, None
+    with response:
+        for raw in response:
+            try:
+                part = json.loads(raw)
+            except ValueError:
+                continue
+            kind = part.get("type")
+            if kind == "text-delta" and part.get("text"):
+                yield from blocks.add("text", part["text"])
+            elif kind == "reasoning-delta" and part.get("text"):
+                yield from blocks.add("thinking", part["text"])
+            elif kind == "tool-call":
+                args = part.get("input", part.get("args")) or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args or "{}")
+                    except ValueError:
+                        args = {"raw": args}
+                calls.append({"type": "tool_use", "id": part.get("toolCallId") or "toolu_" + uuid.uuid4().hex,
+                              "name": part.get("toolName", ""), "input": args if isinstance(args, dict) else {"value": args}})
+            elif kind == "finish":
+                tokens, finish = part.get("totalUsage") or {}, part.get("finishReason")
+            elif kind == "error":
+                message = str((part.get("error") or {}).get("message") if isinstance(part.get("error"), dict) else part.get("error") or part)
+                failure = RuntimeError(f"Command Code: {message}"[:400])
+                failure.public = True
+                raise failure
+    yield from blocks.close()
+    for call in calls:
+        yield from blocks.tool(call)
+    details = tokens.get("inputTokenDetails") or {}
+    used = {"input_tokens": details.get("noCacheTokens", tokens.get("inputTokens", 0)), "output_tokens": tokens.get("outputTokens", 0),
+            "cache_read_input_tokens": details.get("cacheReadTokens", 0), "cache_creation_input_tokens": details.get("cacheWriteTokens", 0)}
+    reason = "tool_use" if calls else "max_tokens" if finish == "length" else "end_turn"
+    yield {"type": "message_delta", "delta": {"stop_reason": reason, "stop_sequence": None}, "usage": used}
+    yield {"type": "message_stop"}
+
+
+def collect(events, model):
+    """A Claude stream folded into one non-streamed message."""
+    message, content = {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant", "model": model,
+                        "stop_sequence": None}, []
+    for event in events:
+        if event["type"] == "content_block_start":
+            content.append(dict(event["content_block"]))
+        elif event["type"] == "content_block_delta":
+            delta, block = event["delta"], content[-1]
+            if delta["type"] == "input_json_delta":
+                block["input"] = json.loads(delta["partial_json"])
+            else:
+                field = "thinking" if delta["type"] == "thinking_delta" else "text"
+                block[field] = block.get(field, "") + delta[field]
+        elif event["type"] == "message_delta":
+            message.update(stop_reason=event["delta"]["stop_reason"], usage=event["usage"])
+    return {**message, "content": content}
+
+
 def commandcode_cli(body):
     *_, result = cmdc_retrying(body)
     return from_cli(result.get("finalText") or "", result.get("usage"), result.get("stopReason"), body["model"],
@@ -935,15 +1084,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(status, error, retry=error["error"]["type"] != "rate_limit_error" or "quota" not in error["error"]["message"])
 
     def answer_cli(self, body):
-        """Runs the CLI and streams its reply as it arrives, with pings while it is quiet."""
-        to_prompt(body)  # reject bad input before any response is sent
+        """Streams Command Code's reply as it arrives, with pings while it is quiet: straight from
+        /alpha/generate on the CLI's login, or (CC_CMDC_TEXT=1) one cmdc run with the text tool protocol."""
+        text_protocol = os.environ.get("CC_CMDC_TEXT") == "1"
+        if text_protocol:
+            to_prompt(body)  # reject bad input before any response is sent
         if not body.get("stream"):
-            self.send_json(200, commandcode_cli(body))
+            self.send_json(200, commandcode_cli(body) if text_protocol else collect(generate_stream(body), body["model"]))
             return
         events, gone = queue.Queue(), threading.Event()
 
         def run():
-            stream = cli_stream(body)
+            stream = cli_stream(body) if text_protocol else generate_stream(body)
             try:
                 for event in stream:
                     if gone.is_set():
