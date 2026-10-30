@@ -10,7 +10,7 @@ FILES = ('cc-switch.py', 'cc-switch.ps1', 'cc-anthropic-proxy.py',
          'test_cc_switch.py', 'test_cc_resume.py', 'test_cc_proxy.py',
          'statusline.py', 'test_statusline.py', 'critic_mock_check.py', 'install-resume.py', 'README.md')
 # Claude Code slash commands shipped with cc.
-COMMAND_FILES = ('subagent-model.md', 'subagent-effort.md', 'subagent-autocompact.md', 'fallback.md', 'cc-model.md')
+COMMAND_FILES = ('fallback.md',)
 FUNCTION = b'''\r\n# Claude Code custom-provider launcher.\r\nfunction cc {\r\n    & "$env:USERPROFILE\\.config\\cc\\cc-switch.ps1" @args\r\n}\r\n'''
 
 ALIAS_GUARD = '''
@@ -63,7 +63,7 @@ def install(target, profiles, commands=None, claude=None):
                                       ('SessionStart', None, 'hook-context'),
                                       ('UserPromptSubmit', None, 'hook-context'),
                                       ('SubagentStop', '^cc-.*', 'hook-subagent-stop'),
-                                      ('UserPromptExpansion', 'subagent-model|subagent-effort|subagent-autocompact|fallback|cc-model', 'hook-command')]:
+                                      ('UserPromptExpansion', 'fallback', 'hook-command')]:
             groups = hooks.setdefault(event, [])
             # Replace only our own entries; preserve every unrelated hook and matcher.
             for group in groups:

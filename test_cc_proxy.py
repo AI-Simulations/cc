@@ -187,6 +187,21 @@ try:
     urllib.request.urlopen(request, timeout=10).read()
     assert "reasoning_effort" not in received[-1][2]
     proxy.effort_supported = lambda provider, model, effort: True
+    # `cc official`: passed to Anthropic as sent (path, login, body, stream) until /model routes the launch.
+    proxy.OFFICIAL_UPSTREAM = f"http://127.0.0.1:{upstream.server_port}"
+    route_for = proxy.route_for
+    proxy.route_for = lambda launch: None
+    official = f"http://127.0.0.1:{adapter.server_port}/official/v1/messages?beta=true"
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.read() == wire, 'The official stream comes back byte for byte'
+    assert received[-1] == ("/v1/messages?beta=true", "Bearer oauth-login", {**body, "stream": True})
+    # Routed by /model: converted for the picked provider, with its key and model.
+    proxy.route_for = lambda launch: {"provider": "nvidia", "model": "routed", "effort": None, "key": "nv-key"}
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": False}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
+    assert received[-1][:2] == ("/v1/chat/completions", "Bearer nv-key") and received[-1][2]["model"] == "routed"
+    proxy.route_for = route_for
     # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
     # x-ratelimit-* headers land where the status line reads them.
     proxy.spare_keys = lambda route: ["spare"]

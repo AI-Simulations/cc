@@ -106,7 +106,7 @@ The `/model` picker also gets up to three extra entries from that live, plan-fil
 and on adapter routes Claude Code discovers the gateway's own `/v1/models` (served by the
 adapter). A remembered pick the plan no longer allows stays out. Claude Code keeps only
 Claude-named ids from that discovery, so a non-Claude model is chosen by typing its id in
-`/model` or with `/subagent-model`.
+`/model` or in `/model`'s Subagent tab.
 
 `commandcode-cli` serves the Command Code subscription (the Go plan works only
 through its own CLI). The adapter route `http://127.0.0.1:10532/commandcode-cli`
@@ -222,9 +222,13 @@ A key out of quota can also rotate: put spare keys, comma-separated, in `<KEY>_A
 
 ### In-session model route
 
-`/cc-model <provider> <model>` switches an adapter session to another provider/model without
-restarting Claude Code; `/cc-model` opens a provider then model menu, and `/cc-model off`
-returns to the route chosen at launch. The adapter applies it per launch id, so other sessions
+`/model` (no arguments) opens the subagent-picker mod's picker, which holds the keyboard as the
+built-in one does: Main model, Subagent and Fallbacks tabs, each with provider, model and effort
+columns (Tab switches tabs, ←/→ columns, ↑/↓ rows, Enter sets, Esc closes). On a cc adapter
+session the Main model tab switches provider and model live (`cc route <provider> <model> [effort]`
+from the shell); on Claude Code's own model it switches Claude models through `/model` and
+`/effort`, and another provider copies its `cc` relaunch command. `/fallback` opens it on the
+Fallbacks tab. `/model <name>` with arguments is Claude Code's own. The adapter applies it per launch id, so other sessions
 and workers keep their own route. Only adapter routes are listed (`python cc-switch.py route
 routes`); a session that connects directly (official, Command Code, MiniMax, OpenCode,
 OpenRouter) must be relaunched to change provider.
@@ -287,17 +291,10 @@ included, quits with "No change."; saves replace whole files, so nothing is left
 Changing a profile's provider without a model drops the old model id. `--description` sets the
 text the main session reads when choosing the subagent.
 
-Three slash commands in every Claude Code session wrap the same CLI:
-
-```text
-/subagent-model <name> [model|default]        # no model: list every model the provider offers
-/subagent-effort <name> [low|medium|high|xhigh|max|default]
-/subagent-autocompact <name> [1-100|default]
-```
-
-They run `cc agents models <name>` (plan-filtered, current pick marked with `*`) and
-`cc agents set`, so their output matches the terminal. With no subagent name they list the
-profiles. The model command lists the provider's live catalog rather than a fixed set.
+`/model`'s Subagent tab sets a profile's provider, model, effort and auto-compact threshold
+(Compact column, `cc agents set`), so the result matches the terminal. The Main model tab's
+Compact column has the subagent-picker mod compact this session once its context reaches that
+share of the window (`default` leaves Claude Code's own threshold).
 
 The main session's auto-compact threshold is set the same way: the startup prompt asks for it
 after the effort and remembers the pick, or `cc <provider> <model> --autocompact 70` sets it for

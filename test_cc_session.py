@@ -1,4 +1,4 @@
-"""Per-session subagent profiles, /cc-model route overrides and relay stop nudges."""
+"""Per-session subagent profiles, /model route overrides and relay stop nudges."""
 import importlib.util
 import io
 import json

@@ -101,7 +101,7 @@ class ResumeTests(unittest.TestCase):
             for name in installer.COMMAND_FILES:
                 self.assertEqual((commands/name).read_bytes(), (ROOT/'commands'/name).read_bytes(),
                                  f'{name} ships with cc')
-            self.assertTrue(list(target.glob('backup-resume-*/commands/subagent-model.md')),
+            self.assertTrue(list(target.glob('backup-resume-*/commands/fallback.md')),
                             'Reinstalling backs up the shipped commands')
             for name in installer.FILES:
                 self.assertEqual((target/name).read_bytes(), (ROOT/name).read_bytes())
@@ -331,21 +331,17 @@ class AgentRoutingTests(unittest.TestCase):
                         cc.run_agent('sub', cc.CONTEXT_PREFIX + json.dumps(context) + '\ntask')
                     launch.assert_not_called()
 
-    def test_subagent_slash_commands_run_without_a_model_turn(self):
-        with patch.object(cc, 'load_agents', return_value=self.PROFILES),              patch.object(cc.subprocess, 'run') as run:
+    def test_slash_commands_run_without_a_model_turn(self):
+        with patch.object(cc, 'load_agents', return_value=self.PROFILES), patch.object(cc.subprocess, 'run') as run:
             run.return_value = Mock(stdout='changed', stderr='')
-            out = cc.hook_command({'command_name': 'subagent-effort', 'command_args': 'sub low'})
+            out = cc.hook_command({'command_name': 'fallback', 'command_args': 'nvidia a/b'})
             self.assertEqual(out['decision'], 'block')
             self.assertIn('changed', out['reason'])
-            self.assertEqual(run.call_args.args[0][-5:], ['agents', 'set', 'sub', '--effort', 'low'])
-            out = cc.hook_command({'command_name': 'subagent-model', 'command_args': 'nobody gpt-x'})
-            self.assertEqual(run.call_args.args[0][-2:], ['agents', 'models'])
-            self.assertIn("No subagent 'nobody'", out['reason'])
-            out = cc.hook_command({'command_name': 'subagent-autocompact', 'command_args': 'sub'})
-            self.assertEqual(run.call_args.args[0][-3:], ['agents', 'models', 'sub'])
-            self.assertIn('<1-100|default>', out['reason'])
+            self.assertEqual(run.call_args.args[0][-3:], ['fallback', 'nvidia', 'a/b'])
             run.reset_mock()
-            self.assertEqual(cc.hook_command({'command_name': 'review', 'command_args': ''}), {})
+            # /subagent-autocompact is /model's Compact column now; Claude Code's own commands pass
+            for name in ('subagent-autocompact', 'subagent-model', 'review'):
+                self.assertEqual(cc.hook_command({'command_name': name, 'command_args': 'sub 70'}), {})
             run.assert_not_called()
 
     def test_adapter_workers_tag_requests_for_live_effort(self):
@@ -670,6 +666,16 @@ class FallbackTests(unittest.TestCase):
             self.assertEqual(out.getvalue().splitlines(), ['Fallback: off', 'Fallback: nvidia/deepseek-ai/deepseek-v4-pro', 'Fallback: off', 'Fallback: off'])
             with self.assertRaises(SystemExit):
                 cc.fallback_command(['official', 'claude-opus-5-5'])  # not an adapter route
+
+    def test_fallback_and_route_keep_an_effort(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'FALLBACKS_FILE', os.path.join(tmp, 'f.json')),                 patch.object(cc, 'ROUTES_FILE', os.path.join(tmp, 'r.json')),                 patch.dict(os.environ, {'CC_LAUNCH_ID': 'one', 'CC_MAIN_PROVIDER': 'gemini'}), contextlib.redirect_stdout(io.StringIO()) as out:
+            cc.fallback_command(['nvidia', 'x/y', 'high'])
+            cc.route_command(['nvidia', 'x/y', 'default'])
+            cc.route_command(['nvidia', 'x/y', 'low'])
+            self.assertEqual(out.getvalue().splitlines(), ['Fallback: nvidia/x/y', 'Effort: high', 'Route: nvidia/x/y',
+                                                           'Route: nvidia/x/y', 'Effort: low'])
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cc.route_command(['nvidia', 'x/y', 'lo w;'])
 
     def test_picker_lists_routes_without_the_session_own(self):
         with patch.dict(os.environ, {'CC_MAIN_PROVIDER': 'nvidia', 'CC_LAUNCH_ID': ''}), contextlib.redirect_stdout(io.StringIO()) as out:

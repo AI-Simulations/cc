@@ -39,7 +39,12 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 21}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 23}
+# `cc official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
+# until /model routes its launch to another provider.
+OFFICIAL_ROUTE = "official"
+OFFICIAL_UPSTREAM = "https://api.anthropic.com"
+HOP_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "accept-encoding", "x-cc-launch"}
 # MiMo also closes with `</tool_call_<hash>>`, or not at all at the end of its reply.
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call[^>]*>|$)", re.S)
 XML_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.S)
@@ -647,7 +652,7 @@ def fallback_for(launch):
 
 
 def route_for(launch):
-    """{provider, model, key} of the launch's /cc-model override, or None."""
+    """{provider, model, effort, key} of the launch's /model override, or None."""
     if not launch:
         return None
     try:
@@ -665,7 +670,7 @@ def route_for(launch):
         key = _load_cc_switch().auth_key(key_id) if key_id and key_id not in ("oauth", "gpt4free", "lmstudio") else ""
     except Exception:
         pass
-    return {"provider": provider, "model": model, "key": key or provider}
+    return {"provider": provider, "model": model, "effort": target.get("effort"), "key": key or provider}
 
 
 def note_fallback(launch, target):
@@ -754,8 +759,42 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def forward_official(self, method, data=None):
+        """Passes a request to Anthropic unchanged and streams its answer back as it arrives."""
+        if self.headers.get("Origin"):
+            self.send_json(403, {"error": "Browser requests are not allowed"})
+            return
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
+        request = urllib.request.Request(OFFICIAL_UPSTREAM + self.path[len("/" + OFFICIAL_ROUTE):], data=data,
+                                         headers=headers, method=method)
+        try:
+            response = urllib.request.urlopen(request, timeout=600)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        except OSError as exc:
+            self.send_json(502, {"type": "error", "error": {"type": "api_error", "message": f"Anthropic unreachable ({type(exc).__name__})"}})
+            return
+        with response:
+            self.send_response(response.status if hasattr(response, "status") else response.code)
+            for k, v in response.headers.items():
+                if k.lower() not in HOP_HEADERS and k.lower() != "content-encoding":
+                    self.send_header(k, v)
+            self.end_headers()
+            try:
+                while chunk := response.read1(65536):
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+        if path[0] == OFFICIAL_ROUTE:
+            if path[1:] == ["v1", "models"] and route_for(self.headers.get("x-cc-launch")):
+                self.gateway_models(OFFICIAL_ROUTE)
+            else:
+                self.forward_official("GET")
+            return
         if self.path == "/health":
             self.send_json(200, IDENTITY)
         elif len(path) == 3 and path[0] in (*UPSTREAMS, CLI_ROUTE) and path[1:] == ["v1", "models"]:
@@ -767,7 +806,7 @@ class Handler(BaseHTTPRequestHandler):
         """Claude Code's /model discovery: this route's models, or none when it cannot ask."""
         override = route_for(self.headers.get("x-cc-launch"))
         if override:
-            # /cc-model pinned this session's model: list exactly the one it serves, so /model
+            # /model's Model tab pinned this session's model: list exactly the one it serves, so /model
             # cannot offer picks the adapter would ignore.
             self.send_json(200, {"data": [{"id": override["model"], "display_name": override["model"]}],
                                  "has_more": False})
@@ -799,7 +838,13 @@ class Handler(BaseHTTPRequestHandler):
         streaming = False
         try:
             route = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
-            if len(route) != 3 or route[0] not in (*UPSTREAMS, CLI_ROUTE) or route[1:] != ["v1", "messages"]:
+            if route[0] == OFFICIAL_ROUTE and (route[1:] != ["v1", "messages"] or not route_for(self.headers.get("x-cc-launch"))):
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024 * 1024:
+                    raise ValueError("Invalid request size (maximum 32 MiB)")
+                self.forward_official("POST", self.rfile.read(length) if length else b"")
+                return
+            if len(route) != 3 or route[0] not in (*UPSTREAMS, CLI_ROUTE, OFFICIAL_ROUTE) or route[1:] != ["v1", "messages"]:
                 self.send_json(404, {"type": "error", "error": {"type": "not_found_error", "message": "Not found"}})
                 return
             if self.headers.get("Origin"):
@@ -815,8 +860,10 @@ class Handler(BaseHTTPRequestHandler):
             override = route_for(launch)
             active = override["provider"] if override else route[0]
             if override:
-                # /cc-model switched this session without restarting Claude Code.
+                # /model's Model tab switched this session without restarting Claude Code.
                 body["model"] = override["model"]
+                if override.get("effort"):
+                    body["output_config"] = {**(body.get("output_config") or {}), "effort": override["effort"]}
             if active == CLI_ROUTE:
                 self.answer_cli(body)
                 return
@@ -842,6 +889,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise
                 request["model"] = target["model"]
                 request.pop("prompt_cache_key", None)
+                if target.get("effort"):
+                    raw_effort = target["effort"]
+                    request["reasoning_effort"] = openai_effort({"output_config": {"effort": raw_effort}})
                 if request.get("reasoning_effort") and raw_effort and not effort_supported(target["provider"], target["model"], raw_effort):
                     request.pop("reasoning_effort")
                 response = open_upstream(target["provider"], request, target["key"], session=cache_key(body))

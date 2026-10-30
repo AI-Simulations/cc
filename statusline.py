@@ -420,6 +420,20 @@ def cc_fallback_jobs(session_id):
         return {}
 
 
+def cc_running_jobs(session_id):
+    """Count of this session's relay workers still running (cc-switch's running_jobs)."""
+    if not isinstance(session_id, str) or not session_id:
+        return 0
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        return cc.running_jobs(session_id)
+    except Exception:  # a status line never fails over an optional row
+        return 0
+
+
 def cc_routing_enabled():
     hooks = (user_settings().get("hooks") or {}).get("PreToolUse") or []
     return any("cc-switch.py" in hook.get("command", "") and "hook-agent" in hook.get("command", "")
@@ -609,6 +623,9 @@ def render(d):
         # a continued session keeps writing the transcript its workers name as their parent, under a new session id
         moved = {**cc_fallback_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]),
                  **cc_fallback_jobs(d.get("session_id"))}
+        # shortcut: jobs don't record their agent name, so any running worker lights every configured row
+        active = bool(cc_running_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0])
+                      or cc_running_jobs(d.get("session_id")))
         for name, profile in cc_profiles(d.get("session_id")).items():
             # a worker that cc reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
@@ -622,10 +639,11 @@ def render(d):
                       'gemini': 'Gemini', 'ollama-cloud': 'Ollama', 'lmstudio': 'LM Studio'}
             route = 'same provider' if provider == main_provider else labels.get(provider, provider)
             effort = profile.get('effort') or default_effort(provider, profile.get('model'))
-            dots = (effort_indicator(effort, dim=True, label=False, levels=effort_levels(provider, mid))
+            dots = (effort_indicator(effort, dim=not active, label=False, levels=effort_levels(provider, mid))
                     if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
-            seg = [f"{DIM}↳ {name}:{RESET} {rgb(hue, 0.45, 0.6)}{target}{RESET} {dots} · {route}"
+            head = f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}"
+            seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots} · {route}"
                    + (f" {YELLOW}↪ fallback active{RESET}" if name in moved else "")]
             sub_source = CC_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:

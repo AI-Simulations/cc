@@ -197,7 +197,7 @@ function codex { $script:codexLaunched = $true; claude @args }
         result = subprocess.run(['powershell', '-NoProfile', '-File', str(script)], env=env, capture_output=True, text=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         data = json.loads(result.stdout.splitlines()[-1])
         assert data['opusCapabilities'] == 'thinking,adaptive_thinking,interleaved_thinking,effort,xhigh_effort,max_effort' if provider == 'commandcode' else not data['opusCapabilities']
-        assert data['headers'] == 'x-cc-launch: ' + data['launch'] and len(data['launch']) == 32 if provider in cc.FALLBACK_ROUTES else not data['headers'], 'Adapter routes name their launch for /fallback'
+        assert data['headers'] == 'x-cc-launch: ' + data['launch'] and len(data['launch']) == 32 if provider in (*cc.FALLBACK_ROUTES, 'official') else not data['headers'], 'Adapter routes (and official, passed through) name their launch for /fallback and /model'
         assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else not data['toolSearch']
         assert data['autoModeServer'] == '0' if provider != 'official' else not data['autoModeServer']
         assert data['gateway'] == '1' if provider not in ('official', 'commandcode') else not data['gateway'], 'The /model picker sees the gateway list'
@@ -207,7 +207,9 @@ function codex { $script:codexLaunched = $true; claude @args }
         assert data['context'] == str(context) if context else not data['context']
         assert not data['openai'] and not data['openaiBase']
         if provider == 'official':
-            assert all(not data[k] for k in ['base', 'key', 'token', 'model', 'fable', 'sonnet', 'subagent'])
+            # the claude.ai login, passed through the adapter so /model can reroute it
+            assert data['base'] == f'http://127.0.0.1:{cc.ADAPTER_PORT}/official'
+            assert all(not data[k] for k in ['key', 'token', 'model', 'fable', 'sonnet', 'subagent'])
             assert data['launchArgs'] == []
         else:
             assert data['base'] == (f'http://127.0.0.1:{cc.ADAPTER_PORT}/{provider}' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else cc.PROVIDERS[provider]['base'])

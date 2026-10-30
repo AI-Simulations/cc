@@ -591,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 21}
+    expected = {"service": "cc-anthropic-proxy", "version": 23}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -697,11 +697,11 @@ def load_fallbacks():
         return {}
 
 
-def set_fallback(launch, provider=None, model=None):
+def set_fallback(launch, provider=None, model=None, effort=None):
     """Sets (or with no provider clears) a launch's fallback route; entries expire after 30 days."""
     data = {k: v for k, v in load_fallbacks().items() if time.time() - v.get("at", 0) < 30 * 86400}
     if provider:
-        data[launch] = {"provider": provider, "model": model, "at": time.time()}
+        data[launch] = {"provider": provider, "model": model, **({"effort": effort} if effort else {}), "at": time.time()}
     else:
         data.pop(launch, None)
     write_json(FALLBACKS_FILE, data, indent=1)
@@ -715,18 +715,24 @@ def load_routes():
         return {}
 
 
-def set_route(launch, provider=None, model=None):
-    """Sets (or with no provider clears) this launch's provider/model override."""
+def set_route(launch, provider=None, model=None, effort=None):
+    """Sets (or with no provider clears) this launch's provider/model override, and its effort."""
     data = {k: v for k, v in load_routes().items() if time.time() - v.get("at", 0) < 86400}
     if provider:
-        data[launch] = {"provider": provider, "model": model, "at": time.time()}
+        data[launch] = {"provider": provider, "model": model, **({"effort": effort} if effort else {}), "at": time.time()}
     else:
         data.pop(launch, None)
     write_json(ROUTES_FILE, data, indent=1)
 
 
+def on_adapter():
+    """This session reaches the adapter: an adapter route, or `cc official` passed through it."""
+    return (os.environ.get("CC_MAIN_PROVIDER") in FALLBACK_ROUTES
+            or os.environ.get("ANTHROPIC_BASE_URL", "").endswith(f":{ADAPTER_PORT}/official"))
+
+
 def route_command(words):
-    """cc route [<provider> <model> | off | routes | models <provider>]: this session's model route."""
+    """cc route [<provider> <model> [effort] | off | routes | models <provider>]: this session's model route."""
     if words == ["routes"]:
         for n in FALLBACK_ROUTES:
             print(f"{n}\t{PROVIDERS[n]['label']}")
@@ -740,21 +746,34 @@ def route_command(words):
         return
     launch = os.environ.get("CC_LAUNCH_ID")
     if not launch:
-        die(f"This session has no cc launch id; /cc-model needs a session started by cc on one of: {', '.join(FALLBACK_ROUTES)}.")
-    if os.environ.get("CC_MAIN_PROVIDER") not in FALLBACK_ROUTES:
+        die(f"This session has no cc launch id; /model's Model tab needs a session started by cc on one of: {', '.join(FALLBACK_ROUTES)}.")
+    if not on_adapter():
         # The adapter reads x-cc-launch; a direct Anthropic route never reaches it.
         die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly; "
-            f"/cc-model works only on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
+            f"/model's Model tab works only on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
         set_route(launch)
-    elif len(words) == 2 and words[0].lower() in FALLBACK_ROUTES:
+    elif len(words) in (2, 3) and words[0].lower() in FALLBACK_ROUTES:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", words[1]):
             die("Invalid model id.")
-        set_route(launch, words[0].lower(), words[1])
-    elif words and not (len(words) == 2 and words[0] in FALLBACK_ROUTES):
-        die(f"Usage: cc route [<provider> <model> | off]; providers: {', '.join(FALLBACK_ROUTES)}")
-    target = load_routes().get(launch)
-    print(f"Route: {target['provider']}/{target['model']}" if target else "Route: launch default")
+        set_route(launch, words[0].lower(), words[1], route_effort(words[2:]))
+    elif words:
+        die(f"Usage: cc route [<provider> <model> [effort] | off]; providers: {', '.join(FALLBACK_ROUTES)}")
+    print_target("Route", load_routes().get(launch), "launch default")
+
+
+def route_effort(rest):
+    """The optional effort word of `cc route`/`cc fallback`; `default` (or none) sends Claude Code's own."""
+    effort = rest[0].lower() if rest else "default"
+    if not re.fullmatch(r"[a-z0-9]+", effort):
+        die("Invalid effort.")
+    return None if effort == "default" else effort
+
+
+def print_target(name, target, unset):
+    print(f"{name}: {target['provider']}/{target['model']}" if target else f"{name}: {unset}")
+    if target and target.get("effort"):
+        print(f"Effort: {target['effort']}")
 
 
 def fallback_menu(name, current=None):
@@ -804,8 +823,7 @@ def fallback_command(words):
             die("Usage: cc fallback subagent <name> [off | <provider> <model> [effort]]")
         if rest:
             save_agents(profiles)
-        target = profiles[name].get("fallback")
-        print(f"Fallback: {target['provider']}/{target['model']}" if target else "Fallback: off")
+        print_target("Fallback", profiles[name].get("fallback"), "off")
         return
     launch = os.environ.get("CC_LAUNCH_ID")
     if not launch:
@@ -815,12 +833,11 @@ def fallback_command(words):
             f"nothing to fall back from; fallback works on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
         set_fallback(launch)
-    elif len(words) == 2 and words[0].lower() in FALLBACK_ROUTES:
-        set_fallback(launch, words[0].lower(), words[1])
+    elif len(words) in (2, 3) and words[0].lower() in FALLBACK_ROUTES:
+        set_fallback(launch, words[0].lower(), words[1], route_effort(words[2:]))
     elif words:
-        die(f"Usage: cc fallback [<provider> <model> | off]; providers: {', '.join(FALLBACK_ROUTES)}")
-    target = load_fallbacks().get(launch)
-    print(f"Fallback: {target['provider']}/{target['model']}" if target else "Fallback: off")
+        die(f"Usage: cc fallback [<provider> <model> [effort] | off]; providers: {', '.join(FALLBACK_ROUTES)}")
+    print_target("Fallback", load_fallbacks().get(launch), "off")
 
 
 def take_option(args, flag):
@@ -895,8 +912,9 @@ def go_messages(model_id):
     return model_id.startswith(("claude-", "minimax-", "qwen"))
 
 
-def route_env(name, model_id):
-    """Environment that points Claude Code at this provider and model."""
+def route_env(name, model_id, passthrough=False):
+    """Environment that points Claude Code at this provider and model; passthrough: an interactive
+    official launch goes through the adapter (workers connect directly)."""
     p = PROVIDERS[name]
     ensure_key(name)
     if name != "official" and (not isinstance(model_id, str) or not model_id.strip()):
@@ -907,7 +925,14 @@ def route_env(name, model_id):
            or (name == "opencode-go" and not go_messages(model_id)) else p["format"])
     env = {}
     if name == "official":
-        pass  # the normal claude.ai login: no route variables
+        # The normal claude.ai login, through the adapter, which hands it to Anthropic untouched until
+        # /model routes the launch elsewhere. CC_OFFICIAL_DIRECT=1, or no adapter, connects directly.
+        if passthrough and os.environ.get("CC_OFFICIAL_DIRECT") != "1":
+            try:
+                ensure_anthropic_proxy()
+                env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/official"
+            except (SystemExit, Exception) as exc:
+                print(f"Adapter unavailable ({exc}); connecting to Anthropic directly.", file=sys.stderr)
     elif fmt == "anthropic":
         token = ""
         if p.get("key"):
@@ -991,11 +1016,11 @@ def route_env(name, model_id):
 
 
 def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autocompact=None, fallback=None, launch=None):
-    env = route_env(name, model_id)
+    env = route_env(name, model_id, passthrough=True)
     # Every launch gets an id: subagent profiles and the optional route override are per session.
     env["CC_LAUNCH_ID"] = launch = launch or os.environ.get("CC_LAUNCH_ID") or uuid.uuid4().hex
-    if name in FALLBACK_ROUTES:
-        # Names this launch to the adapter, so /fallback and /cc-model can change it mid-session.
+    if name in FALLBACK_ROUTES or env.get("ANTHROPIC_BASE_URL", "").endswith("/official"):
+        # Names this launch to the adapter, so /fallback and /model can change it mid-session.
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [env.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-launch: {launch}"]))
         if fallback:
             set_fallback(launch, fallback["provider"], fallback["model"])
@@ -1585,6 +1610,12 @@ def fallback_jobs(parent):
     return found
 
 
+def running_jobs(parent):
+    """Count of this session's relay jobs still running (an .out without its .rc)."""
+    return sum(1 for out in (Path(JOBS_DIR).glob("*.out") if parent and os.path.isdir(JOBS_DIR) else [])
+               if not Path(JOBS_DIR, out.stem + ".rc").exists() and job_meta(out.stem).get("parent") == parent)
+
+
 def _close_job(job):
     for name in (".out", ".rc", ".feed", ".session", ".meta", ".wait", ".nag", ".fallback"):
         try:
@@ -1989,10 +2020,8 @@ def agent_hook(data):
                     "is blocked; give a configured cc worker a self-contained task after checking its context.")
 
 
-SLASH_COMMANDS = {"fallback": "fallback", "cc-model": "route"}  # answered by `cc <subcommand> <args>` as typed
-SLASH_FLAGS = {"subagent-model": ("--model", "<model-id|default>"),
-               "subagent-effort": ("--effort", "<low|medium|high|xhigh|max|default>"),
-               "subagent-autocompact": ("--autocompact", "<1-100|default>")}
+SLASH_COMMANDS = {"fallback": "fallback"}  # answered by `cc <subcommand> <args>` as typed
+SLASH_FLAGS = {}  # /subagent-autocompact went into /model's Compact column
 
 
 def hook_command(data):
@@ -2234,6 +2263,12 @@ def main():
         print(f"  Auto-compact       : {os.environ.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'Claude default')}")
         if state:
             print(f"  Last chosen         : {state.get('provider')} / {state.get('model')}")
+        return
+
+    if pos == ["plain"]:
+        # Plain `claude` (the PowerShell profile's function): the claude.ai login with no menus, through
+        # the adapter, so /model can still move the session to another provider in place.
+        apply("official", claude_args=claude_args)
         return
 
     try:
