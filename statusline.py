@@ -6,6 +6,7 @@ import colorsys
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -350,7 +351,8 @@ def openrouter_quota():
 
 QUOTA_FETCHERS = {"commandcode": commandcode_quota, "openai": openai_quota,
                   "opencode-go": opencode_go_quota, "hyper": hyper_quota, "openrouter": openrouter_quota}
-QUOTA_TTL = 120
+QUOTA_TTL = 10  # the usage endpoints are plain account lookups: no model tokens
+QUOTA_RETRY = 60  # after a failed fetch
 # cc provider names (~/.config/cc/agents.json) that share a quota source; the rest have no quota API.
 CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "commandcode-cli": "commandcode",
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
@@ -452,11 +454,27 @@ def cc_main_provider(source):
 
 
 def provider_quota(source, now):
-    """Returns (quota, stale_since); a failed fetch keeps the last good result."""
+    """Returns (quota, stale_since), refreshing it in the background so no render waits on the network."""
     name = f"quota-{source}.json"
     saved = load_json(name)
-    if now - max(saved.get("at", 0), saved.get("tried", 0)) < QUOTA_TTL:
-        return saved, saved.get("at") if saved.get("tried", 0) > saved.get("at", 0) else None
+    if not saved.get("at"):
+        if now - saved.get("tried", 0) >= QUOTA_RETRY:
+            return fetch_quota(source, now)
+    elif (now - saved["at"] >= QUOTA_TTL and now - saved.get("tried", 0) >= QUOTA_RETRY
+          and now - saved.get("claimed", 0) >= QUOTA_TTL):
+        save_json(name, {**saved, "claimed": now})  # other sessions' renders leave this refresh to us
+        try:
+            subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "--quota", source], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError:
+            pass
+    return saved, saved.get("at") if saved.get("tried", 0) > saved.get("at", 0) else None
+
+
+def fetch_quota(source, now):
+    """Reads and saves the quota; a failed fetch keeps the last good result."""
+    name = f"quota-{source}.json"
+    saved = load_json(name)
     try:
         q = {**QUOTA_FETCHERS[source](), "at": now}
     except Exception as e:
@@ -716,6 +734,9 @@ def render(d):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--quota"]:
+        fetch_quota(sys.argv[2], time.time())
+        sys.exit()
     sys.stdout.reconfigure(encoding="utf-8")
     try:
         data = json.loads(sys.stdin.read() or "{}")

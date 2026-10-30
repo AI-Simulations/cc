@@ -1387,7 +1387,25 @@ def _restorable_context(source):
         yield str(restored)
 
 
-CONTEXT_BUDGET = 100_000  # tokens of parent conversation a worker inherits; cmdc re-sends it uncached every step
+CONTEXT_BUDGET = 50_000  # tokens of parent conversation a worker inherits; every step of the worker re-sends them
+# Tools a headless worker never needs; their schemas are a third of its 28k baseline, re-sent every step.
+WORKER_UNUSED_TOOLS = ("Artifact,ArtifactComments,ArtifactData,Workflow,ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger,"
+                       "DesignSync,SendFeedback,ReportFindings,EnterPlanMode,ExitPlanMode,EnterWorktree,ExitWorktree,NotebookEdit,"
+                       "PushNotification,AskUserQuestion")
+# Caveman's and ponytail's rules for every worker: their hooks do not all reach a headless or in-process one.
+WORKER_RULES = """Save tokens. Write terse fragments: no articles or filler, no preamble, no recap; keep code, paths, numbers, errors exact.
+Make the smallest change that fully solves the task: reuse what exists, add nothing unasked.
+Where the project has .codegraph/, call codegraph_explore before Read or Grep, and do not re-read what it returned."""
+
+
+def worker_mcp():
+    """--mcp-config value: the user's codegraph without its watcher (the main session keeps the index fresh)."""
+    try:
+        with open(Path.home() / ".claude.json", encoding="utf-8") as f:
+            server = json.load(f)["mcpServers"]["codegraph"]
+        return json.dumps({"mcpServers": {"codegraph": {**server, "args": [*server.get("args", []), "--no-watch"]}}}, separators=(",", ":"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return '{"mcpServers":{}}'
 
 
 def _is_prompt(entry):
@@ -1400,8 +1418,26 @@ def _is_prompt(entry):
         isinstance(b, dict) and b.get("type") == "text" for b in content))
 
 
+def _step_cut(entries, start, budget):
+    """Within a long unattended turn from `start`: the oldest step (an assistant message after a user one,
+    so no tool_result loses its call) leaving at most `budget`, or None when the turn fits."""
+    size, cut = 0, None
+    for i in range(len(entries) - 1, start, -1):
+        message = entries[i].get("message")
+        if not message:
+            continue
+        size += len(json.dumps(message.get("content"), ensure_ascii=False)) // 4
+        if size > budget:
+            return cut
+        previous = next((e for e in reversed(entries[start:i]) if e.get("message")), None)
+        if entries[i].get("type") == "assistant" and previous and previous.get("type") == "user":
+            cut = i
+    return None
+
+
 def _context_tail(entries, budget=CONTEXT_BUDGET):
-    """The newest messages that fit `budget` (about 4 characters a token), cut at a typed prompt."""
+    """The newest messages that fit `budget` (about 4 characters a token), cut at a typed prompt,
+    or that prompt and the newest steps of its turn when the turn alone is over budget."""
     size, start = 0, None
     for i in range(len(entries) - 1, -1, -1):
         message = entries[i].get("message")
@@ -1411,9 +1447,14 @@ def _context_tail(entries, budget=CONTEXT_BUDGET):
             if size > budget and start is not None:
                 break
             start = i
-    if not start:
-        return entries  # it all fits, or no prompt to cut at
-    tail = [dict(entry) for entry in entries[start:]]
+    if start is None:
+        return entries  # no prompt to cut at
+    cut = _step_cut(entries, start, budget)
+    if not start and cut is None:
+        return entries  # it all fits
+    tail = [dict(entry) for entry in ([entries[start], *entries[cut:]] if cut else entries[start:])]
+    if cut:
+        tail[1]["parentUuid"] = entries[start]["uuid"]
     # Key points of the older history: the parent's latest compaction summary from before the cut, as the root.
     summary = next((dict(e) for e in reversed(entries[:start]) if e.get("isCompactSummary") and e.get("uuid")), None)
     tail[0]["parentUuid"] = summary["uuid"] if summary else None
@@ -1477,9 +1518,10 @@ def run_agent(agent, prompt, opts=None, require_context=False):
                CLAUDE_CODE_FORK_SUBAGENT="0")
     if a.get("autocompact"):
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(a["autocompact"])
-    # No MCP servers: each worker otherwise starts its own codegraph that indexes and watches the repo.
-    command = ["claude", "-p", "--strict-mcp-config", *(["--model", model_id] if model_id else []),
-                *(["--effort", effort] if effort else []), *a.get("args", [])]
+    # Only codegraph, unwatched: each worker otherwise starts every MCP server, and a codegraph that indexes and watches the repo.
+    command = ["claude", "-p", "--strict-mcp-config", "--mcp-config", worker_mcp(), "--disallowedTools", WORKER_UNUSED_TOOLS,
+               "--append-system-prompt", WORKER_RULES,
+               *(["--model", model_id] if model_id else []), *(["--effort", effort] if effort else []), *a.get("args", [])]
     if context:
         conflicts = {"--resume", "-r", "--continue", "-c", "--session-id", "--fork-session"}
         if any(arg.split("=", 1)[0] in conflicts for arg in a.get("args", [])):
@@ -1502,8 +1544,7 @@ def run_agent(agent, prompt, opts=None, require_context=False):
         if effort:
             command += ["--effort", effort]
         if context.get("read_only"):
-            command += ["--tools", "Read,Glob,Grep,WebFetch,WebSearch", "--strict-mcp-config",
-                        "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "plan"]
+            command += ["--tools", "Read,Glob,Grep,WebFetch,WebSearch", "--permission-mode", "plan"]
         record = Path(CFG_DIR) / "contexts" / (context["token"] + ".json")
         prompt = ("You are the configured cc worker. Use the resumed conversation as context, including its "
                   "project instructions and memory. Perform this assigned task directly; do not relay it back "
@@ -1915,9 +1956,12 @@ text; do not retry.
 name: cc-{agent}-live
 description: {json.dumps(f"In-process cc-{agent} worker; cc picks it for cc-{agent} itself. Do not call it directly.")}
 model: {LIVE_MODEL}{agent}
+disallowedTools: {WORKER_UNUSED_TOOLS}
 ---
 You are a worker subagent. Do the task you are given completely with your tools, then reply with a
 concise report of what you did, what you found and anything left undone: the parent sees only that reply.
+
+{WORKER_RULES}
 """
         twin = Path(AGENTS_DIR, f"cc-{agent}-live.md")
         if not twin.is_file() or twin.read_text(encoding="utf-8") != live:  # a rewrite would hide it from running sessions (known_live)
@@ -1989,11 +2033,19 @@ def agent_hook(data):
         if kind.endswith("-live") and kind[:-5] in {"cc-" + name for name in profiles}:
             kind = kind[:-5]
         def known_live():
-            # Claude Code reads agent files at startup: a twin written after this session began is unknown to it.
+            # Claude Code reads agent files at startup and on /reload-plugins, and records each change to the
+            # types it knows in the transcript: a twin written after that is unknown to it.
+            known = False
             try:
-                return Path(AGENTS_DIR, kind + "-live.md").stat().st_mtime < Path(data["transcript_path"]).stat().st_ctime
-            except (OSError, KeyError, TypeError):
+                with open(data["transcript_path"], "rb") as handle:
+                    for line in handle:
+                        if b'"agent_listing_delta"' in line and kind.encode() + b"-live" in line:
+                            listing = json.loads(line).get("attachment") or {}
+                            known = (kind + "-live" in listing.get("addedTypes", [])
+                                     or (known and kind + "-live" not in listing.get("removedTypes", [])))
+            except (OSError, KeyError, TypeError, ValueError):
                 return False
+            return known
 
         def resumes_live():
             # only an in-process worker resumes in-process; older workers go through the relay's handoff
@@ -2140,7 +2192,7 @@ def hook_context(data):
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
             "additionalContext": "Delegate only through configured cc subagents: " + (choices or "none configured") +
             ". Native fork/general-purpose/custom worker calls are blocked. Use a cc-* subagent_type and "
-            "a complete task; cc copies previous conversation/project memory. To continue an old worker, "
+            "a self-contained task; cc copies only the recent conversation and project memory. To continue an old worker, "
             "use a configured cc-* type with its resume id; do not restart it as a native fork."
             + ("\n\n" + orphans if orphans else "")}}
 

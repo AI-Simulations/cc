@@ -57,24 +57,33 @@ class CcSessionTests(unittest.TestCase):
 
     def test_agent_runs_in_process_through_the_adapter_and_relays_otherwise(self):
         root = Path(self.tmp.name)
-        twin = root / "agents" / "cc-sub-live.md"
-        twin.parent.mkdir()
-        twin.write_text("twin", encoding="utf-8")
-        os.utime(twin, (1, 1))  # written before the session began
-        (root / "main.jsonl").write_text("", encoding="utf-8")
+        main = root / "main.jsonl"
+        listing = {"type": "attachment", "attachment": {"type": "agent_listing_delta", "addedTypes": ["cc-sub-live"], "removedTypes": []}}
+        main.write_text(json.dumps(listing) + "\n", encoding="utf-8")
         call = {"tool_name": "Agent", "transcript_path": str(root / "main.jsonl"),
                 "tool_input": {"subagent_type": "cc-sub", "prompt": "do it", "description": "d"}}
         with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.cc.ADAPTER_PORT}/official"}):
             live = self.cc.agent_hook(call)["hookSpecificOutput"]["updatedInput"]
             self.assertEqual((live["subagent_type"], live["prompt"]), ("cc-sub-live", "do it"))
-            os.utime(twin)  # rewritten after the session began: it cannot know the type yet
+            main.write_text('{"type":"attachment","attachment":{"type":"agent_listing_delta","addedTypes":["cc-sub"]}}\n', encoding="utf-8")
             fresh = self.cc.agent_hook(call)["hookSpecificOutput"]["updatedInput"]
-            self.assertEqual(fresh["subagent_type"], "cc-sub", "A session older than the twin relays")
+            self.assertEqual(fresh["subagent_type"], "cc-sub", "A session that never listed the twin relays")
         with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": ""}):
             relayed = self.cc.agent_hook({**call, "tool_input": {**call["tool_input"], "subagent_type": "cc-sub-live"}})
         updated = relayed["hookSpecificOutput"]["updatedInput"]
         self.assertEqual(updated["subagent_type"], "cc-sub", "A direct session relays even a cc-*-live call")
         self.assertTrue(updated["prompt"].startswith(self.cc.CONTEXT_PREFIX))
+
+    def test_worker_context_cuts_a_long_unattended_turn_at_a_step(self):
+        prompt = {"type": "user", "uuid": "p", "message": {"role": "user", "content": "go"}}
+        turn = []
+        for i in range(10):
+            turn.append({"type": "assistant", "uuid": f"a{i}", "message": {"role": "assistant", "content": "x" * 4000}})
+            turn.append({"type": "user", "uuid": f"r{i}", "message": {"role": "user", "content": [{"type": "tool_result", "content": "y"}]}})
+        tail = self.cc._context_tail([prompt, *turn], budget=2500)
+        self.assertEqual([e["uuid"] for e in tail], ["p", "a8", "r8", "a9", "r9"])
+        self.assertEqual(tail[1]["parentUuid"], "p")
+        self.assertEqual(len(self.cc._context_tail([prompt, *turn], budget=100000)), 21, "A turn that fits stays whole")
 
     def test_a_terminal_left_with_an_old_launch_id_edits_the_global_profiles(self):
         changed = {"sub": {"provider": "official", "effort": "low"}}

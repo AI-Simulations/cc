@@ -247,7 +247,7 @@ async function providerRows($: EngineInterface, t: GridTab, who: string | undefi
   if (t.name === 'Subagent') return (cachedProviders ?? (await loadProviders($))).map(p => ({ value: p.value }))
   // a direct session switches provider only by relaunching: the other providers copy that command
   if (t.name === 'Model' && nativeModel)
-    return [{ value: 'official', label: 'official (Claude)' }, ...(cachedProviders ?? (await loadProviders($))).filter(p => p.value !== 'official').map(p => ({ value: p.value }))]
+    return [{ value: 'official' }, ...(cachedProviders ?? (await loadProviders($))).filter(p => p.value !== 'official').map(p => ({ value: p.value }))]
   if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return []
   // the session's fallback list leaves out its own provider; shortcut: a subagent's `official` fallback
   // (a rerun on Claude) is set with `cc fallback subagent`, not listed here
@@ -408,7 +408,10 @@ async function runMarquee($: EngineInterface) {
   try {
     for (let i = 0; ; i++) {
       await $.clock.sleep(250)
-      if (i % 8 === 0 && !(await $.ui.panes()).some(p => p.id === GRID_PANE)) return
+      const panes = await $.ui.panes()
+      if (!panes.some(p => p.id === GRID_PANE)) return
+      // modal, as the built-in picker: keys that land outside the grid come back to it
+      if (!panes.some(p => p.isFocused)) await takeGridKeys($)
       if (!marqueeWanted) continue
       marquee++
       await update($, grid, x => (x ? { ...x, tick: marquee } : x))
@@ -550,7 +553,7 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   const FIRST = 4 // tab line, now line, blank, titles
   const t = g.tabs[g.tab]!
   // each column as wide as its widest row (mark, label, tick) within a cap; Model takes what is left
-  const CAP: Record<string, number> = { Provider: 18, Effort: 20, Compact: 8 }
+  const CAP: Record<string, number> = { Provider: 15, Effort: 20, Compact: 8 }
   const fixed = (c: Col) => c.title === 'Model' ? 0
     : Math.min(CAP[c.title] ?? 14, Math.max(c.title.length + 1, ...c.rows.map(r => (r.label ?? r.value).length + 4)))
   const rest = Math.max(12, width - MARGIN - 2 - t.cols.reduce((n, c) => n + fixed(c), 0) - GAP * Math.max(0, t.cols.length - 1))
@@ -710,6 +713,6 @@ export const register: Register = on => {
       return next(e)
     }
     void takeGridKeys($).catch(() => undefined)
-    return { text: `/${command}: Tab switches tabs, arrows move, Enter sets, Esc closes.` }
+    return { text: `/${command}: Tab switches tabs, arrows move, Space picks, Enter sets, Esc closes.` }
   })
 }

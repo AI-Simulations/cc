@@ -267,8 +267,8 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
     # Direct terminal calls may start fresh; in-Claude relays require a context envelope.
     parent = {'ANTHROPIC_BASE_URL': 'https://parent', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE': '90', 'CLAUDECODE': '', 'KEEP': 'yes'}
     for agent, autocompact, command in [
-            ('cheap', '60', ['claude', '-p', '--strict-mcp-config', '--model', 'test/model', '--effort', 'low', '--permission-mode', 'auto']),
-            ('plain', None, ['claude', '-p', '--strict-mcp-config'])]:
+            ('cheap', '60', ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model', '--effort', 'low', '--permission-mode', 'auto']),
+            ('plain', None, ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES])]:
         with patch.dict(os.environ, parent), patch.object(cc.subprocess, 'run') as launch, patch.object(cc, 'get_models', return_value=[{'id': 'test/model', 'context': 131072}]), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy'):
             launch.return_value.returncode = 3
             try:
@@ -319,8 +319,8 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
         cc.agent_models('cheap')
     assert '* test/model' in cased_out.getvalue(), 'The current-model marker ignores id casing'
     # A model that publishes no reasoning efforts is run without --effort (MiMo rejects it).
-    for efforts, expected in (([], ['claude', '-p', '--strict-mcp-config', '--model', 'test/model']),
-                              (['low'], ['claude', '-p', '--strict-mcp-config', '--model', 'test/model', '--effort', 'low'])):
+    for efforts, expected in (([], ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model']),
+                              (['low'], ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model', '--effort', 'low'])):
         with patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'model_efforts', return_value=efforts), \
              patch.object(cc.subprocess, 'run') as launch, contextlib.redirect_stderr(io.StringIO()):
             launch.return_value.returncode = 0
@@ -336,7 +336,7 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
             cc.main()
         except SystemExit:
             pass
-    assert launch.call_args.args[0] == ['claude', '-p', '--strict-mcp-config', '--effort', 'low'], 'A provider override drops the other provider model'
+    assert launch.call_args.args[0] == ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--effort', 'low'], 'A provider override drops the other provider model'
     assert launch.call_args.kwargs['input'] == b'fix --model x', 'Only leading options are options; the task stays whole'
     assert launch.call_args.kwargs['env']['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'] == '40'
     assert cc.load_agents()['cheap'].get('autocompact') is None, 'Run options do not change the profile'
