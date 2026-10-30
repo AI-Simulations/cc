@@ -146,6 +146,25 @@ def read_json(path):
         return {}
 
 
+def default_effort(provider, model_id):
+    """The level a profile with no effort runs at (the picker's EFFORT_INFO): cmdc's per-model or global
+    config, Codex's default_reasoning_level, Claude Code's own settings; None when unknown."""
+    if not model_id:
+        return None
+    if provider in ("commandcode", "commandcode-cli"):
+        cfg = read_json(os.path.expanduser("~/.commandcode/config.json"))
+        return (cfg.get("reasoningEffort") or {}).get(model_id) or cfg.get("effort")
+    if provider == "openai-oauth":
+        rows = read_json(os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"),
+                                      "models_cache.json")).get("models") or ()
+        return next((r.get("default_reasoning_level") for r in rows
+                     if isinstance(r, dict) and str(r.get("slug", "")).casefold() == str(model_id).casefold()), None)
+    if provider == "official":
+        cfg = read_json(os.path.expanduser("~/.claude/settings.json"))
+        return ((cfg.get("modelSettings") or {}).get(model_id) or {}).get("effortLevel") or cfg.get("effortLevel")
+    return None
+
+
 def effort_levels(provider, model_id):
     """The reasoning efforts the provider publishes for this model; None when it publishes none.
 
@@ -337,14 +356,15 @@ CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "comm
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
-def cc_agents():
+def cc_agents(session_id=None):
     """This session's subagent profiles, or the shared defaults."""
     try:
         with open(os.path.expanduser("~/.config/cc/agents.json"), encoding="utf-8") as f:
             agents = json.load(f)
     except (OSError, ValueError):
         return {}
-    launch = os.environ.get("CC_LAUNCH_ID")
+    # cc-switch's session_launch: a Claude session not started by cc keys its profiles by session id
+    launch = os.environ.get("CC_LAUNCH_ID") or (f"claude-{session_id}" if session_id else "")
     if launch:
         try:
             with open(os.path.expanduser("~/.config/cc/session-agents.json"), encoding="utf-8") as f:
@@ -356,9 +376,9 @@ def cc_agents():
     return agents if isinstance(agents, dict) else {}
 
 
-def subagent_sources():
+def subagent_sources(session_id=None):
     """{quota source: [cc subagent names]} for cc's own-process subagents."""
-    agents = cc_agents()
+    agents = cc_agents(session_id)
     found = {}
     for name, a in agents.items() if isinstance(agents, dict) else ():
         source = CC_QUOTA_SOURCES.get((a if isinstance(a, dict) else {}).get("provider", "official"))
@@ -367,8 +387,8 @@ def subagent_sources():
     return found
 
 
-def cc_profiles():
-    return {name: profile for name, profile in cc_agents().items() if isinstance(profile, dict)}
+def cc_profiles(session_id=None):
+    return {name: profile for name, profile in cc_agents(session_id).items() if isinstance(profile, dict)}
 
 
 def cc_orphans(session_id):
@@ -384,6 +404,20 @@ def cc_orphans(session_id):
                 for item in cc.orphan_jobs(session_id)]
     except Exception:  # a status line never fails over an optional row
         return []
+
+
+def cc_fallback_jobs(session_id):
+    """{subagent name: route} for this session's workers that cc moved onto their fallback (cc-switch's fallback_jobs)."""
+    if not isinstance(session_id, str) or not session_id:
+        return {}
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        return cc.fallback_jobs(session_id)
+    except Exception:  # a status line never fails over an optional row
+        return {}
 
 
 def cc_routing_enabled():
@@ -572,7 +606,12 @@ def render(d):
     configured = not child and cc_routing_enabled()
     if configured:
         main_provider = cc_main_provider(source)
-        for name, profile in cc_profiles().items():
+        # a continued session keeps writing the transcript its workers name as their parent, under a new session id
+        moved = {**cc_fallback_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]),
+                 **cc_fallback_jobs(d.get("session_id"))}
+        for name, profile in cc_profiles(d.get("session_id")).items():
+            # a worker that cc reran on its fallback shows the route it really runs on, not the configured one
+            profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
             provider = profile.get("provider", "official")
             mid = profile.get('model') or 'Claude default'
             target = re.sub(r'^(?:gpt|claude)-', '', mid.rsplit('/', 1)[-1], flags=re.I)
@@ -582,11 +621,12 @@ def render(d):
                       'opencode-go': 'Go', 'opencode-zen': 'Zen', 'openrouter': 'OpenRouter', 'gpt4free': 'g4f',
                       'gemini': 'Gemini', 'ollama-cloud': 'Ollama', 'lmstudio': 'LM Studio'}
             route = 'same provider' if provider == main_provider else labels.get(provider, provider)
-            effort = profile.get('effort')
+            effort = profile.get('effort') or default_effort(provider, profile.get('model'))
             dots = (effort_indicator(effort, dim=True, label=False, levels=effort_levels(provider, mid))
                     if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
-            seg = [f"{DIM}↳ {name}:{RESET} {rgb(hue, 0.45, 0.6)}{target}{RESET} {dots} · {route}"]
+            seg = [f"{DIM}↳ {name}:{RESET} {rgb(hue, 0.45, 0.6)}{target}{RESET} {dots} · {route}"
+                   + (f" {YELLOW}↪ fallback active{RESET}" if name in moved else "")]
             sub_source = CC_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:
                 if sub_source == 'anthropic':
@@ -605,7 +645,7 @@ def render(d):
                 q = load_json(f"ratelimit-{provider}.json")
                 seg += quota_parts(None, None, q.get('rate_limits') or {}, q.get('at'), now)
             sub_lines.append(SEP.join(seg))
-    for sub_source, names in ({} if configured or child or source == "anthropic" else subagent_sources()).items():
+    for sub_source, names in ({} if configured or child or source == "anthropic" else subagent_sources(d.get("session_id"))).items():
         if sub_source == source:
             continue  # same account as the session, already shown
         if sub_source == "anthropic":

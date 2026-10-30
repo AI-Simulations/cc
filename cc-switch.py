@@ -109,7 +109,7 @@ FALLBACK_MODELS = {
                      ("openai/gpt-6-sol", ""), ("deepseek/deepseek-v4.1-flash", "")],
     "commandcode-cli": [("deepseek/deepseek-v4.1-flash", ""), ("moonshotai/kimi-k3", ""), ("zai-org/glm-5.3", "")],
     "nvidia":       [("deepseek-ai/deepseek-v4.1-flash", ""), ("z-ai/glm-5.3", ""), ("moonshotai/kimi-k2.6", "")],
-    "openai-oauth": [("gpt-6-sol", ""), ("gpt-6-luna", "")],
+    "openai-oauth": [("gpt-6.1-sol", ""), ("gpt-6-sol", ""), ("gpt-6-luna", "")],
     "minimax":      [("MiniMax-M3", ""), ("MiniMax-M2.7", "")],
     "gpt4free":     [("deepseek-v4-pro", ""), ("deepseek-v4.1-flash", ""), ("glm-5.3", ""), ("kimi-k3", "")],
 }
@@ -591,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 19}
+    expected = {"service": "cc-anthropic-proxy", "version": 21}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -1569,8 +1569,24 @@ def orphan_jobs(parent):
     return found
 
 
+def fallback_jobs(parent):
+    """{subagent name: its fallback route} for this session's relay workers still running on the fallback."""
+    found = {}
+    for marker in sorted(Path(JOBS_DIR).glob("*.fallback")) if parent and os.path.isdir(JOBS_DIR) else []:
+        job = marker.stem
+        if Path(JOBS_DIR, job + ".rc").exists() or job_meta(job).get("parent") != parent:
+            continue
+        try:
+            route = json.loads(marker.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(route, dict) and route.get("agent"):
+            found[route["agent"]] = route
+    return found
+
+
 def _close_job(job):
-    for name in (".out", ".rc", ".feed", ".session", ".meta", ".wait", ".nag"):
+    for name in (".out", ".rc", ".feed", ".session", ".meta", ".wait", ".nag", ".fallback"):
         try:
             Path(JOBS_DIR, job + name).unlink(missing_ok=True)
         except OSError:
@@ -1665,6 +1681,14 @@ def _feed(job, state, quiet):
         session = Path(JOBS_DIR, job + ".session").read_text().strip()
         uuid.UUID(session)
         path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{session}.jsonl"))
+        if state.get("session") != session:
+            # a fallback rerun resumes into a new transcript: read it from the start, but only what is newer than
+            # the last line shown (its resumed copy of the old history was already relayed)
+            if state.get("session"):
+                state["offset"], state["after"] = 0, state.get("last") or 0
+            state["session"] = session
+        if state.get("offset", 0) > path.stat().st_size:  # read past the end: a transcript swapped before "session" was kept
+            state["offset"], state["after"] = 0, state.get("last") or 0
         with path.open("rb") as handle:
             handle.seek(state.get("offset", 0))
             data = handle.read()
@@ -1678,6 +1702,8 @@ def _feed(job, state, quiet):
             entries.append(json.loads(line))
         except ValueError:
             continue
+    if state.get("after"):
+        entries = [e for e in entries if (_feed_stamp(e) or 0) > state["after"]]
     lines = feed_lines(entries, state)
     if lines:
         state["thinking"] = False
@@ -1730,6 +1756,10 @@ def relay_job(agent, job):
             print(f"[cc] worker failed; rerunning once on its fallback {fallback['provider']}/{fallback['model']}", flush=True)
             global _AGENT_OVERRIDE
             _AGENT_OVERRIDE = {k: v for k, v in fallback.items() if k in ("provider", "model", "effort")}
+            try:  # the status line names the route the worker now runs on (fallback_jobs)
+                Path(JOBS_DIR, job + ".fallback").write_text(json.dumps({"agent": agent, **_AGENT_OVERRIDE}))
+            except OSError:
+                pass
             run_agent(agent, prompt, require_context=True)
         code = 0
     except SystemExit as exc:
@@ -1747,6 +1777,17 @@ def relay_wait(job):
     rc, out = Path(JOBS_DIR, job + ".rc"), Path(JOBS_DIR, job + ".out")
     if not out.exists():
         die(f"No relay job {job}.")
+    if not rc.exists() and not Path(JOBS_DIR, job + ".in").exists() and time.time() - out.stat().st_mtime > 60:
+        # delivered already: an earlier wait cleaned up while the worker still held .out open, so .out
+        # stayed behind and every later wait read "pending" forever (2026-10-30, job 48dad47a).
+        # .in lives until the worker ends (.meta is written lazily, so it can't tell)
+        sys.stdout.write(out.read_bytes().decode("utf-8", errors="replace"))
+        for done in (out, *(Path(JOBS_DIR, job + name) for name in (".feed", ".wait", ".nag", ".fallback"))):
+            try:
+                done.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return
     feed = Path(JOBS_DIR, job + ".feed")
     state = None
     if feed.exists():
@@ -1772,7 +1813,7 @@ def relay_wait(job):
         print(RELAY_RESULT)
     sys.stdout.write(out.read_bytes().decode("utf-8", errors="replace"))
     code = int(rc.read_text() or 1)
-    for done in (out, rc, feed, *(Path(JOBS_DIR, job + name) for name in (".session", ".meta", ".wait", ".nag"))):
+    for done in (out, rc, feed, *(Path(JOBS_DIR, job + name) for name in (".session", ".meta", ".wait", ".nag", ".fallback"))):
         try:
             done.unlink(missing_ok=True)
         except OSError:

@@ -39,7 +39,7 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 19}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 21}
 # MiMo also closes with `</tool_call_<hash>>`, or not at all at the end of its reply.
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call[^>]*>|$)", re.S)
 XML_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.S)
@@ -744,9 +744,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Never log prompts or credentials.
 
-    def send_json(self, status, body):
+    def send_json(self, status, body, retry=True):
         encoded = json.dumps(body).encode()
         self.send_response(status)
+        if not retry:  # the Anthropic SDK skips its retries: a spent quota does not come back in seconds
+            self.send_header("x-should-retry", "false")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
@@ -866,10 +868,21 @@ class Handler(BaseHTTPRequestHandler):
             error = {"type": "error", "error": {"type": "invalid_request_error" if status == 400 else "api_error",
                 "message": str(exc) if getattr(exc, "public", False) or isinstance(exc, ValueError) else
                 f"Adapter request failed ({type(exc).__name__}); check model access and provider availability."}}
+            # The OAuth proxy reports a spent ChatGPT plan quota as a 500 ("The usage limit has been reached"): as a
+            # generic 500 Claude Code retried it for minutes and a worker hung mid-run. Name it and make it a 429.
+            if isinstance(exc, urllib.error.HTTPError):
+                try:
+                    upstream = exc.read(2000).decode("utf-8", "replace")
+                except Exception:
+                    upstream = ""
+                if "usage limit" in upstream.lower():
+                    status = 429
+                    error["error"] = {"type": "rate_limit_error", "message":
+                        "The route's plan quota is used up (upstream: usage limit reached); use another route or its fallback."}
             if streaming:
                 self.wfile.write(("event: error\ndata: " + json.dumps(error) + "\n\n").encode())
             else:
-                self.send_json(status, error)
+                self.send_json(status, error, retry=error["error"]["type"] != "rate_limit_error" or "quota" not in error["error"]["message"])
 
     def answer_cli(self, body):
         """Runs the CLI and streams its reply as it arrives, with pings while it is quiet."""

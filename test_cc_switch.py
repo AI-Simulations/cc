@@ -14,6 +14,8 @@ root = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('cc_switch', root / 'cc-switch.py')
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
+# Never write the real effort cache: the fake catalogs below would replace it for a day.
+cc.EFFORTS_FILE = os.path.join(tempfile.mkdtemp(), 'efforts.json')
 # Keep real credentials out of mock failure output, and make runs inside Claude Code match plain runs.
 for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN|SECRET|PASSWORD', k.upper())]:
     del os.environ[_name]
