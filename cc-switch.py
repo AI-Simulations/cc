@@ -2124,6 +2124,34 @@ def _worker_tokens(record):
     return f"ctx {k(ctx)} ↑ {k(total)}{hit} ↓ {k(out)}" if seen else ""
 
 
+def _worker_now(record):
+    """What the external worker is doing now: its latest tool call (a Bash call's own description first)
+    or the first line of its latest text, read from the transcript's tail."""
+    try:
+        uuid.UUID(record["session_id"])
+        path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{record['session_id']}.jsonl"))
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - 262144))
+            lines = handle.read().splitlines()
+    except (StopIteration, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # the cut first line, or one still being written
+        content = (entry.get("message") or {}).get("content") if entry.get("type") == "assistant" else None
+        for block in reversed(content if isinstance(content, list) else []):
+            if block.get("type") == "tool_use":
+                args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                if isinstance(args.get("description"), str) and args["description"].strip():
+                    return _feed_text(args["description"], 80)
+                return _feed_tool(block)[2:][:80]
+            if block.get("type") == "text" and (block.get("text") or "").strip():
+                return _feed_text(block["text"].strip().splitlines()[0], 80)
+    return ""
+
+
 def agent_statusline(data):
     try:
         profiles = load_agents()
@@ -2148,9 +2176,10 @@ def agent_statusline(data):
             # Only what the row is for: the model doing the work, its usage, the task.
             model = (route.get("model") or f"{route.get('provider', 'official')} default") if route else "route unavailable"
             label = " · ".join(filter(None, [model, _worker_tokens(saved)]))
+            now = _worker_now(saved) if task.get("status") == "running" else ""
         else:
-            label = task.get("model") or "model pending"
-        label += f" · {task.get('description') or ''}"
+            label, now = task.get("model") or "model pending", ""
+        label += f" · {task.get('description') or ''}" + (f" › {now}" if now else "")
         label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:width]
         if task.get("status") == "running":
             label = f"\x1b[1;97m{label}\x1b[0m"  # Claude dims every row; a running one stands out
