@@ -1057,7 +1057,10 @@ class Handler(BaseHTTPRequestHandler):
             launch = self.headers.get("x-cc-launch")
             # An in-process cc subagent's profile, ahead of the session's own /model override (the Model
             # tab switching this session without restarting Claude Code).
-            override = live_target(body.get("model"), launch) or route_for(launch)
+            # On `cc official`, tool-less side requests (auto mode's check: Sonnet, 64 tokens, thinking off)
+            # reach Anthropic as sent; the /model override's model and effort leave them no usable answer.
+            routed = body.get("tools") or route[0] != OFFICIAL_ROUTE
+            override = live_target(body.get("model"), launch) or (route_for(launch) if routed else None)
             if override:
                 body["model"] = override["model"]
                 if override.get("effort"):

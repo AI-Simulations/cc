@@ -118,7 +118,8 @@ def effort_indicator(effort, dim=False, label=True, levels=None):
     else:
         rank = ladder.index(effort)
         level, hue = rank + 1, effort_hue(rank / (len(ladder) - 1) if len(ladder) > 1 else 1.0)
-    text = (effort + " " if label else "") + "●" * level
+    # An effort off the ladder has no circles: name it rather than show nothing.
+    text = (effort + " " if label and level else "") + ("●" * level or effort or "")
     return rgb(hue, val=0.55 if dim else 0.9) + text + RESET
 
 
@@ -581,7 +582,7 @@ def render(d):
     head = f"{rgb(hue, 0.45)}{BOLD}{model.get('display_name') or mid or '?'}{RESET}"
     if effort:
         # One circle per step up the model's own reasoning ladder, cool for low, hot for its top.
-        head += " " + effort_indicator(effort, levels=effort_levels(cc_main_provider(None), mid))
+        head += " " + effort_indicator(effort, label=False, levels=effort_levels(cc_main_provider(None), mid))
     if ultra:
         # Rainbow letters; the start hue drifts with the clock so each refresh shimmers.
         word, start = "ULTRACODE", time.time() * 40

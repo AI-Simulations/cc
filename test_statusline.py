@@ -271,7 +271,9 @@ class EffortLevelTests(unittest.TestCase):
         mid = statusline.effort_indicator('medium', label=False, levels=three)
         self.assertEqual(mid, statusline.rgb(statusline.EFFORT_HUES['high'], val=0.9) + '●' * 2 + statusline.RESET)
         self.assertEqual(statusline.effort_indicator('max', label=True, levels=three),
-                         statusline.rgb(280, val=0.9) + 'max ' + statusline.RESET)
+                         statusline.rgb(280, val=0.9) + 'max' + statusline.RESET)
+        self.assertEqual(statusline.effort_indicator('max', label=False, levels=three),
+                         statusline.rgb(280, val=0.9) + 'max' + statusline.RESET)
 
     def test_off_is_the_step_below_low_on_models_that_offer_it(self):
         ladder = ['off', 'high', 'max']

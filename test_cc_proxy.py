@@ -234,6 +234,11 @@ try:
     request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
     urllib.request.urlopen(request, timeout=10).read()
     assert received[-1][:2] == ("/v1/messages?beta=true", "Bearer oauth-login") and received[-1][2]["model"] == "claude-other"
+    # Auto mode's check (no tools) keeps its own model and settings under that override.
+    check = {"model": "claude-sonnet-5", "max_tokens": 64, "stream": False, "thinking": {"type": "disabled"}, "stop_sequences": ["</severity>"], "messages": [{"role": "user", "content": "x"}]}
+    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    urllib.request.urlopen(request, timeout=10).read()
+    assert received[-1][2] == check
     proxy.route_for = route_for
     # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
     # x-ratelimit-* headers land where the status line reads them.
