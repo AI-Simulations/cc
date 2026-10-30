@@ -551,6 +551,12 @@ def render(d):
     ultra = ultra or effort == "ultracode" or settings_ultracode() or keyword_ultracode(d.get("transcript_path"))
     if effort == "ultracode":
         effort = None
+    # /model's Model tab switched this cc session (cc route): Claude Code still reports the launch model.
+    launch = os.environ.get("CC_LAUNCH_ID")
+    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
+    if route:
+        model = {"id": route["model"], "display_name": route["model"].rsplit("/", 1)[-1]}
+        effort = route.get("effort") or effort
     mid = model.get("id") or ""
     # Claude keeps Anthropic's clay; other vendors get a stable hue from their name.
     hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split("/")[0].encode()) % 360
@@ -602,16 +608,14 @@ def render(d):
     shown = quota_parts(plan, extra, limits, cached_at, now)
     parts += shown or ([f"{YELLOW}{q['error']}{RESET}"] if source and source != "anthropic" and q.get("error") else [])
     # The session's fallback route (cc fallback); yellow while it served within the last 5 minutes.
-    launch = os.environ.get("CC_LAUNCH_ID")
     fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
     if fallback:
         served = load_json(f"fallback-{launch}.json").get("at") or 0
         label = f"fallback {fallback['provider']}/{fallback['model']}"
         parts.append(f"{YELLOW}↪ {label} active{RESET}" if now - served < 300 else f"{DIM}↪ {label}{RESET}")
-    # /cc-model's per-session provider override, shown beside the launch route.
-    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
+    # The Model tab's provider, beside the model it put in the head.
     if route:
-        parts.append(f"{CYAN}model {route['provider']}/{route['model']}{RESET}")
+        parts.append(f"{CYAN}via {route['provider']}{RESET}")
 
     # Configured targets are visible even on official Claude and even on the same provider.
     # Live worker rows separately identify native workers and the real cc relay/worker route.

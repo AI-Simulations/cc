@@ -225,10 +225,15 @@ try:
         assert response.read() == wire, 'The official stream comes back byte for byte'
     assert received[-1] == ("/v1/messages?beta=true", "Bearer oauth-login", {**body, "stream": True})
     # Routed by /model: converted for the picked provider, with its key and model.
-    proxy.route_for = lambda launch: {"provider": "nvidia", "model": "routed", "effort": None, "key": "nv-key"}
+    proxy.route_for = lambda launch: {"provider": "nvidia", "model": "routed", "effort": None, "key": "nv-key", "format": "chat"}
     request = urllib.request.Request(official, data=json.dumps({**body, "stream": False}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
     assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
     assert received[-1][:2] == ("/v1/chat/completions", "Bearer nv-key") and received[-1][2]["model"] == "routed"
+    # Routed back to another Claude model: passed to Anthropic with the login, the model swapped.
+    proxy.route_for = lambda launch: {"provider": "official", "model": "claude-other", "effort": None, "key": "", "format": "official"}
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    urllib.request.urlopen(request, timeout=10).read()
+    assert received[-1][:2] == ("/v1/messages?beta=true", "Bearer oauth-login") and received[-1][2]["model"] == "claude-other"
     proxy.route_for = route_for
     # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
     # x-ratelimit-* headers land where the status line reads them.

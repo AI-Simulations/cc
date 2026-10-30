@@ -591,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 25}
+    expected = {"service": "cc-anthropic-proxy", "version": 26}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -731,15 +731,22 @@ def on_adapter():
             or os.environ.get("ANTHROPIC_BASE_URL", "").endswith(f":{ADAPTER_PORT}/official"))
 
 
+def route_providers():
+    """The providers the adapter can switch this session to; Claude itself only on a `cc official` session."""
+    official = os.environ.get("ANTHROPIC_BASE_URL", "").endswith(f":{ADAPTER_PORT}/official")
+    return [n for n in PROVIDERS if official or n != "official"]
+
+
 def route_command(words):
     """cc route [<provider> <model> [effort] | off | routes | models <provider>]: this session's model route."""
+    routes = route_providers()
     if words == ["routes"]:
-        for n in FALLBACK_ROUTES:
+        for n in routes:
             print(f"{n}\t{PROVIDERS[n]['label']}")
         return
     if len(words) == 2 and words[0] == "models":
-        if words[1] not in FALLBACK_ROUTES:
-            die(f"Unknown adapter provider '{words[1]}'. Valid: {', '.join(FALLBACK_ROUTES)}")
+        if words[1] not in routes:
+            die(f"Unknown adapter provider '{words[1]}'. Valid: {', '.join(routes)}")
         ensure_key(words[1])
         for m in get_models(words[1]):
             print(m["id"])
@@ -753,12 +760,12 @@ def route_command(words):
             f"/model's Model tab works only on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
         set_route(launch)
-    elif len(words) in (2, 3) and words[0].lower() in FALLBACK_ROUTES:
+    elif len(words) in (2, 3) and words[0].lower() in routes:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", words[1]):
             die("Invalid model id.")
         set_route(launch, words[0].lower(), words[1], route_effort(words[2:]))
     elif words:
-        die(f"Usage: cc route [<provider> <model> [effort] | off]; providers: {', '.join(FALLBACK_ROUTES)}")
+        die(f"Usage: cc route [<provider> <model> [effort] | off]; providers: {', '.join(routes)}")
     print_target("Route", load_routes().get(launch), "launch default")
 
 

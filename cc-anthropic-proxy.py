@@ -40,7 +40,7 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 25}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 26}
 # `cc official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
 # until /model routes its launch to another provider.
 OFFICIAL_ROUTE = "official"
@@ -811,15 +811,12 @@ def route_for(launch):
     if not isinstance(target, dict):
         return None
     provider, model = target.get("provider"), target.get("model")
-    if provider not in UPSTREAMS or not isinstance(model, str) or not model:
+    if not isinstance(model, str) or not model:
         return None
-    key = ""
     try:
-        key_id = _load_cc_switch().PROVIDERS[provider].get("key")
-        key = _load_cc_switch().auth_key(key_id) if key_id and key_id not in ("oauth", "gpt4free", "lmstudio") else ""
+        return provider_target(provider, model, target.get("effort"))
     except Exception:
-        pass
-    return {"provider": provider, "model": model, "effort": target.get("effort"), "key": key or provider}
+        return None
 
 
 # An in-process cc subagent's model (its agent file says `model: cc-live-<profile>`): the adapter
@@ -843,17 +840,23 @@ def live_target(model, launch):
     if not isinstance(profile, dict):
         raise ValueError(f"No cc subagent profile '{name}' for this session.")
     provider, model = profile.get("provider", "official"), profile.get("model")
-    if provider == "official":
-        return {"provider": provider, "model": model or LIVE_OFFICIAL_DEFAULT, "effort": profile.get("effort"), "key": "", "format": "official"}
-    if not model:
+    if provider != "official" and not model:
         raise ValueError(f"cc subagent '{name}' names no model for {provider}; pick one in /model's Subagent tab.")
+    return provider_target(provider, model, profile.get("effort"))
+
+
+def provider_target(provider, model, effort):
+    """{provider, model, effort, key, format: official|chat|anthropic, base, header} of one cc provider's model."""
+    if provider == "official":
+        return {"provider": provider, "model": model or LIVE_OFFICIAL_DEFAULT, "effort": effort, "key": "", "format": "official"}
+    cc = _load_cc_switch()
     p = cc.PROVIDERS[provider]
     key_id = p.get("key")
     key = cc.auth_key(key_id) if key_id and key_id not in ("oauth", "cli", "gpt4free", "lmstudio") else ""
     # route_env's split: Command Code serves non-Claude models, and OpenCode Go most models, over chat completions.
     chat = (p["format"] == "openai" or (provider == "commandcode" and not model.startswith("claude-"))
             or (provider == "opencode-go" and not cc.go_messages(model)))
-    return {"provider": provider, "model": model, "effort": profile.get("effort"), "key": key or provider,
+    return {"provider": provider, "model": model, "effort": effort, "key": key or provider,
             "format": "chat" if chat else "anthropic", "base": p.get("base", ""), "header": p.get("header")}
 
 
@@ -1052,30 +1055,25 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get("x-cc-worker-profile"):
                 live_worker_effort(body, self.headers["x-cc-worker-profile"])
             launch = self.headers.get("x-cc-launch")
-            live = live_target(body.get("model"), launch)
-            if live:
-                # An in-process cc subagent: its profile's route, ahead of the session's own /model override.
-                body["model"] = live["model"]
-                if live.get("effort"):
-                    body["output_config"] = {**(body.get("output_config") or {}), "effort": live["effort"]}
-                if live["format"] == "official":
+            # An in-process cc subagent's profile, ahead of the session's own /model override (the Model
+            # tab switching this session without restarting Claude Code).
+            override = live_target(body.get("model"), launch) or route_for(launch)
+            if override:
+                body["model"] = override["model"]
+                if override.get("effort"):
+                    body["output_config"] = {**(body.get("output_config") or {}), "effort": override["effort"]}
+                if override["format"] == "official":
                     if route[0] != OFFICIAL_ROUTE:
-                        raise ValueError("A cc subagent on official Claude needs a session started with `cc official`.")
+                        raise ValueError("Claude official needs a session started with `cc official`.")
                     self.forward_official("POST", json.dumps(body).encode())
                     return
-                if live["format"] == "anthropic":
-                    self.forward_live(live, body)
+                if override["format"] == "anthropic":
+                    self.forward_live(override, body)
                     return
-            override = live or route_for(launch)
             if route[0] == OFFICIAL_ROUTE and not override:
                 self.forward_official("POST", raw)
                 return
             active = override["provider"] if override else route[0]
-            if override and not live:
-                # /model's Model tab switched this session without restarting Claude Code.
-                body["model"] = override["model"]
-                if override.get("effort"):
-                    body["output_config"] = {**(body.get("output_config") or {}), "effort": override["effort"]}
             if active == CLI_ROUTE:
                 self.answer_cli(body)
                 return

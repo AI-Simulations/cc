@@ -201,9 +201,10 @@ function effortInfo($: EngineInterface, provider: string, model: string) {
 // with no flagged level a plain `default` row leads.
 export function effortOptions(levels: readonly string[], fallback: string | null) {
   const flagged = fallback && levels.includes(fallback) ? fallback : null
+  const pad = Math.max(...levels.map(v => v.length)) + 1
   const rows = levels.map(v => ({
     value: v === flagged ? 'default' : v,
-    label: `${v.padEnd(7)}${effortBar(v, levels)}${v === flagged ? ' (def)' : ''}`,
+    label: `${v.padEnd(pad)}${effortBar(v, levels)}${v === flagged ? ' def' : ''}`,
   }))
   return flagged ? rows : [{ value: 'default', label: 'default' }, ...rows]
 }
@@ -219,7 +220,7 @@ let fallbackOk = false
 const CLAUDE_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1']
 
 const colIndex = (t: GridTab, ...titles: string[]) => t.cols.findIndex(c => titles.includes(c.title))
-const selected = (c: Col | undefined) => c?.rows[c.at]?.value
+const selected = (c: Col | undefined) => c?.rows[c.pick ?? c.at]?.value
 // The subagent (or `session`) a tab sets; one profile draws no Subagent column.
 const whoOf = (t: GridTab) => selected(t.cols[colIndex(t, 'Subagent', 'For')]) ?? (t.name === 'Subagent' ? cachedProfiles?.[0]?.name : undefined)
 const show = (t?: Target) => (t ? `${t.provider}/${t.model}${t.effort ? `, effort ${t.effort}` : ''}` : 'off')
@@ -272,8 +273,10 @@ function setCol($: EngineInterface, ti: number, ci: number, col: Partial<Col>) {
 }
 
 const at = (rows: Row[], value: string | undefined) => Math.max(0, rows.findIndex(r => r.value === value))
+// A refilled column's cursor and pick both start on its default: the value in use, else the first row.
+const cursor = (rows: Row[], value: string | undefined) => ({ at: at(rows, value), pick: at(rows, value) })
 
-const COMPACT_ROWS: Row[] = PERCENTS.map(v => ({ value: v, label: v === 'default' ? 'default' : `${v}%` }))
+const COMPACT_ROWS: Row[] = PERCENTS.map(v => ({ value: v, label: v === 'default' ? 'def' : `${v}%` }))
 // The main session's threshold, kept per session id so a resume keeps it.
 const compactKey = async ($: EngineInterface) => `compact:${await $.session.id()}`
 async function mainCompact($: EngineInterface) {
@@ -303,12 +306,12 @@ async function refill($: EngineInterface, ti: number, changed: number) {
     if (ic >= 0) {
       const current = await compactNow($, t, who)
       if (!live()) return
-      await setCol($, ti, ic, { rows: COMPACT_ROWS, current, at: at(COMPACT_ROWS, current) })
+      await setCol($, ti, ic, { rows: COMPACT_ROWS, current, ...cursor(COMPACT_ROWS, current) })
     }
     const rows = await providerRows($, t, who)
     if (!live()) return
     const current = now?.provider ?? 'off'
-    await setCol($, ti, ip, { rows, current, at: at(rows, current), note: rows.length ? undefined : 'not here' })
+    await setCol($, ti, ip, { rows, current, ...cursor(rows, current), note: rows.length ? undefined : 'not here' })
     if (!rows.length) {
       await setCol($, ti, im, { rows: [], note: '—' })
       await setCol($, ti, ie, { rows: [], note: '—' })
@@ -330,7 +333,7 @@ async function refill($: EngineInterface, ti: number, changed: number) {
       const rows = (await modelList($, t, who, provider)).map(v => ({ value: v, ...(v === 'default' ? { label: 'default (provider)' } : {}) }))
       if (!live()) return
       const current = now?.provider === provider ? now.model : undefined
-      await setCol($, ti, im, { rows, current, at: at(rows, current), note: rows.length ? undefined : 'none listed' })
+      await setCol($, ti, im, { rows, current, ...cursor(rows, current), note: rows.length ? undefined : 'none listed' })
     } catch (err) {
       if (live()) await setCol($, ti, im, { rows: [], note: String((err as Error).message).split(/\r?\n/)[0] })
       return
@@ -351,7 +354,7 @@ async function refill($: EngineInterface, ti: number, changed: number) {
   const same = now?.provider === provider && now.model === model
   // an explicit level equal to the flagged default ticks that row
   const effort = now?.effort && now.effort === info.default && rows.some(r => r.value === 'default') ? 'default' : now?.effort ?? 'default'
-  await setCol($, ti, ie, { rows, current: same ? effort : undefined, at: at(rows, same ? effort : 'default') })
+  await setCol($, ti, ie, { rows, current: same ? effort : undefined, ...cursor(rows, same ? effort : 'default') })
 }
 
 async function buildGrid($: EngineInterface, start: GridTab['name'], who?: string): Promise<Grid> {
@@ -362,17 +365,17 @@ async function buildGrid($: EngineInterface, start: GridTab['name'], who?: strin
   fallbackOk = fallback.ok
   const cols = (...titles: string[]): Col[] => titles.map(title => ({ title, rows: [], at: 0, note: title === 'Provider' ? 'Loading…' : '' }))
   const names = profiles.map(p => p.name)
-  const pickAt = (rows: Row[]) => at(rows, who)
+  const subagents = names.map(value => ({ value }))
   const tabs: GridTab[] = [
     { name: 'Model', now: '', cols: cols('Provider', 'Model', 'Effort', 'Compact') },
     names.length
-      ? { name: 'Subagent', now: '', cols: names.length > 1 ? [{ title: 'Subagent', rows: names.map(value => ({ value })), at: pickAt(names.map(value => ({ value }))) }, ...cols('Provider', 'Model', 'Effort', 'Compact')] : cols('Provider', 'Model', 'Effort', 'Compact') }
+      ? { name: 'Subagent', now: '', cols: names.length > 1 ? [{ title: 'Subagent', rows: subagents, ...cursor(subagents, who) }, ...cols('Provider', 'Model', 'Effort', 'Compact')] : cols('Provider', 'Model', 'Effort', 'Compact') }
       : { name: 'Subagent', now: 'No configured cc subagents.', cols: [] },
   ]
   // the session's row stays when it cannot have a fallback, saying why
   const forRows = [{ value: 'session' }, ...names.map(value => ({ value }))]
   tabs.push(forRows.length
-    ? { name: 'Fallback', now: '', cols: [{ title: 'For', rows: forRows, at: pickAt(forRows) }, ...cols('Provider', 'Model', 'Effort')] }
+    ? { name: 'Fallback', now: '', cols: [{ title: 'For', rows: forRows, ...cursor(forRows, who) }, ...cols('Provider', 'Model', 'Effort')] }
     : { name: 'Fallback', now: fallback.out.split(/\r?\n/).pop() ?? fallback.out, cols: [] })
   const tab = Math.max(0, tabs.findIndex(t => t.name === start))
   return { tab, col: Math.max(0, colIndex(tabs[tab]!, 'Provider')), tabs, room: 10 }
@@ -435,7 +438,8 @@ export const RING_KEYS: Record<string, [string, boolean]> = {
   'T-': ['tab', true], 'T+': ['tab', false], U: ['up', false], D: ['down', false], L: ['left', false], R: ['right', false],
 }
 
-// A key for the grid: Tab cycles the tabs, ←/→ the columns, ↑/↓ the rows (wrapping), Enter sets.
+// A key for the grid: Tab cycles the tabs, ←/→ the columns, ↑/↓ the cursor (wrapping), Space picks the
+// cursor's row, Enter sets every column's pick (each starts on the value in use).
 async function onGridKey($: EngineInterface, key: string, shift: boolean) {
   marquee = 0
   const g = (await read($, grid)) as Grid | null
@@ -453,9 +457,16 @@ async function onGridKey($: EngineInterface, key: string, shift: boolean) {
     const c = t.cols[g.col]
     if (!c?.rows.length) return
     const next = (c.at + (key === 'up' ? -1 : 1) + c.rows.length) % c.rows.length
-    await setCol($, g.tab, g.col, { at: next })
+    // the pick stays where it was: only Space moves it
+    await setCol($, g.tab, g.col, { at: next, pick: c.pick ?? c.at })
+    return update($, grid, x => (x ? { ...x, status: undefined } : x))
+  }
+  if (key === 'space') {
+    const c = t.cols[g.col]
+    if (!c?.rows.length) return
+    await setCol($, g.tab, g.col, { pick: c.at })
     await update($, grid, x => (x ? { ...x, status: undefined } : x))
-    // the columns to the right follow in the background; the Client's poll picks them up
+    // the columns to the right follow in the background
     void refill($, g.tab, g.col).catch(() => undefined)
     return
   }
@@ -538,8 +549,11 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   const GAP = 2
   const FIRST = 4 // tab line, now line, blank, titles
   const t = g.tabs[g.tab]!
-  const fixed = (c: Col) => (c.title === 'Model' ? 0 : c.title === 'Effort' ? 16 : c.title === 'Provider' ? 16 : c.title === 'Compact' ? 10 : 12)
-  const rest = Math.max(16, width - MARGIN - 2 - t.cols.reduce((n, c) => n + fixed(c), 0) - GAP * Math.max(0, t.cols.length - 1))
+  // each column as wide as its widest row (mark, label, tick) within a cap; Model takes what is left
+  const CAP: Record<string, number> = { Provider: 18, Effort: 20, Compact: 8 }
+  const fixed = (c: Col) => c.title === 'Model' ? 0
+    : Math.min(CAP[c.title] ?? 14, Math.max(c.title.length + 1, ...c.rows.map(r => (r.label ?? r.value).length + 4)))
+  const rest = Math.max(12, width - MARGIN - 2 - t.cols.reduce((n, c) => n + fixed(c), 0) - GAP * Math.max(0, t.cols.length - 1))
   const w = t.cols.map(c => fixed(c) || rest)
   const x = w.map((_, i) => MARGIN + w.slice(0, i).reduce((n, v) => n + v + GAP, 0))
   const tops = t.cols.map(c => colTop(c.at, c.rows.length, room))
@@ -548,7 +562,8 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
     const c = t.cols[ci]!
     const r = c.rows[i]
     if (!r) return fit(i === 0 && !c.rows.length ? `  ${c.note || '—'}` : '', w[ci]!)
-    const mark = i === c.at ? (ci === g.col ? '❯' : '›') : ' '
+    // ❯ the cursor in the focused column, › each column's pick
+    const mark = ci === g.col && i === c.at ? '❯' : i === (c.pick ?? c.at) ? '›' : ' '
     if (i === c.at && ci === g.col) return `${mark} ${marqueeText(`${r.label ?? r.value}${r.value === c.current ? ' ✔' : ''}`, w[ci]! - 2, tick)}`
     return fit(`${mark} ${r.label ?? r.value}${r.value === c.current ? ' ✔' : ''}`, w[ci]!)
   }
@@ -571,7 +586,7 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   }
   lines.push({ text: '' })
   if (g.status) lines.push({ text: g.status, style: { color: g.status.startsWith('✔') ? 'success' : 'warning' } })
-  lines.push({ text: 'Tab tabs · ←/→ column · ↑/↓ choose · Enter set · Esc close', style: { dimColor: true } })
+  lines.push({ text: 'Tab tabs · ←/→ column · ↑/↓ move · Space pick · Enter set picks · Esc close', style: { dimColor: true } })
   // where an index of column ci is drawn; an empty column's note sits on its first row
   const spot = (ci: number, i: number): Spot => ({ x: x[ci]!, y: FIRST + Math.max(0, i - tops[ci]!), label: cell(ci, i) })
   const blank = (sx: number, y: number): Spot => ({ x: sx, y, label: ' ' })
@@ -618,10 +633,12 @@ export const register: Register = on => {
 
   // ↑/↓ scroll a pane taller than its body instead of moving the ring (the grid is drawn so): a
   // one-row scroll is the cursor's move within its column, and the window stays put. ←/→ are bound
-  // to pane:pageUp/pageDown in ~/.claude/keybindings.json, so a page-sized scroll is a column move.
+  // to pane:pageUp/pageDown in ~/.claude/keybindings.json, so a page-sized scroll is a column move, and
+  // Space to pane:bottom, whose scroll is the whole tree: a pick (a Button would take Space as Enter).
   on('ui.scroll', { requestId: GRID_PANE }, async ($, e, next) => {
     if (e.origin.kind !== 'person') return next(e)
-    const key = e.pointer ? (e.by < 0 ? 'up' : 'down') : Math.abs(e.by) > 1 ? (e.by < 0 ? 'left' : 'right') : e.by < 0 ? 'up' : 'down'
+    const key = e.pointer ? (e.by < 0 ? 'up' : 'down') : e.by > e.bodyRows ? 'space'
+      : Math.abs(e.by) > 1 ? (e.by < 0 ? 'left' : 'right') : e.by < 0 ? 'up' : 'down'
     if (e.by) void onGridKey($, key, false).catch(err => $.ui.toast(String(err)))
     return { deny: 'the grid moves its own cursor' }
   })

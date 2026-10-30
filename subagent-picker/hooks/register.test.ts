@@ -40,7 +40,7 @@ test('effort rows follow the model ladder and flag its default on that level', a
   expect(effortBar('high', ['off', 'low', 'high', 'max'])).toBe('●●○')
   const rows = effortOptions(['off', 'low', 'high', 'max'], 'high')
   expect(rows.map(r => r.value)).toEqual(['off', 'low', 'default', 'max'])
-  expect(rows[2]!.label).toContain('(def)')
+  expect(rows[2]!.label).toBe('high ●●○ def')
   expect(effortOptions(['low', 'medium'], 'xhigh').map(r => r.value)).toEqual(['default', 'low', 'medium'])
 })
 
@@ -68,6 +68,21 @@ test('the ring targets sit around the cursor cell: one each way, the tab ends on
   expect(top.u.y).toBe(3)
   expect([top.l.x, top.l.label]).toEqual([0, ' '])
   expect(Object.values(RING_KEYS).map(k => k[0]).sort()).toEqual(['down', 'left', 'right', 'tab', 'tab', 'up'])
+})
+
+test('a pick away from the cursor keeps its mark, and narrow columns leave the Compact column on screen', async () => {
+  const rows = (...v: string[]) => v.map(value => ({ value }))
+  const tab = { name: 'Model' as const, now: '', cols: [
+    { title: 'Provider', rows: rows('official', 'opencode-go'), at: 1, pick: 0 },
+    { title: 'Model', rows: rows('claude-opus-5-5'), at: 0 },
+    { title: 'Effort', rows: rows('default', 'high'), at: 0 },
+    { title: 'Compact', rows: [{ value: 'default', label: 'def' }, { value: '95', label: '95%' }], at: 0, current: 'default' },
+  ] }
+  const L = gridLayout({ tab: 0, col: 0, room: 2, tabs: [tab] }, 60, 2)
+  expect(L.lines[4]!.text).toContain('› official')
+  expect(L.lines[5]!.text).toContain('❯ opencode-go')
+  expect(L.lines[4]!.text.trimEnd().length).toBeLessThanOrEqual(60)
+  expect(L.lines[4]!.text).toContain('def ✔')
 })
 
 import { marqueeText } from './register'
