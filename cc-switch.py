@@ -591,7 +591,7 @@ def stop_port_owner(port):
 
 def ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 24}
+    expected = {"service": "cc-anthropic-proxy", "version": 25}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -1534,6 +1534,7 @@ def run_agent(agent, prompt, opts=None, require_context=False):
 
 
 JOBS_DIR = os.path.join(CFG_DIR, "jobs")
+LIVE_MODEL = "cc-live-"  # an in-process worker's model name; the adapter's live_target resolves the profile
 RELAY_WAIT = 540  # seconds per relay Bash call, under the tool's 600 s cap
 FEED_WAIT = 120  # with a feed: shorter calls, so the relay's view gains a finished block every 2 minutes
 RELAY_RESULT = "CC_RELAY_RESULT"
@@ -1866,8 +1867,10 @@ def sync_agents():
 
     os.makedirs(AGENTS_DIR, exist_ok=True)
     for file in Path(AGENTS_DIR).glob("cc-*.md"):
-        # Only relays this command wrote, for profiles that no session or the global file uses.
-        if file.stem[3:] not in all_agent_names() and re.search(r'cc-switch\.py" agent(?:-relay)? ', file.read_text(encoding="utf-8", errors="replace")):
+        # Only relays (and their in-process twins) this command wrote, for profiles no session or the global file uses.
+        text = file.read_text(encoding="utf-8", errors="replace")
+        live = file.stem.endswith("-live") and f"model: {LIVE_MODEL}" in text
+        if (file.stem[3:-5] if live else file.stem[3:]) not in all_agent_names() and (live or re.search(r'cc-switch\.py" agent(?:-relay)? ', text)):
             file.unlink()
     for agent, a in written.items():
         # No route here: each session may run this profile elsewhere, and its context hook names that route.
@@ -1899,6 +1902,19 @@ text; do not retry.
 """
         with open(os.path.join(AGENTS_DIR, f"cc-{agent}.md"), "w", encoding="utf-8") as f:
             f.write(body)
+        # The in-process twin: agent_hook sends cc-{agent} here when the session runs through the adapter,
+        # which resolves the profile from the model name, so its tab shows the worker's whole conversation.
+        live = f"""---
+name: cc-{agent}-live
+description: {json.dumps(f"In-process cc-{agent} worker; cc picks it for cc-{agent} itself. Do not call it directly.")}
+model: {LIVE_MODEL}{agent}
+---
+You are a worker subagent. Do the task you are given completely with your tools, then reply with a
+concise report of what you did, what you found and anything left undone: the parent sees only that reply.
+"""
+        twin = Path(AGENTS_DIR, f"cc-{agent}-live.md")
+        if not twin.is_file() or twin.read_text(encoding="utf-8") != live:  # a rewrite would hide it from running sessions (known_live)
+            twin.write_text(live, encoding="utf-8")
         shown_route, shown_settings = label(agents.get(agent, a))
         print(f"  cc-{agent}: {shown_route}, {shown_settings}")
     # Relays read agents.json on every call, so only a new or removed profile needs a reload.
@@ -1963,6 +1979,31 @@ def agent_hook(data):
         choices = ", ".join("cc-" + name for name in profiles)
         original = data.get("tool_input") or {}
         kind = original.get("subagent_type") or "general-purpose"
+        if kind.endswith("-live") and kind[:-5] in {"cc-" + name for name in profiles}:
+            kind = kind[:-5]
+        def known_live():
+            # Claude Code reads agent files at startup: a twin written after this session began is unknown to it.
+            try:
+                return Path(AGENTS_DIR, kind + "-live.md").stat().st_mtime < Path(data["transcript_path"]).stat().st_ctime
+            except (OSError, KeyError, TypeError):
+                return False
+
+        def resumes_live():
+            # only an in-process worker resumes in-process; older workers go through the relay's handoff
+            try:
+                with _agent_files(data, original["resume"]).with_suffix(".meta.json").open(encoding="utf-8") as handle:
+                    return json.load(handle).get("agentType") == kind + "-live"
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
+        if (kind in {"cc-" + name for name in profiles} and os.environ.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/")
+                and known_live() and (not original.get("resume") or resumes_live())):
+            # Through the adapter the worker runs in-process (a full native tab); it starts from the task
+            # prompt alone, without the copied conversation the relay gives an external worker.
+            prompt = original.get("prompt") or ""
+            if prompt.startswith(CONTEXT_PREFIX):
+                prompt = prompt.partition("\n")[2]
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                    "updatedInput": {**original, "subagent_type": kind + "-live", "prompt": prompt}}}
         if kind not in {"cc-" + name for name in profiles}:
             return deny(f"Use configured subagent {choices} instead of {kind}. Resubmit the complete task "
                         "with that subagent_type. For an old worker keep its resume id: cc will hand off its "
@@ -1971,7 +2012,7 @@ def agent_hook(data):
                         "read-only tools when no matching configured worker exists.")
         context = {"token": str(uuid.uuid4()), "source": data.get("transcript_path"),
                    "permission_mode": data.get("permission_mode") or "default"}
-        updated = dict(original)
+        updated = {**original, "subagent_type": kind}  # a direct cc-*-live call outside the adapter relays instead
         if original.get("resume"):
             path = _agent_files(data, original["resume"])
             with path.with_suffix(".meta.json").open(encoding="utf-8") as handle:
@@ -2097,11 +2138,18 @@ def hook_context(data):
             + ("\n\n" + orphans if orphans else "")}}
 
 
-def _worker_tokens(record):
-    """The external worker's own token use, read from its transcript: the relay only counts its own."""
+def _worker_path(record):
+    """The external worker's transcript, or None."""
     try:
         uuid.UUID(record["session_id"])
-        path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{record['session_id']}.jsonl"))
+        return next(Path.home().joinpath(".claude", "projects").glob(f"*/{record['session_id']}.jsonl"))
+    except (StopIteration, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _worker_tokens(path):
+    """A worker's own token use, read from its transcript: a relay only counts its own."""
+    try:
         seen, out, ctx, total, cached = set(), 0, 0, 0, 0
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -2124,12 +2172,10 @@ def _worker_tokens(record):
     return f"ctx {k(ctx)} ↑ {k(total)}{hit} ↓ {k(out)}" if seen else ""
 
 
-def _worker_now(record):
-    """What the external worker is doing now: its latest tool call (a Bash call's own description first)
+def _worker_now(path):
+    """What a worker is doing now: its latest tool call (a Bash call's own description first)
     or the first line of its latest text, read from the transcript's tail."""
     try:
-        uuid.UUID(record["session_id"])
-        path = next(Path.home().joinpath(".claude", "projects").glob(f"*/{record['session_id']}.jsonl"))
         with path.open("rb") as handle:
             handle.seek(max(0, path.stat().st_size - 262144))
             lines = handle.read().splitlines()
@@ -2142,7 +2188,7 @@ def _worker_now(record):
             continue  # the cut first line, or one still being written
         content = (entry.get("message") or {}).get("content") if entry.get("type") == "assistant" else None
         for block in reversed(content if isinstance(content, list) else []):
-            if block.get("type") == "tool_use":
+            if block.get("type") == "tool_use" and block.get("name") != "SubagentHandback":  # the closing report, not work
                 args = block.get("input") if isinstance(block.get("input"), dict) else {}
                 if isinstance(args.get("description"), str) and args["description"].strip():
                     return _feed_text(args["description"], 80)
@@ -2163,20 +2209,26 @@ def agent_statusline(data):
         if not isinstance(task, dict) or not task.get("id"):
             continue
         kind = task.get("agentType") or "unknown"
-        profile = profiles.get(kind[3:]) if isinstance(kind, str) and kind.startswith("cc-") else None
+        live = isinstance(kind, str) and kind.startswith("cc-") and kind.endswith("-live")
+        name = kind[3:-5] if live else kind[3:] if isinstance(kind, str) else ""
+        profile = profiles.get(name) if isinstance(kind, str) and kind.startswith("cc-") else None
         if isinstance(kind, str) and kind.startswith("cc-"):
-            saved = {}
+            saved, path = {}, None
             try:
-                saved = _recorded_context(_agent_files(data, task["id"]).with_suffix(".jsonl"))
+                own = _agent_files(data, task["id"]).with_suffix(".jsonl")
+                # an in-process worker's own transcript is the work; a relay's names the external one
+                path = own if live else None
+                saved = {} if live else _recorded_context(own)
             except (ValueError, KeyError, TypeError):
                 pass
-            if saved and saved.get("profile") != kind[3:]:
+            if saved and saved.get("profile") != name:
                 saved = {}
+            path = path or _worker_path(saved)
             route = saved or profile
             # Only what the row is for: the model doing the work, its usage, the task.
             model = (route.get("model") or f"{route.get('provider', 'official')} default") if route else "route unavailable"
-            label = " · ".join(filter(None, [model, _worker_tokens(saved)]))
-            now = _worker_now(saved) if task.get("status") == "running" else ""
+            label = " · ".join(filter(None, [model, _worker_tokens(path) if path else ""]))
+            now = _worker_now(path) if path and task.get("status") == "running" else ""
         else:
             label, now = task.get("model") or "model pending", ""
         label += f" · {task.get('description') or ''}" + (f" › {now}" if now else "")

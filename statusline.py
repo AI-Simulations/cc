@@ -400,7 +400,7 @@ def cc_orphans(session_id):
         spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
         cc = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cc)
-        return [{**item, "tokens": cc._worker_tokens({"session_id": item["session"]}) if item["session"] else ""}
+        return [{**item, "tokens": cc._worker_tokens(cc._worker_path({"session_id": item["session"]})) if item["session"] else ""}
                 for item in cc.orphan_jobs(session_id)]
     except Exception:  # a status line never fails over an optional row
         return []

@@ -221,6 +221,12 @@ class ResumeTests(unittest.TestCase):
 class AgentRoutingTests(unittest.TestCase):
     PROFILES = {'sub': {'provider': 'openai-oauth', 'model': 'gpt-test', 'effort': 'xhigh'}}
 
+    def setUp(self):
+        # The relay path: a session running through the adapter would send cc-* in-process instead.
+        direct = patch.dict(os.environ, {'ANTHROPIC_BASE_URL': ''})
+        direct.start()
+        self.addCleanup(direct.stop)
+
     def test_install_preserves_settings_and_registers_live_routing_once(self):
         spec = importlib.util.spec_from_file_location('cc_install_routing', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)

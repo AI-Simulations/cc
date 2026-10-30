@@ -55,6 +55,27 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(self.cc.load_agents()["sub"]["effort"], "high")
         self.assertEqual(json.loads(Path(self.cc.AGENTS_FILE).read_text()), self.global_agents)
 
+    def test_agent_runs_in_process_through_the_adapter_and_relays_otherwise(self):
+        root = Path(self.tmp.name)
+        twin = root / "agents" / "cc-sub-live.md"
+        twin.parent.mkdir()
+        twin.write_text("twin", encoding="utf-8")
+        os.utime(twin, (1, 1))  # written before the session began
+        (root / "main.jsonl").write_text("", encoding="utf-8")
+        call = {"tool_name": "Agent", "transcript_path": str(root / "main.jsonl"),
+                "tool_input": {"subagent_type": "cc-sub", "prompt": "do it", "description": "d"}}
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.cc.ADAPTER_PORT}/official"}):
+            live = self.cc.agent_hook(call)["hookSpecificOutput"]["updatedInput"]
+            self.assertEqual((live["subagent_type"], live["prompt"]), ("cc-sub-live", "do it"))
+            os.utime(twin)  # rewritten after the session began: it cannot know the type yet
+            fresh = self.cc.agent_hook(call)["hookSpecificOutput"]["updatedInput"]
+            self.assertEqual(fresh["subagent_type"], "cc-sub", "A session older than the twin relays")
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": ""}):
+            relayed = self.cc.agent_hook({**call, "tool_input": {**call["tool_input"], "subagent_type": "cc-sub-live"}})
+        updated = relayed["hookSpecificOutput"]["updatedInput"]
+        self.assertEqual(updated["subagent_type"], "cc-sub", "A direct session relays even a cc-*-live call")
+        self.assertTrue(updated["prompt"].startswith(self.cc.CONTEXT_PREFIX))
+
     def test_a_terminal_left_with_an_old_launch_id_edits_the_global_profiles(self):
         changed = {"sub": {"provider": "official", "effort": "low"}}
         with patch.dict(os.environ, {"CLAUDECODE": ""}):

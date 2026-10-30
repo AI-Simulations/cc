@@ -32,6 +32,34 @@ with tempfile.TemporaryDirectory() as tmp:
         proxy.__file__ = original_file
         proxy._cc_switch = None
 
+# An in-process cc worker names its profile by model; the launch's own profiles win over the shared ones.
+class _Live:
+    PROVIDERS = {"openai-oauth": {"format": "openai", "key": "oauth"}, "minimax": {"format": "anthropic", "base": "https://mm/anthropic", "key": "minimax"},
+                 "opencode-go": {"format": "anthropic", "base": "https://go", "key": "opencode-go", "header": "x-api-key"}}
+    def _session_agents(self, launch):
+        return {"sub": {"provider": "minimax", "model": "MiniMax-M3", "effort": "high"}} if launch == "L1" else None
+    def load_agents(self, session=True):
+        return {"sub": {"provider": "openai-oauth", "model": "gpt-6.1-sol"}, "go": {"provider": "opencode-go", "model": "glm-5.3"},
+                "claude": {"provider": "official"}, "bare": {"provider": "minimax"}}
+    def auth_key(self, name):
+        return name + "-key"
+    def go_messages(self, model):
+        return False
+proxy._cc_switch = _Live()
+assert proxy.live_target("claude-opus-5-5", "L1") is None, "Ordinary models pass through"
+assert proxy.live_target("cc-live-sub", "L1") == {"provider": "minimax", "model": "MiniMax-M3", "effort": "high", "key": "minimax-key",
+                                                  "format": "anthropic", "base": "https://mm/anthropic", "header": None}
+assert proxy.live_target("cc-live-sub", "other")["format"] == "chat" and proxy.live_target("cc-live-sub", None)["key"] == "openai-oauth"
+assert proxy.live_target("cc-live-go", None)["format"] == "chat", "Go models without /messages go through chat completions"
+assert proxy.live_target("cc-live-claude", None) == {"provider": "official", "model": proxy.LIVE_OFFICIAL_DEFAULT, "effort": None, "key": "", "format": "official"}
+for missing in ("cc-live-nobody", "cc-live-bare"):
+    try:
+        proxy.live_target(missing, None)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{missing} was accepted")
+
 # A running worker's request takes its profile's current effort, or none when the profile has none.
 class _Agents:
     efforts = {"sub": "low", "plain": None}
