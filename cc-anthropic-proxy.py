@@ -597,10 +597,12 @@ def record_rate_limits(route, headers):
         pass  # the status line just keeps its last figure
 
 
-def open_upstream(route, request, key, strict=False):
+def open_upstream(route, request, key, strict=False, session=None):
     """Opens the route's chat completion. Like Hermes's credential pool, a key out of quota
     (429/402) rests until its retry-after while the next key in <KEY>_API_KEYS serves.
-    strict: with every key resting, refuse at once (a fallback is waiting) instead of asking anyway."""
+    strict: with every key resting, refuse at once (a fallback is waiting) instead of asking anyway.
+    session: opencode.ai's x-opencode-session; it routes by it, so a random one per request
+    scatters a conversation over backends and misses the prompt cache (2026-10-30 probe)."""
     keys = list(dict.fromkeys([key, *spare_keys(route)]))
     ready = [k for k in keys if COOLDOWN.get((route, k), 0) <= time.time()]
     if strict and not ready:
@@ -611,6 +613,7 @@ def open_upstream(route, request, key, strict=False):
             "provider": "http", "base_url": UPSTREAMS[route], "api_key": attempt,
             "use_openai_client": False, "timeout": 240,
             "usage_state_path": "", "groq_rate_state_path": "",
+            **({"headers": {"x-opencode-session": session}} if session else {}),
         })
         try:
             response = service.chat_completion_response(request)
@@ -830,7 +833,7 @@ class Handler(BaseHTTPRequestHandler):
             target = fallback_for(launch)
             served = body["model"]  # the reply is attributed to the model that answered it
             try:
-                response = open_upstream(active, request, key, strict=bool(target))
+                response = open_upstream(active, request, key, strict=bool(target), session=cache_key(body))
             except OSError as exc:
                 # The session's fallback (cc fallback, off unless chosen) gets one try at what the route refused.
                 if not target or (isinstance(exc, urllib.error.HTTPError) and exc.code not in (402, 429) and exc.code < 500):
@@ -839,7 +842,7 @@ class Handler(BaseHTTPRequestHandler):
                 request.pop("prompt_cache_key", None)
                 if request.get("reasoning_effort") and raw_effort and not effort_supported(target["provider"], target["model"], raw_effort):
                     request.pop("reasoning_effort")
-                response = open_upstream(target["provider"], request, target["key"])
+                response = open_upstream(target["provider"], request, target["key"], session=cache_key(body))
                 served = target["model"]
                 note_fallback(launch, target)
             with response:

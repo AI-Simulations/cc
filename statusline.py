@@ -227,7 +227,8 @@ def plan_name(account):
 def quota_source():
     # cc sets ANTHROPIC_BASE_URL per provider; the status line inherits it.
     url = os.environ.get("ANTHROPIC_BASE_URL", "").lower().rstrip("/")
-    if not url or "anthropic.com" in url:
+    # `cc official` passes the claude.ai login through the adapter's /official route
+    if not url or "anthropic.com" in url or url.endswith("/official"):
         return "anthropic"
     if "commandcode" in url:  # API route and the cmdc adapter route share one account
         return "commandcode"
