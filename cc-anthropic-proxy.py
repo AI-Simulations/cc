@@ -1,6 +1,9 @@
 """Loopback-only Messages adapter for cc's OpenAI-format providers (stdlib)."""
 import hashlib
 import json
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import queue
 import subprocess
@@ -40,7 +43,7 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 26}
+IDENTITY = {"service": "cc-anthropic-proxy", "version": 35}
 # `cc official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
 # until /model routes its launch to another provider.
 OFFICIAL_ROUTE = "official"
@@ -195,6 +198,39 @@ def stop_reason(reason, tools=False):
     return "max_tokens" if reason == "length" else "tool_use" if tools else "end_turn"
 
 
+# A lone "." (or "...", "…") says nothing: a model asked to continue sometimes emits one. Text is held
+# until it carries a letter or digit, so such a turn never reaches the person as the whole answer.
+NO_ANSWER = "The model returned no usable answer (punctuation only); retry or pick another model."
+
+
+def speaks(text):
+    """Whether a reply says anything: at least one letter or digit."""
+    return any(ch.isalnum() for ch in text)
+
+
+class Answer:
+    """Streamed text held back until it says something; what is left over at the end."""
+
+    def __init__(self):
+        self.pending, self.said = "", False
+
+    def feed(self, piece):
+        self.pending += piece
+        if not speaks(piece):
+            return ""
+        out, self.pending, self.said = self.pending, "", True
+        return out
+
+    def rest(self, calls):
+        """The held text once the reply has spoken; the notice when it never did; nothing before tools."""
+        if self.pending and self.said:
+            out, self.pending = self.pending, ""
+            return out
+        if self.pending and not calls and not self.said:
+            return NO_ANSWER
+        return ""
+
+
 def to_message(data, model):
     choice = data["choices"][0]
     message = choice["message"]
@@ -204,6 +240,8 @@ def to_message(data, model):
     if message.get("content"):
         content.append({"type": "text", "text": message["content"]})
     calls = message.get("tool_calls") or []
+    if content and content[-1]["type"] == "text" and not calls and not speaks(content[-1]["text"]):
+        content[-1]["text"] = NO_ANSWER
     content.extend(tool_block(call) for call in calls)
     return {"id": data.get("id") or "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant",
             "model": model, "content": content, "stop_reason": stop_reason(choice.get("finish_reason"), bool(calls)),
@@ -251,7 +289,7 @@ def message_start(model):
 
 def stream_events(response, model):
     yield message_start(model)
-    blocks, calls, tokens, reason = Blocks(), {}, usage(None), None
+    blocks, calls, tokens, reason, answer = Blocks(), {}, usage(None), None, Answer()
     for line in response:
         if line.startswith(b":"):
             yield {"type": "ping"}
@@ -270,7 +308,10 @@ def stream_events(response, model):
             sent = False
             for kind, piece in (("thinking", reasoning(delta)), ("text", delta.get("content"))):
                 if isinstance(piece, str) and piece:
-                    yield from blocks.add(kind, piece)
+                    out = answer.feed(piece) if kind == "text" else piece
+                    if not out:
+                        continue
+                    yield from blocks.add(kind, out)
                     sent = True
             # ponytail: buffer tool arguments until complete; stream them if tool latency matters.
             for part in delta.get("tool_calls", []):
@@ -284,6 +325,9 @@ def stream_events(response, model):
                 yield {"type": "ping"}
     if reason is None:
         raise ValueError("Upstream stream ended without a finish reason")
+    tail = answer.rest(calls)
+    if tail:
+        yield from blocks.add("text", tail)
     yield from blocks.close()
     for call in calls.values():
         yield from blocks.tool(tool_block(call))
@@ -577,52 +621,72 @@ def cmdc_login():
     return key, version
 
 
-def generate_stream(body):
-    """/alpha/generate's NDJSON (AI SDK stream parts) as Claude stream events."""
+def generate_stream(body, tries=2):
+    """/alpha/generate's NDJSON (AI SDK stream parts) as Claude stream events.
+    A turn that says nothing (a lone ".") is retried once before the person is told: the
+    degenerate reply is transient, and an empty turn costs them the whole request."""
     thread, request = generate_body(body)
     key, version = cmdc_login()
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": "cli",
                "x-cli-environment": "production", "x-command-code-version": version, "x-session-id": thread}
-    try:
-        response = urllib.request.urlopen(urllib.request.Request(GENERATE_URL, json.dumps(request).encode(), headers), timeout=CLI_TIMEOUT)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(2000).decode("utf-8", "replace")
+
+    def open_response():
         try:
-            detail = json.loads(detail)["error"]["message"]
-        except (ValueError, KeyError, TypeError):
-            pass
-        failure = RuntimeError(f"Command Code {exc.code}: {detail}"[:400])
-        failure.status_code, failure.public = exc.code, True
-        raise failure from None
-    yield message_start(body["model"])
-    blocks, calls, tokens, finish = Blocks(), [], {}, None
-    with response:
-        for raw in response:
+            return urllib.request.urlopen(urllib.request.Request(GENERATE_URL, json.dumps(request).encode(), headers), timeout=CLI_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(2000).decode("utf-8", "replace")
             try:
-                part = json.loads(raw)
-            except ValueError:
-                continue
-            kind = part.get("type")
-            if kind == "text-delta" and part.get("text"):
-                yield from blocks.add("text", part["text"])
-            elif kind == "reasoning-delta" and part.get("text"):
-                yield from blocks.add("thinking", part["text"])
-            elif kind == "tool-call":
-                args = part.get("input", part.get("args")) or {}
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args or "{}")
-                    except ValueError:
-                        args = {"raw": args}
-                calls.append({"type": "tool_use", "id": part.get("toolCallId") or "toolu_" + uuid.uuid4().hex,
-                              "name": part.get("toolName", ""), "input": args if isinstance(args, dict) else {"value": args}})
-            elif kind == "finish":
-                tokens, finish = part.get("totalUsage") or {}, part.get("finishReason")
-            elif kind == "error":
-                message = str((part.get("error") or {}).get("message") if isinstance(part.get("error"), dict) else part.get("error") or part)
-                failure = RuntimeError(f"Command Code: {message}"[:400])
-                failure.public = True
-                raise failure
+                detail = json.loads(detail)["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                pass
+            failure = RuntimeError(f"Command Code {exc.code}: {detail}"[:400])
+            failure.status_code, failure.public = exc.code, True
+            raise failure from None
+
+    # Open the first attempt before the stream starts: a refused request keeps its real status.
+    response = open_response()
+    yield message_start(body["model"])
+    blocks, tokens, finish = Blocks(), {}, None
+    for attempt in range(1, tries + 1):
+        if attempt > 1:
+            response = open_response()
+        calls, answer = [], Answer()
+        tokens, finish = {}, None  # each attempt reports its own counters, never the last one's
+        with response:
+            for raw in response:
+                try:
+                    part = json.loads(raw)
+                except ValueError:
+                    continue
+                kind = part.get("type")
+                if kind == "text-delta" and part.get("text"):
+                    out = answer.feed(part["text"])
+                    if out:
+                        yield from blocks.add("text", out)
+                elif kind == "reasoning-delta" and part.get("text"):
+                    yield from blocks.add("thinking", part["text"])
+                elif kind == "tool-call":
+                    args = part.get("input", part.get("args")) or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args or "{}")
+                        except ValueError:
+                            args = {"raw": args}
+                    calls.append({"type": "tool_use", "id": part.get("toolCallId") or "toolu_" + uuid.uuid4().hex,
+                                  "name": part.get("toolName", ""), "input": args if isinstance(args, dict) else {"value": args}})
+                elif kind == "finish":
+                    tokens, finish = part.get("totalUsage") or {}, part.get("finishReason")
+                elif kind == "error":
+                    message = str((part.get("error") or {}).get("message") if isinstance(part.get("error"), dict) else part.get("error") or part)
+                    failure = RuntimeError(f"Command Code: {message}"[:400])
+                    failure.public = True
+                    raise failure
+        tail = answer.rest(calls)
+        if not calls and not answer.said and attempt < tries:
+            continue  # a lone punctuation mark says nothing: ask for the same turn again
+        if tail:
+            yield from blocks.add("text", tail)
+        break
     yield from blocks.close()
     for call in calls:
         yield from blocks.tool(call)
@@ -655,15 +719,20 @@ def collect(events, model):
 
 def commandcode_cli(body):
     *_, result = cmdc_retrying(body)
-    return from_cli(result.get("finalText") or "", result.get("usage"), result.get("stopReason"), body["model"],
+    message = from_cli(result.get("finalText") or "", result.get("usage"), result.get("stopReason"), body["model"],
                        result.get("nativeCalls") or (), body.get("tools"))
+    text = next((block["text"] for block in message["content"] if block["type"] == "text"), "")
+    if text and not speaks(text) and not any(block["type"] == "tool_use" for block in message["content"]):
+        message["content"] = [{"type": "text", "text": NO_ANSWER}]
+    return message
 
 
 def cli_stream(body):
     """cmdc's reply as Claude stream events, live: thinking and text as they arrive.
-    Text from the first <tool_call> on is held back and becomes tool_use blocks."""
+    Text from the first <tool_call> on is held back and becomes tool_use blocks, and a
+    punctuation-only prefix is held until the reply says something."""
     yield message_start(body["model"])
-    blocks, text, sent, held, result = Blocks(), "", 0, False, {}
+    blocks, text, sent, held, spoken, result = Blocks(), "", 0, False, False, {}
     mark = "<tool_call>"
     for event in cmdc_retrying(body):
         kind, delta = event.get("type"), event.get("delta")
@@ -675,6 +744,9 @@ def cli_stream(body):
             yield from blocks.add("thinking", delta)
         elif kind == "text_delta" and not held:
             text += delta
+            if not spoken and not speaks(text):
+                continue  # a lone "." is not an answer: hold it until a letter or digit arrives
+            spoken = True
             cut = text.find(mark)
             held = cut >= 0
             if not held:  # keep back a tail that may be the start of a <tool_call>
@@ -690,10 +762,15 @@ def cli_stream(body):
     # parseable call, or the note on an unmatched native tool.
     final = next((block["text"] for block in message["content"] if block["type"] == "text"), "")
     streamed = text[:sent].strip()
-    if final.startswith(streamed):
+    if not spoken and not calls:
+        # A run whose text arrived only in the result event still counts as the answer.
+        yield from blocks.add("text", final if speaks(final) else NO_ANSWER)
+    elif spoken and final.startswith(streamed):
         rest = final[len(streamed):]
         if rest:
             yield from blocks.add("text", rest)
+    elif calls and speaks(final):
+        yield from blocks.add("text", final)
     yield from blocks.close()
     for call in calls:
         yield from blocks.tool(call)
@@ -720,6 +797,90 @@ def reset_seconds(value, default=60.0):
     if number > 1e9:
         return max(0.0, number - time.time())
     return number
+
+
+def quota_reset(value, now, relative=False):
+    """Only provider-supplied finite reset times, never a made-up retry window."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+        if relative:
+            number += now
+        elif number > 1e12:
+            number /= 1000
+    except (ValueError, TypeError):
+        if not isinstance(value, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            number = (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).timestamp()
+        except ValueError:
+            try:
+                number = parsedate_to_datetime(value).timestamp()
+            except (ValueError, TypeError, OverflowError):
+                return None
+    return math.ceil(number) if math.isfinite(number) and now < number < now + 366 * 86400 else None
+
+
+def provider_error(exc, provider, upstream=None):
+    """Map provider failures onto Claude's gateway quota-header contract (`upstream`: a body already read)."""
+    status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, 'status_code', None) or 502
+    payload, headers = {}, {}
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            if upstream is None:
+                upstream = exc.read(65536).decode('utf-8', 'replace')
+            payload = json.loads(upstream)
+        except (OSError, ValueError):
+            pass
+        headers = {k.lower(): v for k, v in (exc.headers or {}).items()}
+    detail = payload.get('error') if isinstance(payload, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+    text = ' '.join(str(detail.get(k) or '') for k in ('type', 'code', 'message')).lower() + ' ' + (upstream or '').lower()
+    quota = status not in (401, 402, 403) and (headers.get('anthropic-ratelimit-unified-status') == 'rejected'
+            or any(word in text for word in ('usage_limit', 'usage limit', 'quota exceeded', 'quota_exceeded', 'plan quota', 'weekly limit', 'daily limit', 'credit balance is too low')))
+    outgoing = {}
+    if status == 429 and headers.get('retry-after'):
+        retry = quota_reset(headers['retry-after'], time.time(), relative=True)
+        if retry:
+            outgoing['retry-after'] = str(max(1, math.ceil(retry - time.time())))
+    if not quota:
+        return status, {'type': 'error', 'error': {'type': 'rate_limit_error' if status == 429 else 'authentication_error' if status in (401, 403) else 'api_error',
+            'message': f'{provider} temporarily rate-limited requests.' if status == 429 else f'{provider} request failed (HTTP {status}).'}}, outgoing
+    now = time.time()
+    reset = quota_reset(headers.get('anthropic-ratelimit-unified-reset'), now)
+    reset = reset or next((r for key in ('resets_at', 'reset_at', 'reset_time') if (r := quota_reset(detail.get(key), now))), None)
+    reset = reset or quota_reset(detail.get('resets_in_seconds'), now, relative=True)
+    reset = reset or quota_reset(headers.get('retry-after'), now, relative=True)
+    claim = headers.get('anthropic-ratelimit-unified-representative-claim')
+    claim = claim if claim in ('five_hour', 'seven_day', 'overage') else 'overage'
+    # The status line already polls account usage; share its fresh snapshot without another API call.
+    source = {'openai-oauth': 'openai', 'commandcode-cli': 'commandcode', 'commandcode': 'commandcode', 'opencode-go': 'opencode-go'}.get(provider)
+    if not reset and source:
+        try:
+            with open(os.path.join(RATE_DIR, f'quota-{source}.json'), encoding='utf-8') as f:
+                cached = json.load(f)
+            if 0 <= now - cached.get('at', 0) <= 120:
+                windows = [(r, name) for name, window in cached.get('rate_limits', {}).items()
+                           if isinstance(window, dict) and isinstance(window.get('used_percentage'), (int, float))
+                           and window['used_percentage'] >= 100 and (r := quota_reset(window.get('resets_at'), now))]
+                if windows:
+                    reset, name = max(windows)
+                    claim = name if name in ('five_hour', 'seven_day') else 'overage'
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    outgoing['x-should-retry'] = 'false'
+    if reset:
+        outgoing.update({'anthropic-ratelimit-unified-status': 'rejected',
+                         'anthropic-ratelimit-unified-reset': str(reset),
+                         'anthropic-ratelimit-unified-representative-claim': claim,
+                         'anthropic-ratelimit-unified-overage-status': 'rejected',
+                         'retry-after': str(max(1, math.ceil(reset - now)))})
+    message = (f'{provider} usage limit reached; resets at {datetime.fromtimestamp(reset, timezone.utc).isoformat()}. '
+               'Use /rate-limit-options to wait and continue.' if reset else
+               f'{provider} usage limit reached; reset time unavailable. Choose another route or retry after the provider resets.')
+    return 429, {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': message}}, outgoing
 
 
 def record_rate_limits(route, headers):
@@ -882,16 +1043,23 @@ def spare_keys(route):
 
 
 def _load_cc_switch():
-    """Import cc-switch.py beside this file, once: it owns the plan and effort metadata."""
+    """Import cc-switch.py beside this file, again whenever it changes: it owns the plan and effort
+    metadata, and a stale copy (one without a newly listed model) would refuse that model's requests."""
     global _cc_switch
-    if _cc_switch is None:
+    directory = str(Path(__file__).resolve().parent)
+    loaded = getattr(_cc_switch, "_cc_loaded_mtime", None)  # absent on an injected stand-in
+    try:
+        mtime = Path(directory, "cc-switch.py").stat().st_mtime
+    except OSError:
+        mtime = loaded
+    if _cc_switch is None or (loaded is not None and mtime != loaded):
         import importlib.util
-        directory = str(Path(__file__).resolve().parent)
         if directory not in sys.path:
             sys.path.insert(0, directory)  # cc-switch imports the vendored ai_suite beside it
         spec = importlib.util.spec_from_file_location("cc_switch_models", Path(directory, "cc-switch.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module._cc_loaded_mtime = mtime
         _cc_switch = module
     return _cc_switch
 
@@ -902,6 +1070,87 @@ def cc_models(provider):
         return _load_cc_switch().get_models(provider)
     except Exception:
         return []  # a standalone adapter simply offers no discovery list
+
+
+# What Claude Code adds only for Anthropic's own API (an official session runs as first party behind
+# the adapter); from 2.1.318. A third-party Anthropic-format provider never receives them.
+FIRST_PARTY_BETAS = ("prompt-caching-scope-", "tool-provenance-", "thinking-binding-controls-", "cache-diagnosis-",
+                     "claude-code-side-query-", "auto-mode-classifier-", "program-use-case-ids-")
+FIRST_PARTY_FIELDS = ("diagnostics",)
+
+
+BILLING_PREFIX = "x-anthropic-billing-header:"
+# Per-request stamps in the billing line: they would change a third party's prompt prefix every turn.
+FIRST_PARTY_STAMPS = re.compile(r"\s*\b(?:cch|cc_prev_\w+|cc_prompt_\w+|cc_turn_\w+)=[^;]*;")
+
+
+def third_party_beta(beta):
+    if beta is None:
+        return None
+    return ",".join(b for b in (s.strip() for s in beta.split(",")) if b and not b.startswith(FIRST_PARTY_BETAS))
+
+
+def third_party_body(body):
+    """The request as a non-Anthropic provider should see it: no first-party-only fields or stamps."""
+    body = {k: v for k, v in body.items() if k not in FIRST_PARTY_FIELDS}
+    system = body.get("system")
+    if isinstance(system, list):
+        body["system"] = [{**block, "text": FIRST_PARTY_STAMPS.sub("", block["text"])}
+                          if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"].startswith(BILLING_PREFIX)
+                          else block for block in system]
+    return body
+
+
+def helper_kind(body, request_class=None):
+    """Classify auxiliary requests without confusing ordinary tool-calling turns with checks."""
+    if request_class in ("main", "subagent", "workflow", "compaction", "side_reply"):
+        return None
+    if body.get("tools") and request_class != "auxiliary":
+        return None
+    stops = body.get("stop_sequences") or []
+    if any(stop in ("</severity>", "</block>") for stop in stops):
+        return "auto"
+    # Fast classifier variants omit stop sequences but retain the fixed verdict instruction.
+    system = json.dumps(body.get("system") or "")
+    if "<severity>" in system and "<transcript>" in json.dumps(body.get("messages") or []):
+        return "auto"
+    # WebFetch extraction and model-backed hooks carry no tools; tool-carrying side requests
+    # (web search, side questions) keep the session's route.
+    return None if body.get("tools") else "tools"
+
+
+def helper_target(launch, kind, current):
+    """An explicit helper pick, else the selected provider without main-turn effort."""
+    picked = (_load_cc_switch().load_routes().get(launch, {}).get("helpers") or {}).get(kind) if launch else None
+    if picked:
+        effort = picked.get("effort")
+        if kind == "tools" and not effort:
+            effort = _load_cc_switch().lowest_effort(picked["provider"], picked["model"]) or (current or {}).get("effort")
+        return provider_target(picked["provider"], picked["model"], effort)
+    default = _load_cc_switch().helper_default(kind, current["provider"] if current else "official")
+    if default:
+        return provider_target(default["provider"], default["model"], default["effort"])
+    if not current:
+        return None  # no effective main model is known
+    if kind == "tools":
+        return {**current, "effort": _load_cc_switch().lowest_effort(current["provider"], current["model"]) or current.get("effort")}
+    if current["provider"] == "official":
+        return None  # official classifiers retain Claude Code's own model and thinking settings
+    target = {**current, "effort": None}
+    if kind == "auto" and target["provider"] == "openai-oauth":
+        # The local Codex catalog is the access/effort authority; never guess Luna access.
+        levels = _load_cc_switch().model_efforts("openai-oauth", "gpt-6-luna")
+        if levels and "low" in levels:
+            target.update(model="gpt-6-luna", effort="low")
+    return target
+
+
+def fit_thinking(body):
+    """Drop `thinking: disabled` when the effort is xhigh/max: Claude rejects that pair with a 400 (Haiku 5.5,
+    Opus 5), and omitting `thinking` runs adaptive. Claude Code sends helpers with thinking disabled."""
+    effort = (body.get("output_config") or {}).get("effort")
+    if effort in ("xhigh", "max") and (body.get("thinking") or {}).get("type") == "disabled":
+        body.pop("thinking")
 
 
 def live_worker_effort(body, profile):
@@ -917,6 +1166,14 @@ def live_worker_effort(body, profile):
         config["effort"] = agent["effort"]
     else:
         config.pop("effort", None)
+
+
+def publishes_max(provider, model):
+    """True when the provider lists `max` for this model (gpt-6 does; older OpenAI models stop at xhigh)."""
+    try:
+        return "max" in (_load_cc_switch().model_efforts(provider, model) or ())
+    except Exception:
+        return False
 
 
 def effort_supported(provider, model, effort):
@@ -936,10 +1193,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Never log prompts or credentials.
 
-    def send_json(self, status, body, retry=True):
+    def send_json(self, status, body, retry=True, headers=None):
         encoded = json.dumps(body).encode()
         self.send_response(status)
-        if not retry:  # the Anthropic SDK skips its retries: a spent quota does not come back in seconds
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        if not retry and 'x-should-retry' not in (headers or {}):  # the Anthropic SDK skips its retries: a spent quota does not come back in seconds
             self.send_header("x-should-retry", "false")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
@@ -948,15 +1207,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def forward_live(self, live, body):
         """An in-process cc subagent on an Anthropic-format provider: its /v1/messages with the profile's key."""
-        headers = {k: v for k, v in self.headers.items() if k.lower() in ("anthropic-version", "anthropic-beta", "accept")}
+        headers = {k: v for k, v in self.headers.items() if k.lower() in ("anthropic-version", "accept")}
+        beta = third_party_beta(self.headers.get("anthropic-beta"))
+        if beta:
+            headers["anthropic-beta"] = beta
         headers.update({"Content-Type": "application/json", "Authorization": f"Bearer {live['key']}", "User-Agent": "Mozilla/5.0 cc"})
         if live.get("header") == "x-api-key":
             headers["x-api-key"] = live["key"]
         if live["provider"] == "opencode-go" and cache_key(body):
             headers["x-opencode-session"] = cache_key(body)  # Go routes by it; one per session keeps its cache
-        self.forward_official("POST", json.dumps(body).encode(), url=live["base"].rstrip("/") + "/v1/messages", headers=headers)
+        self.forward_official("POST", json.dumps(body).encode(), url=live["base"].rstrip("/") + "/v1/messages",
+                              headers=headers, provider=live["provider"])
 
-    def forward_official(self, method, data=None, url=None, headers=None):
+    def forward_official(self, method, data=None, url=None, headers=None, provider=None):
         """Passes a request to Anthropic unchanged (or to `url` with `headers`) and streams its answer back as it arrives."""
         if self.headers.get("Origin"):
             self.send_json(403, {"error": "Browser requests are not allowed"})
@@ -964,10 +1227,19 @@ class Handler(BaseHTTPRequestHandler):
         headers = headers or {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
         request = urllib.request.Request(url or OFFICIAL_UPSTREAM + self.path[len("/" + OFFICIAL_ROUTE):], data=data,
                                          headers=headers, method=method)
+        prefix = b""
         try:
             response = urllib.request.urlopen(request, timeout=600)
         except urllib.error.HTTPError as exc:
             response = exc
+            if provider:
+                # A /model-switched provider's spent plan gets Claude's native usage-limit headers and reset.
+                prefix = exc.read(65536)
+                status, error, mapped = provider_error(exc, provider, prefix.decode("utf-8", "replace"))
+                if status == 429:
+                    with exc:
+                        self.send_json(status, error, headers=mapped)
+                    return
         except OSError as exc:
             self.send_json(502, {"type": "error", "error": {"type": "api_error", "message": f"Anthropic unreachable ({type(exc).__name__})"}})
             return
@@ -978,6 +1250,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header(k, v)
             self.end_headers()
             try:
+                if prefix:
+                    self.wfile.write(prefix)
                 while chunk := response.read1(65536):
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -1052,30 +1326,48 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid request size (maximum 32 MiB)")
             raw = self.rfile.read(length)
             body = json.loads(raw)
-            if self.headers.get("x-cc-worker-profile"):
+            kind = helper_kind(body, self.headers.get("x-claude-code-request-class"))
+            if not kind and self.headers.get("x-cc-worker-profile"):
                 live_worker_effort(body, self.headers["x-cc-worker-profile"])
             launch = self.headers.get("x-cc-launch")
-            # An in-process cc subagent's profile, ahead of the session's own /model override (the Model
-            # tab switching this session without restarting Claude Code).
-            # On `cc official`, tool-less side requests (auto mode's check: Sonnet, 64 tokens, thinking off)
-            # reach Anthropic as sent; the /model override's model and effort leave them no usable answer.
-            routed = body.get("tools") or route[0] != OFFICIAL_ROUTE
-            override = live_target(body.get("model"), launch) or (route_for(launch) if routed else None)
+            # All model-backed helpers follow the effective provider, not the launch's /official URL.
+            override = live_target(body.get("model"), launch) or route_for(launch)
+            if kind:
+                current = override or ({"provider": route[0], "model": body.get("model"), "effort": None,
+                                       "format": "chat"} if route[0] != OFFICIAL_ROUTE else None)
+                selected = helper_target(launch, kind, current)
+                if selected and current is not override and selected.get("key") is None:
+                    # A direct non-official route already carries its key in the request headers.
+                    override = None
+                    body["model"] = selected["model"]
+                else:
+                    override = selected
+                if selected and selected["provider"] != "official":
+                    # Auto effort is independent; Tools falls back to the main request's effort.
+                    if body.get("output_config") and (kind != "tools" or selected.get("effort")):
+                        body["output_config"] = {k: v for k, v in body["output_config"].items() if k != "effort"}
+                    body["max_tokens"] = max(body.get("max_tokens") or 0, 4096)
+                    if selected.get("effort"):
+                        body["output_config"] = {**(body.get("output_config") or {}), "effort": selected["effort"]}
+                    elif kind == "auto" and (body.get("thinking") or {}).get("type") == "disabled" and selected["provider"] == "openai-oauth":
+                        body["output_config"] = {**(body.get("output_config") or {}), "effort": "low"}
             if override:
                 body["model"] = override["model"]
                 if override.get("effort"):
                     body["output_config"] = {**(body.get("output_config") or {}), "effort": override["effort"]}
+                fit_thinking(body)
                 if override["format"] == "official":
                     if route[0] != OFFICIAL_ROUTE:
                         raise ValueError("Claude official needs a session started with `cc official`.")
                     self.forward_official("POST", json.dumps(body).encode())
                     return
                 if override["format"] == "anthropic":
-                    self.forward_live(override, body)
+                    self.forward_live(override, third_party_body(body))
                     return
             if route[0] == OFFICIAL_ROUTE and not override:
                 self.forward_official("POST", raw)
                 return
+            body = third_party_body(body)  # everything below leaves Anthropic
             active = override["provider"] if override else route[0]
             if active == CLI_ROUTE:
                 self.answer_cli(body)
@@ -1084,6 +1376,8 @@ class Handler(BaseHTTPRequestHandler):
             if active == "openai-oauth" and cache_key(body):
                 request["prompt_cache_key"] = cache_key(body)
             raw_effort = (body.get("output_config") or {}).get("effort")
+            if raw_effort == "max" and publishes_max(active, body["model"]):
+                request["reasoning_effort"] = "max"
             if request.get("reasoning_effort") and raw_effort and not effort_supported(active, body["model"], raw_effort):
                 # MiMo and similar models reject a reasoning effort they cannot adjust.
                 request.pop("reasoning_effort")
@@ -1092,7 +1386,7 @@ class Handler(BaseHTTPRequestHandler):
             if not key:
                 self.send_json(401, {"type": "error", "error": {"type": "authentication_error", "message": "API key required"}})
                 return
-            target = fallback_for(launch)
+            target = None if kind else fallback_for(launch)
             served = body["model"]  # the reply is attributed to the model that answered it
             try:
                 response = open_upstream(active, request, key, strict=bool(target), session=cache_key(body))
@@ -1107,7 +1401,8 @@ class Handler(BaseHTTPRequestHandler):
                     request["reasoning_effort"] = openai_effort({"output_config": {"effort": raw_effort}})
                 if request.get("reasoning_effort") and raw_effort and not effort_supported(target["provider"], target["model"], raw_effort):
                     request.pop("reasoning_effort")
-                response = open_upstream(target["provider"], request, target["key"], session=cache_key(body))
+                active = target['provider']
+                response = open_upstream(active, request, target["key"], session=cache_key(body))
                 served = target["model"]
                 note_fallback(launch, target)
             with response:
@@ -1124,28 +1419,21 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, to_message(json.load(response), served))
         except (BrokenPipeError, ConnectionResetError):
             pass
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
+            # cc-switch helpers die() with SystemExit; uncaught, it ended the thread and the client saw ECONNRESET.
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None) or (400 if isinstance(exc, (ValueError, KeyError, TypeError, AttributeError)) and not streaming else 502)
             # A ValueError describes the request this adapter built or converted, never
             # credentials or upstream payloads: name the cause so the fix is diagnosable.
             error = {"type": "error", "error": {"type": "invalid_request_error" if status == 400 else "api_error",
-                "message": str(exc) if getattr(exc, "public", False) or isinstance(exc, ValueError) else
+                "message": str(exc) if getattr(exc, "public", False) or isinstance(exc, (ValueError, SystemExit)) else
                 f"Adapter request failed ({type(exc).__name__}); check model access and provider availability."}}
-            # The OAuth proxy reports a spent ChatGPT plan quota as a 500 ("The usage limit has been reached"): as a
-            # generic 500 Claude Code retried it for minutes and a worker hung mid-run. Name it and make it a 429.
+            response_headers = {}
             if isinstance(exc, urllib.error.HTTPError):
-                try:
-                    upstream = exc.read(2000).decode("utf-8", "replace")
-                except Exception:
-                    upstream = ""
-                if "usage limit" in upstream.lower():
-                    status = 429
-                    error["error"] = {"type": "rate_limit_error", "message":
-                        "The route's plan quota is used up (upstream: usage limit reached); use another route or its fallback."}
+                status, error, response_headers = provider_error(exc, active)
             if streaming:
                 self.wfile.write(("event: error\ndata: " + json.dumps(error) + "\n\n").encode())
             else:
-                self.send_json(status, error, retry=error["error"]["type"] != "rate_limit_error" or "quota" not in error["error"]["message"])
+                self.send_json(status, error, headers=response_headers)
 
     def answer_cli(self, body):
         """Streams Command Code's reply as it arrives, with pings while it is quiet: straight from

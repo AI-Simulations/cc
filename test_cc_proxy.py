@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 import threading
 import urllib.error
@@ -18,6 +19,59 @@ spec.loader.exec_module(proxy)
 key = proxy.cache_key({"metadata": {"user_id": "user_x_session_1"}})
 assert key and key == proxy.cache_key({"metadata": {"user_id": "user_x_session_1"}}), "One stable key per session"
 assert key != proxy.cache_key({"metadata": {"user_id": "user_x_session_2"}}) and proxy.cache_key({}) is None
+
+# Classifier detection uses its protocol, not every tool-less request.
+check_body = {"model": "claude-sonnet-5[1m]", "max_tokens": 64, "thinking": {"type": "disabled"},
+              "stop_sequences": ["</severity>"], "messages": [{"role": "user", "content": "classify"}]}
+assert proxy.helper_kind(check_body) == "auto"
+assert proxy.helper_kind({**check_body, "stop_sequences": ["</block>"]}) == "auto"
+assert proxy.helper_kind({**check_body, "stop_sequences": []}) == "tools"
+assert proxy.helper_kind(check_body, "main") is None
+assert proxy.helper_kind(check_body, "compaction") is None
+assert proxy.helper_kind({**check_body, "tools": [{"name": "Read"}]}) is None
+assert proxy.helper_kind({**check_body, "tools": [{"name": "Read"}]}, "auxiliary") == "auto"
+# First-party sessions tag web search, side questions and other tool-carrying side requests
+# `auxiliary`: they are not WebFetch/hook extraction and keep their own route.
+assert proxy.helper_kind({**check_body, "stop_sequences": [], "tools": [{"type": "web_search_20250305", "name": "web_search"}]}, "auxiliary") is None
+assert proxy.helper_kind({**check_body, "stop_sequences": []}, "auxiliary") == "tools"
+
+# Tools keep the main model, default low where supported, and retain explicit choices.
+from unittest.mock import patch
+from types import SimpleNamespace
+for lowest, inherited, expected in [('low', 'high', 'low'), (None, 'high', 'high'), (None, None, None)]:
+    fake = SimpleNamespace(load_routes=lambda: {}, lowest_effort=lambda *args: lowest, helper_default=lambda *args: None)
+    with patch.object(proxy, '_load_cc_switch', return_value=fake):
+        target = proxy.helper_target('L', 'tools', {'provider': 'openai-oauth', 'model': 'main-model', 'effort': inherited})
+    assert target['model'] == 'main-model' and target['effort'] == expected
+fake = SimpleNamespace(load_routes=lambda: {'L': {'helpers': {'tools': {'provider': 'openai-oauth', 'model': 'picked', 'effort': 'medium'}}}},
+                       lowest_effort=lambda *args: 'low')
+with patch.object(proxy, '_load_cc_switch', return_value=fake), patch.object(proxy, 'provider_target', side_effect=lambda p, m, e: {'model': m, 'effort': e}):
+    assert proxy.helper_target('L', 'tools', {'effort': 'high'}) == {'model': 'picked', 'effort': 'medium'}
+
+# Safety defaults follow the effective provider; explicit launch selections win.
+expected_auto = {
+    'openai-oauth': ('gpt-6.1-terra', 'low'),
+    'commandcode': ('deepseek/deepseek-v4.1-flash', 'high'),
+    'commandcode-cli': ('deepseek/deepseek-v4.1-flash', 'high'),
+    'opencode-go': ('deepseek-v4.1-flash', 'high'),
+    'opencode-zen': ('deepseek-v4.1-flash', 'high'),
+    'nvidia': ('deepseek-ai/deepseek-v4.1-flash', 'high'),
+    'official': ('claude-haiku-5-5', 'low'),
+}
+switch = proxy._load_cc_switch()
+with tempfile.TemporaryDirectory() as tmp:
+    Path(tmp, 'helper-defaults.json').write_text(json.dumps({'auto': {
+        p: {'model': m, 'effort': e} for p, (m, e) in expected_auto.items()}}), encoding='utf-8')
+    with patch.object(switch, 'CFG_DIR', tmp), patch.object(switch, 'load_routes', return_value={}), \
+            patch.object(proxy, 'provider_target', side_effect=lambda p, m, e: {'provider': p, 'model': m, 'effort': e}):
+        for provider, (model, effort) in expected_auto.items():
+            target = proxy.helper_target('L', 'auto', {'provider': provider, 'model': 'main'})
+            assert target == {'provider': provider, 'model': model, 'effort': effort}
+        assert proxy.helper_target('L', 'auto', None)['model'] == 'claude-haiku-5-5'
+        explicit = {'L': {'helpers': {'auto': {'provider': 'openai-oauth', 'model': 'custom', 'effort': 'high'}}}}
+        with patch.object(switch, 'load_routes', return_value=explicit):
+            assert proxy.helper_target('L', 'auto', {'provider': 'nvidia'})['model'] == 'custom'
+proxy._cc_switch = None
 
 # The CLI route's discovery list comes from cc-switch.py beside the adapter.
 with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +148,12 @@ assert json.loads(chat["messages"][2]["tool_calls"][0]["function"]["arguments"])
 assert "reasoning_effort" not in chat
 assert proxy.to_chat({**body, "output_config": {"effort": "low"}})["reasoning_effort"] == "low"
 assert proxy.to_chat({**body, "output_config": {"effort": "max"}})["reasoning_effort"] == "xhigh"
+fitted = {"thinking": {"type": "disabled"}, "output_config": {"effort": "max"}}
+proxy.fit_thinking(fitted)
+assert "thinking" not in fitted  # max with thinking disabled is a 400: omit it, run adaptive
+kept = {"thinking": {"type": "disabled"}, "output_config": {"effort": "low"}}
+proxy.fit_thinking(kept)
+assert kept["thinking"] == {"type": "disabled"}
 assert proxy.content_parts([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}}])[0]["image_url"]["url"] == "data:image/png;base64,abc"
 try:
     proxy.content_parts([{"type": "document"}])
@@ -147,6 +207,192 @@ except ValueError:
 else:
     raise AssertionError("Truncated stream reported success")
 
+# A model that answers only "." said nothing: the person gets the notice, never a bare dot. A dot
+# that leads a real answer is kept.
+dotted = list(proxy.stream_events(io.BytesIO(
+    b'data: {"choices":[{"delta":{"content":"."}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'), "m"))
+assert "".join(e["delta"]["text"] for e in dotted if e.get("delta", {}).get("type") == "text_delta") == proxy.NO_ANSWER
+assert proxy.to_message({"choices": [{"message": {"content": "."}, "finish_reason": "stop"}]}, "m")["content"] == [
+    {"type": "text", "text": proxy.NO_ANSWER}]
+mixed = list(proxy.stream_events(io.BytesIO(
+    b'data: {"choices":[{"delta":{"content":"."}},{"delta":{"content":" done"}}]}\n\n'
+    b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'), "m"))
+assert "".join(e["delta"]["text"] for e in mixed if e.get("delta", {}).get("type") == "text_delta") == ". done"
+# Punctuation after a real answer is kept: only a turn that never speaks is replaced.
+finished = list(proxy.stream_events(io.BytesIO(
+    b'data: {"choices":[{"delta":{"content":"Hello"}},{"delta":{"content":"."}}]}\n\n'
+    b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'), "m"))
+assert "".join(e["delta"]["text"] for e in finished if e.get("delta", {}).get("type") == "text_delta") == "Hello."
+# The dot guard also covers the Command Code generate relay, where the observed "." came from.
+class FakeUpstream:
+    def __init__(self, lines):
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+dot_lines = [json.dumps({"type": "text-delta", "text": "."}).encode(),
+             json.dumps({"type": "finish", "finishReason": "stop", "totalUsage": {}}).encode()]
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", return_value=FakeUpstream(dot_lines)):
+    relayed = list(proxy.generate_stream({"model": "m", "messages": []}))
+assert "".join(e["delta"]["text"] for e in relayed if e.get("delta", {}).get("type") == "text_delta") == proxy.NO_ANSWER
+
+# A silent relay turn is transient: retry it once before telling the person it failed.
+good_lines = [json.dumps({"type": "text-delta", "text": "Recovered."}).encode(),
+              json.dumps({"type": "finish", "finishReason": "stop", "totalUsage": {}}).encode()]
+opened = []
+
+
+def open_twice(*args, **kwargs):
+    opened.append(args)
+    return FakeUpstream(dot_lines if len(opened) == 1 else good_lines)
+
+
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", side_effect=open_twice):
+    retried = list(proxy.generate_stream({"model": "m", "messages": []}))
+text = "".join(e["delta"]["text"] for e in retried if e.get("delta", {}).get("type") == "text_delta")
+assert text == "Recovered." and proxy.NO_ANSWER not in text, text
+assert len(opened) == 2
+
+# Both attempts silent: the notice, after exactly one retry.
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", return_value=FakeUpstream(dot_lines)) as open_dots:
+    silent = list(proxy.generate_stream({"model": "m", "messages": []}))
+assert "".join(e["delta"]["text"] for e in silent if e.get("delta", {}).get("type") == "text_delta") == proxy.NO_ANSWER
+assert open_dots.call_count == 2
+
+# A tool call is progress: punctuation beside it is dropped, and the turn is not retried.
+call_lines = [json.dumps({"type": "text-delta", "text": "."}).encode(),
+              json.dumps({"type": "tool-call", "toolCallId": "t1", "toolName": "Read",
+                          "input": {"file_path": "x"}}).encode(),
+              json.dumps({"type": "finish", "finishReason": "tool-calls", "totalUsage": {}}).encode()]
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", return_value=FakeUpstream(call_lines)) as open_call:
+    called = list(proxy.generate_stream({"model": "m", "messages": []}))
+assert any(e.get("content_block", {}).get("type") == "tool_use" for e in called)
+assert open_call.call_count == 1
+assert proxy.NO_ANSWER not in "".join(e["delta"].get("text", "") for e in called if e.get("delta", {}).get("type") == "text_delta")
+
+# The text-protocol CLI path (CC_CMDC_TEXT=1) holds a punctuation-only answer too.
+def dot_events(*args, **kwargs):
+    yield {"type": "text_delta", "delta": "."}
+    yield {"type": "result", "finalText": ".", "usage": {}, "stopReason": "end_turn"}
+
+
+with patch.object(proxy, "cmdc_retrying", side_effect=dot_events):
+    cli = list(proxy.cli_stream({"model": "m", "messages": []}))
+assert "".join(e["delta"].get("text", "") for e in cli if e.get("delta", {}).get("type") == "text_delta") == proxy.NO_ANSWER
+with patch.object(proxy, "cmdc_retrying", side_effect=dot_events):
+    quiet = proxy.commandcode_cli({"model": "m", "messages": []})
+assert quiet["content"] == [{"type": "text", "text": proxy.NO_ANSWER}], quiet
+
+
+def good_events(*args, **kwargs):
+    yield {"type": "text_delta", "delta": "."}
+    yield {"type": "text_delta", "delta": " Done."}
+    yield {"type": "result", "finalText": ". Done.", "usage": {}, "stopReason": "end_turn"}
+
+
+with patch.object(proxy, "cmdc_retrying", side_effect=good_events):
+    cli = list(proxy.cli_stream({"model": "m", "messages": []}))
+assert "".join(e["delta"].get("text", "") for e in cli if e.get("delta", {}).get("type") == "text_delta") == ". Done."
+
+
+def final_only_events(*args, **kwargs):
+    yield {"type": "result", "finalText": "Hello there", "usage": {}, "stopReason": "end_turn"}
+
+
+with patch.object(proxy, "cmdc_retrying", side_effect=final_only_events):
+    cli = list(proxy.cli_stream({"model": "m", "messages": []}))
+assert "".join(e["delta"].get("text", "") for e in cli if e.get("delta", {}).get("type") == "text_delta") == "Hello there"
+
+# A retry starts its own counters: a second stream that never finishes must not inherit the
+# gainless first attempt's stop reason and token counts.
+length_lines = [json.dumps({"type": "text-delta", "text": "."}).encode(),
+                json.dumps({"type": "finish", "finishReason": "length",
+                            "totalUsage": {"inputTokens": 100, "outputTokens": 7}}).encode()]
+unfinished_lines = [json.dumps({"type": "text-delta", "text": "Recovered."}).encode()]
+tries = []
+
+
+def open_unfinished(*args, **kwargs):
+    tries.append(args)
+    return FakeUpstream(length_lines if len(tries) == 1 else unfinished_lines)
+
+
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", side_effect=open_unfinished):
+    recovered = list(proxy.generate_stream({"model": "m", "messages": []}))
+assert len(tries) == 2
+end = next(e for e in recovered if e["type"] == "message_delta")
+assert end["delta"]["stop_reason"] == "end_turn", end
+assert end["usage"]["input_tokens"] == 0 and end["usage"]["output_tokens"] == 0, end
+
+# A relay that refuses the first request fails before the stream starts, so the client gets a
+# real status (and Claude Code's own retry) instead of an empty message.
+def refused(*args, **kwargs):
+    raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b'{"error":{"message":"quota"}}'))
+
+
+with patch.object(proxy, "generate_body", return_value=("thread", {})), \
+     patch.object(proxy, "cmdc_login", return_value=("key", "1")), \
+     patch.object(proxy.urllib.request, "urlopen", side_effect=refused):
+    relay = proxy.generate_stream({"model": "m", "messages": []})
+    try:
+        next(relay)
+    except RuntimeError as exc:
+        assert exc.status_code == 429
+    else:
+        raise AssertionError("A refused relay must raise before the stream starts")
+
+# Provider quota exhaustion carries a real reset to Claude's native quota-resume UI.
+with tempfile.TemporaryDirectory() as rate_dir, patch.object(proxy, 'RATE_DIR', rate_dir), patch.object(proxy.time, 'time', return_value=2000000000):
+    def limited(payload, status=429, headers=None):
+        return urllib.error.HTTPError('http://local', status, 'limited', headers or {}, io.BytesIO(json.dumps(payload).encode()))
+    status, error, headers = proxy.provider_error(limited({'error': {'type': 'usage_limit_reached', 'resets_at': 2000013000}}), 'openai-oauth')
+    assert status == 429 and error['error']['type'] == 'rate_limit_error'
+    assert headers['anthropic-ratelimit-unified-status'] == 'rejected'
+    assert headers['anthropic-ratelimit-unified-reset'] == '2000013000'
+    assert headers['retry-after'] == '13000'
+    assert headers['x-should-retry'] == 'false'
+    # Legacy OAuth 500 wording uses only fresh, exhausted quota windows, not guessed delays.
+    Path(rate_dir, 'quota-openai.json').write_text(json.dumps({'at': 1999999995, 'rate_limits': {
+        'five_hour': {'used_percentage': 100, 'resets_at': 2000010000},
+        'seven_day': {'used_percentage': 100, 'resets_at': 2000020000}}}), encoding='utf-8')
+    status, error, headers = proxy.provider_error(limited({'error': {'message': 'The usage limit has been reached'}}, 500), 'openai-oauth')
+    assert status == 429 and headers['anthropic-ratelimit-unified-reset'] == '2000020000'
+    assert headers['anthropic-ratelimit-unified-representative-claim'] == 'seven_day'
+    Path(rate_dir, 'quota-openai.json').unlink()
+    status, error, headers = proxy.provider_error(limited({'error': {'message': 'The usage limit has been reached'}}, 500), 'openai-oauth')
+    assert status == 429 and 'anthropic-ratelimit-unified-reset' not in headers
+    assert 'reset time unavailable' in error['error']['message']
+    # Burst throttles do not masquerade as plan quotas; genuine Retry-After survives.
+    status, error, headers = proxy.provider_error(limited({'error': {'message': 'Too many requests'}}, headers={'Retry-After': '30'}), 'nvidia')
+    assert status == 429 and headers['retry-after'] == '30'
+    assert 'anthropic-ratelimit-unified-status' not in headers
+    assert error['error']['type'] == 'rate_limit_error'
+    # Payment and authentication errors never arm quota auto-continue.
+    for code in (401, 402, 403):
+        status, error, headers = proxy.provider_error(limited({'error': {'message': 'insufficient credits'}}, code), 'nvidia')
+        assert status == code and 'anthropic-ratelimit-unified-status' not in headers
+    # Malformed dates/numbers and secret upstream details never reach the client.
+    status, error, headers = proxy.provider_error(limited({'error': {'message': 'quota exceeded secret-token', 'resets_at': 'nan'}}), 'nvidia')
+    assert 'anthropic-ratelimit-unified-reset' not in headers and 'secret-token' not in str(error)
+print('provider quota metadata ok')
+
 received = []
 # Discovery and effort metadata come from cc-switch; the suites stub that boundary.
 proxy.effort_supported = lambda provider, model, effort: True
@@ -170,6 +416,13 @@ class Upstream(BaseHTTPRequestHandler):
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         received.append((self.path, self.headers.get("Authorization"), data))
+        if data['model'] == 'plan-quota':
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': {'type': 'usage_limit_reached', 'message': 'The usage limit has been reached',
+                                                  'resets_at': int(time.time()) + 13000}}).encode())
+            return
         if data["model"] == "fail" or self.headers.get("Authorization") == "Bearer spent":
             self.send_response(429)
             self.send_header("retry-after", "30")
@@ -226,20 +479,103 @@ try:
     assert received[-1] == ("/v1/messages?beta=true", "Bearer oauth-login", {**body, "stream": True})
     # Routed by /model: converted for the picked provider, with its key and model.
     proxy.route_for = lambda launch: {"provider": "nvidia", "model": "routed", "effort": None, "key": "nv-key", "format": "chat"}
-    request = urllib.request.Request(official, data=json.dumps({**body, "stream": False}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    stamped = [{"type": "text", "text": "x-anthropic-billing-header: cc_version=1; cch=abc; cc_turn_index=3;"}]
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": False, "system": stamped}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
     assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
     assert received[-1][:2] == ("/v1/chat/completions", "Bearer nv-key") and received[-1][2]["model"] == "routed"
+    assert "cch=" not in json.dumps(received[-1][2]) and "cc_version=1;" in json.dumps(received[-1][2]), 'per-request stamps stay with Anthropic'
     # Routed back to another Claude model: passed to Anthropic with the login, the model swapped.
     proxy.route_for = lambda launch: {"provider": "official", "model": "claude-other", "effort": None, "key": "", "format": "official"}
     request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
     urllib.request.urlopen(request, timeout=10).read()
     assert received[-1][:2] == ("/v1/messages?beta=true", "Bearer oauth-login") and received[-1][2]["model"] == "claude-other"
-    # Auto mode's check (no tools) keeps its own model and settings under that override.
+    # Auto mode's check is the safety classifier: it follows the provider's helper default (haiku
+    # on official), not the main model, even while the main turn passes through to Anthropic.
+    # The suite supplies that default itself; it must not read the machine's helper-defaults.json.
+    class FakeSwitch:
+        @staticmethod
+        def load_routes():
+            return {}
+
+        @staticmethod
+        def helper_default(kind, provider):
+            return {"provider": "official", "model": "claude-haiku-5-5", "effort": "low"}
+
+        @staticmethod
+        def lowest_effort(provider, model):
+            return "low"
+
     check = {"model": "claude-sonnet-5", "max_tokens": 64, "stream": False, "thinking": {"type": "disabled"}, "stop_sequences": ["</severity>"], "messages": [{"role": "user", "content": "x"}]}
     request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    with patch.object(proxy, "_load_cc_switch", return_value=FakeSwitch()):
+        urllib.request.urlopen(request, timeout=10).read()
+    sent = received[-1][2]
+    assert sent["model"] == "claude-haiku-5-5" and sent["output_config"]["effort"] == "low", sent
+    # An official launch switched to OAuth must route both classifiers and WebFetch extraction.
+    proxy.route_for = lambda launch: {"provider": "openai-oauth", "model": "gpt-6.1-sol", "effort": "xhigh", "key": "oa-key", "format": "chat"}
+    helper_target = proxy.helper_target
+    proxy.helper_target = lambda launch, kind, current: {**current, "model": "gpt-6-luna", "effort": "low"} if kind == "auto" else {**current, "effort": "low"}
+    for helper, expected in ((check, "gpt-6-luna"), ({**check, "stop_sequences": [], "output_config": {"effort": "xhigh"}}, "gpt-6.1-sol")):
+        request = urllib.request.Request(official, data=json.dumps(helper).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+        urllib.request.urlopen(request, timeout=10).read()
+        sent = received[-1]
+        assert sent[:2] == ("/v1/chat/completions", "Bearer oa-key")
+        assert sent[2]["model"] == expected and sent[2]["reasoning_effort"] == "low"
+        assert sent[2]["max_tokens"] >= 4096 and sent[2]["messages"][-1]["content"][0]["text"] == "x"
+    # Explicit helper routing can exist with no main override; it must not redirect main turns.
+    proxy.route_for = lambda launch: None
+    proxy.helper_target = lambda launch, kind, current: {"provider": "openai-oauth", "model": "gpt-6-luna", "effort": "low", "key": "oa-key", "format": "chat"}
+    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
     urllib.request.urlopen(request, timeout=10).read()
-    assert received[-1][2] == check
+    assert received[-1][2]["model"] == "gpt-6-luna"
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    assert urllib.request.urlopen(request, timeout=10).read() == wire
+    proxy.helper_target = helper_target
     proxy.route_for = route_for
+    # Both streaming and non-streaming callers receive native usage-limit headers before any SSE starts.
+    for stream in (False, True):
+        request = urllib.request.Request(url, data=json.dumps({**body, 'model': 'plan-quota', 'stream': stream}).encode(), headers={'x-api-key': 'fake'})
+        try:
+            urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 429 and exc.headers['anthropic-ratelimit-unified-status'] == 'rejected'
+            assert int(exc.headers['anthropic-ratelimit-unified-reset']) > time.time() + 12900
+            assert json.load(exc)['error']['type'] == 'rate_limit_error'
+        else:
+            raise AssertionError('quota exhaustion did not return HTTP 429')
+    # /model switched to an Anthropic-format provider whose plan is also spent: the native banner gets its reset.
+    live_base = f'http://127.0.0.1:{upstream.server_port}'
+    for model, expect in (('plan-quota', 429), ('ok-model', 200)):
+        proxy.route_for = lambda launch, model=model: {'provider': 'opencode-go', 'model': model, 'effort': None,
+                                                       'key': 'go-key', 'format': 'anthropic', 'base': live_base}
+        # an official session runs as first party: its Anthropic-only diagnostics stay with Anthropic
+        request = urllib.request.Request(official, data=json.dumps({**body, 'stream': False, 'diagnostics': {'x': 1}}).encode(),
+                                         headers={'Authorization': 'Bearer oauth-login', 'x-cc-launch': 'L'})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                assert expect == 200 and response.status == 200 and json.loads(response.read())['choices']
+        except urllib.error.HTTPError as exc:
+            assert expect == 429 and exc.code == 429, exc.code
+            assert exc.headers['anthropic-ratelimit-unified-status'] == 'rejected'
+            assert int(exc.headers['anthropic-ratelimit-unified-reset']) > time.time() + 12900
+        assert received[-1][:2] == ('/v1/messages', 'Bearer go-key')
+        assert 'diagnostics' not in received[-1][2], 'first-party diagnostics never reach a third-party provider'
+    proxy.route_for = route_for
+    # ...nor do the betas Claude Code adds only for Anthropic's own API; shared ones remain.
+    assert proxy.third_party_beta('claude-code-20250219,prompt-caching-scope-2026-01-05,tool-provenance-2026-10-26,'
+                                  'context-management-2025-06-27,thinking-binding-controls-2026-08-01,cache-diagnosis-2026-04-07,'
+                                  'claude-code-side-query-2026-09-29,auto-mode-classifier-2026-07-16,program-use-case-ids-2026-09-17') \
+        == 'claude-code-20250219,context-management-2025-06-27'
+    assert proxy.third_party_beta(None) is None
+    # First party, Claude Code stamps per-request ids into its billing line (the first system block);
+    # a third party would see a new prompt prefix every turn and never hit its cache.
+    billing = ('x-anthropic-billing-header: cc_version=2.1.318.aa4; cc_entrypoint=sdk-cli; cch=d582e; cc_prompt_id=e09; '
+               'cc_turn_origin=sdk; cc_prev_req=req_1; cc_prompt_index=0; cc_turn_index=1;')
+    clean = proxy.third_party_body({'system': [{'type': 'text', 'text': billing}, {'type': 'text', 'text': 'cch=keep;'}],
+                                    'diagnostics': {}, 'model': 'm'})
+    assert clean == {'system': [{'type': 'text', 'text': 'x-anthropic-billing-header: cc_version=2.1.318.aa4; cc_entrypoint=sdk-cli;'},
+                                {'type': 'text', 'text': 'cch=keep;'}], 'model': 'm'}, clean
+    assert proxy.third_party_body({'system': 'plain', 'model': 'm'}) == {'system': 'plain', 'model': 'm'}
     # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
     # x-ratelimit-* headers land where the status line reads them.
     proxy.spare_keys = lambda route: ["spare"]
@@ -411,3 +747,16 @@ finally:
     adapter.shutdown()
     adapter.server_close()
 print("PASS: Messages conversion, streamed text/tools/usage, truncation detection, both provider routes, authentication, HTTP errors; no external requests.")
+
+
+def test_cc_switch_reloads_after_edit(tmp_path, monkeypatch):
+    # A stale cc-switch (one without a newly listed model) made the adapter drop those requests.
+    saved = proxy._cc_switch
+    try:
+        proxy._cc_switch = None
+        first = proxy._load_cc_switch()
+        assert proxy._load_cc_switch() is first
+        first._cc_loaded_mtime -= 1  # as if cc-switch.py changed on disk
+        assert proxy._load_cc_switch() is not first
+    finally:
+        proxy._cc_switch = saved

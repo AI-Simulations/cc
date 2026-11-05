@@ -28,6 +28,7 @@ class CcSessionTests(unittest.TestCase):
         self.cc.SESSION_AGENTS_FILE = str(root / "session-agents.json")
         self.cc.ROUTES_FILE = str(root / "routes.json")
         self.cc.FALLBACKS_FILE = str(root / "fallbacks.json")
+        self.cc.CLAUDE_SETTINGS = str(root / "claude-settings.json")
         self.cc.JOBS_DIR = str(root / "jobs")
         self.cc.AGENTS_DIR = str(root / "agents")
         self.cc.sync_agents = lambda: None
@@ -54,6 +55,52 @@ class CcSessionTests(unittest.TestCase):
         os.environ["CC_LAUNCH_ID"] = "launch-b"
         self.assertEqual(self.cc.load_agents()["sub"]["effort"], "high")
         self.assertEqual(json.loads(Path(self.cc.AGENTS_FILE).read_text()), self.global_agents)
+
+    def test_subagents_off_is_per_session_and_survives_profile_edits(self):
+        call = {"tool_name": "Agent", "tool_input": {"subagent_type": "cc-sub", "prompt": "x"}}
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.cc.set_subagents_off(True)
+        self.assertEqual(self.cc.load_agents(), self.global_agents, "off keeps the global profiles")
+        self.assertEqual(self.cc.agent_hook(call)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("Subagents are off", self.cc.hook_context({})["hookSpecificOutput"]["additionalContext"])
+        self.cc.save_agents({"sub": {"provider": "official", "effort": "low"}})
+        self.assertTrue(self.cc.subagents_off(), "a profile edit keeps the switch")
+        self.cc.link_session("sid-1")
+        os.environ["CC_LAUNCH_ID"] = "launch-b"
+        self.assertFalse(self.cc.subagents_off(), "other sessions keep their subagents")
+        self.cc.link_session("sid-1")
+        self.assertTrue(self.cc.subagents_off(), "a resume keeps the switch")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.cc.set_subagents_off(False)
+        self.assertFalse(self.cc.subagents_off())
+        self.assertEqual(self.cc.load_agents()["sub"]["effort"], "low")
+
+    def test_new_launch_starts_on_the_saved_provider_preset(self):
+        bundle = {"model": {"provider": "official", "model": "claude-opus-5-5", "effort": "medium"},
+                  "subagent": {"provider": "official", "model": "claude-haiku-5-5", "effort": "max"},
+                  "fallback": {"provider": "off"},
+                  "auto": {"provider": "official", "model": "claude-haiku-5-5", "effort": "low"},
+                  "tools": {"provider": "official", "model": "claude-haiku-5-5", "effort": "max"}}
+        Path(self.cc.CFG_DIR, "presets.json").write_text(json.dumps({"official": {"model": "claude-opus-5-5", "settings": bundle}}), encoding="utf-8")
+        self.assertEqual(self.cc.default_effort("official", "claude-opus-5-5"), "medium")
+        self.assertIsNone(self.cc.default_effort("official", "claude-sonnet-5-5"))
+        self.cc.seed_launch_from_preset("official", "launch-a", adapter=True, providers=list(self.cc.PROVIDERS))
+        self.assertEqual(self.cc.load_agents()["sub"], {"provider": "official", "model": "claude-haiku-5-5", "effort": "max"})
+        self.assertEqual(self.cc.load_routes()["launch-a"]["helpers"]["auto"]["model"], "claude-haiku-5-5")
+        self.assertEqual(json.loads(Path(self.cc.AGENTS_FILE).read_text()), self.global_agents, "global profiles untouched")
+        self.assertIsNone(self.cc.preset_fallback("official"))
+        os.environ["CC_LAUNCH_ID"] = "launch-b"
+        self.cc.save_agents({"sub": {"provider": "official", "effort": "low"}})
+        self.cc.seed_launch_from_preset("official", "launch-b", adapter=False, providers=[])
+        self.assertEqual(self.cc.load_agents()["sub"]["effort"], "low", "an explicit pick wins over the preset")
+
+    def test_resume_keeps_the_sessions_subagents(self):
+        self.cc.save_agents({"sub": {"provider": "official", "effort": "medium"}})
+        self.cc.link_session("sid-1")
+        os.environ["CC_LAUNCH_ID"] = "launch-resumed"
+        self.assertEqual(self.cc.load_agents()["sub"]["effort"], "high")
+        self.cc.link_session("sid-1")
+        self.assertEqual(self.cc.load_agents()["sub"]["effort"], "medium")
 
     def test_agent_runs_in_process_through_the_adapter_and_relays_otherwise(self):
         root = Path(self.tmp.name)
@@ -106,14 +153,118 @@ class CcSessionTests(unittest.TestCase):
         with patch.dict(os.environ, {"CC_MAIN_PROVIDER": "nvidia"}), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.cc.fallback_command(["nvidia", "deepseek-ai/x"])
         self.assertIn("Fallback: nvidia/deepseek-ai/x", out.getvalue())
-        with patch.dict(os.environ, {"CC_MAIN_PROVIDER": "official"}), self.assertRaises(SystemExit):
+        with patch.dict(os.environ, {"CC_MAIN_PROVIDER": "official", "ANTHROPIC_BASE_URL": ""}), self.assertRaises(SystemExit):
             self.cc.fallback_command([])
+
+    def test_tools_default_low_only_when_supported(self):
+        for provider, levels, expected in [('openai-oauth', ['low', 'high'], 'low'),
+                                            ('commandcode-cli', ['high', 'max'], None),
+                                            ('nvidia', None, None), ('commandcode-cli', [], None),
+                                            ('official', None, 'low')]:
+            with self.subTest(provider=provider, levels=levels), patch.object(self.cc, 'model_efforts', return_value=levels):
+                self.assertEqual(self.cc.lowest_effort(provider, 'main-model'), expected)
+
+    def test_sol_default_is_high_without_overriding_explicit_effort(self):
+        cc = self.cc
+        with patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'load_state', return_value={}), \
+                patch.object(cc, 'save_state'), patch.object(cc, 'write_apply') as write, \
+                patch('sys.stdout', new_callable=io.StringIO):
+            cc.apply('openai-oauth', 'gpt-6.1-sol')
+            self.assertEqual(write.call_args.args[3], ['--effort', 'high'])
+            cc.apply('openai-oauth', 'gpt-6.1-sol', effort='low')
+            self.assertEqual(write.call_args.args[3], ['--effort', 'low'])
+            cc.apply('openai-oauth', 'gpt-6.1-sol', claude_args=['--effort=medium'])
+            self.assertEqual(write.call_args.args[3], ['--effort=medium'])
+            cc.apply('nvidia', 'test/model')
+            self.assertEqual(write.call_args.args[3], ())
+        cc.set_route('launch-a', 'openai-oauth', 'gpt-6.1-sol')
+        self.assertEqual(cc.load_routes()['launch-a']['effort'], 'high')
+        cc.set_route('launch-a', 'openai-oauth', 'gpt-6.1-sol', 'low')
+        self.assertEqual(cc.load_routes()['launch-a']['effort'], 'low')
+
+    def test_plain_effort_default_is_launch_only_and_resume_is_untouched(self):
+        cc = self.cc
+        for args, expected in [([], 'medium'), (['--effort', 'high'], 'medium'),
+                               (['--resume', 'sid'], None), (['-c'], None),
+                               (['--model', 'sonnet'], None)]:
+            with self.subTest(args=args), patch.object(cc.sys, 'argv', ['cc', 'plain', *args]), \
+                    patch.object(cc, 'APPLY_FILE', str(Path(self.tmp.name) / 'apply.ps1')), \
+                    patch.object(cc, 'quit_on_ctrl_c'), patch.object(cc, 'apply') as apply:
+                cc.main()
+            self.assertEqual(apply.call_args.kwargs['effort'], expected)
+            self.assertEqual(apply.call_args.kwargs['claude_args'], args)
+        with patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'load_state', return_value={}), \
+                patch.object(cc, 'save_state'), patch.object(cc, 'write_apply') as write, \
+                patch('sys.stdout', new_callable=io.StringIO):
+            cc.apply('official', effort='medium', claude_args=['--effort', 'high'])
+            self.assertEqual(write.call_args.args[3], ['--effort', 'high'])
+
+    def test_official_keeps_the_adapter_and_counts_as_first_party(self):
+        adapter = f"http://127.0.0.1:{self.cc.ADAPTER_PORT}/official"
+        flag = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"
+        self.assertIn(flag, self.cc.CC_VARS, "other routes clear a flag left by an official launch")
+        for env, expected in [({}, adapter), ({"CC_OFFICIAL_DIRECT": "1"}, None)]:
+            with self.subTest(env=env), patch.dict(os.environ, {"CC_OFFICIAL_DIRECT": "", **env}), \
+                    patch.object(self.cc, "ensure_anthropic_proxy"):
+                got = self.cc.route_env("official", None, passthrough=True)
+            self.assertEqual(got.get("ANTHROPIC_BASE_URL"), expected)
+            # Claude Code keeps its first-party helpers (Haiku agent summaries) behind the adapter
+            self.assertEqual(got.get(flag), "1" if expected else None)
+
+    def test_official_route_effort_reaches_claude_settings(self):
+        settings = Path(self.tmp.name) / 'settings.json'
+        settings.write_text(json.dumps({'theme': 'dark', 'modelSettings': {'claude-opus-5-5': {
+            'effortLevel': 'high', 'autoCompactWindow': 400000}}}), encoding='utf-8')
+        with patch.object(self.cc, 'CLAUDE_SETTINGS', str(settings)):
+            self.cc.set_route('launch-a', 'official', 'claude-opus-5-5', 'medium')
+            data = json.loads(settings.read_text(encoding='utf-8'))
+            self.assertEqual(data['modelSettings']['claude-opus-5-5'], {'effortLevel': 'medium', 'autoCompactWindow': 400000})
+            self.assertEqual(data['theme'], 'dark')
+            for args in [('official', 'claude-opus-5-5', 'max'), ('openai-oauth', 'claude-opus-5-5', 'low')]:
+                self.cc.set_route('launch-a', *args)
+            self.assertEqual(json.loads(settings.read_text(encoding='utf-8')), data)
 
     def test_route_override_set_and_clear(self):
         self.cc.set_route("launch-a", "gemini", "gemini-3.8-flash")
         self.assertEqual(self.cc.load_routes()["launch-a"]["model"], "gemini-3.8-flash")
         self.cc.set_route("launch-a")
         self.assertNotIn("launch-a", self.cc.load_routes())
+
+    def test_helper_picks_preserve_main_route_and_other_sessions(self):
+        self.cc.set_route('launch-a', 'openai-oauth', 'gpt-6.1-sol', 'high')
+        self.cc.set_route('launch-b', 'gemini', 'gemini-test')
+        with patch.dict(os.environ, {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{self.cc.ADAPTER_PORT}/official'}), patch('sys.stdout', new_callable=io.StringIO):
+            self.cc.helper_command(['auto', 'openai-oauth', 'gpt-6-luna', 'low'])
+            self.cc.helper_command(['tools', 'openai-oauth', 'gpt-6-luna', 'medium'])
+        row = self.cc.load_routes()['launch-a']
+        self.assertEqual(row['model'], 'gpt-6.1-sol')
+        self.assertEqual(row['effort'], 'high')
+        self.assertEqual(row['helpers']['auto']['effort'], 'low')
+        self.assertEqual(row['helpers']['tools']['effort'], 'medium')
+        self.cc.set_route('launch-a', 'nvidia', 'other')
+        self.assertEqual(self.cc.load_routes()['launch-a']['helpers'], row['helpers'])
+        self.cc.set_route('launch-a')
+        self.assertNotIn('model', self.cc.load_routes()['launch-a'])
+        self.assertEqual(self.cc.load_routes()['launch-a']['helpers'], row['helpers'])
+        self.assertEqual(self.cc.load_routes()['launch-b']['model'], 'gemini-test')
+        with patch.dict(os.environ, {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{self.cc.ADAPTER_PORT}/official'}), patch('sys.stdout', new_callable=io.StringIO):
+            self.cc.helper_command(['auto', 'inherit'])
+        self.assertNotIn('auto', self.cc.load_routes()['launch-a']['helpers'])
+        self.assertIn('tools', self.cc.load_routes()['launch-a']['helpers'])
+
+    def test_helper_pick_can_exist_without_main_override(self):
+        with patch.dict(os.environ, {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{self.cc.ADAPTER_PORT}/official'}), patch('sys.stdout', new_callable=io.StringIO):
+            self.cc.helper_command(['tools', 'openai-oauth', 'gpt-6-luna', 'low'])
+        self.assertNotIn('model', self.cc.load_routes()['launch-a'])
+        with patch.dict(os.environ, {'ANTHROPIC_BASE_URL': 'https://api.anthropic.com'}), self.assertRaises(SystemExit):
+            self.cc.helper_command(['auto', 'openai-oauth', 'gpt-6-luna'])
+
+    def test_helper_pick_rejects_invalid_model_and_effort(self):
+        with patch.dict(os.environ, {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{self.cc.ADAPTER_PORT}/official'}):
+            for words in (['auto', 'openai-oauth', '../bad'], ['tools', 'openai-oauth', 'gpt-6-luna', 'nonsense']):
+                with self.subTest(words=words), self.assertRaises(SystemExit):
+                    self.cc.helper_command(words)
+        self.assertEqual(self.cc.load_routes(), {})
 
     def test_relay_pending_blocks_stop_once(self):
         job = "12345678-1234-1234-1234-123456789abc"

@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch
 from pathlib import Path
 
@@ -15,7 +16,69 @@ statusline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(statusline)
 
 
+class PlanValueTests(unittest.TestCase):
+    def test_weekly_value_from_window_spend_and_share(self):
+        now = 2000000000
+        limits = {"seven_day": {"used_percentage": 10, "resets_at": now + 3600}}
+        start = now + 3600 - 604800
+        buckets = {"openai": {str(start + 600): [3.0, 1000, 900], str(start - 7200): [99.0, 5, 0]}}
+        self.assertEqual(statusline.weekly_value("openai", limits, buckets, now), (3.0, 30.0, 90))
+        self.assertEqual(statusline.weekly_value("openai", {"seven_day": {**limits["seven_day"], "used_percentage": 1}}, buckets, now), (3.0, None, 90))
+        self.assertEqual(statusline.money(13500), "$13.5k")
+
+    def test_unlisted_model_priced_from_models_dev(self):
+        listing = {"openai": {"models": {"gpt-9-sol": {"cost": {"input": 3, "output": 12, "cache_read": 0.3}}}}}
+        with patch.object(statusline, "_MODELS_DEV", listing):
+            self.assertAlmostEqual(statusline.usage_cost("gpt-9-sol", {"input_tokens": 100_000, "output_tokens": 100_000}), 1.5)
+            self.assertIsNone(statusline.usage_cost("gpt-9-luna", {"input_tokens": 1}))
+
+    def test_gpt_reply_priced_with_long_context_tier(self):
+        self.assertAlmostEqual(statusline.usage_cost("gpt-6.1-sol", {"input_tokens": 1_000_000, "output_tokens": 0}), 4.0)
+        self.assertAlmostEqual(statusline.usage_cost("gpt-6.1-sol", {"input_tokens": 100_000, "output_tokens": 100_000}), 1.2)
+
+
 class PlanLabelTests(unittest.TestCase):
+    def test_max_tiers_use_current_plan_names(self):
+        for tier, expected in (('default_claude_max_5x', 'Max'), ('default_claude_max_20x', 'Ultra')):
+            with self.subTest(tier=tier):
+                self.assertEqual(statusline.plan_name({'organizationType': 'claude_max',
+                                                       'organizationRateLimitTier': tier}), expected)
+
+    def test_usage_unavailable_keeps_known_reset_countdown(self):
+        quota = {'error': 'usage unavailable', 'rate_limits': {}, 'last_reset_at': 2000002160}
+        with patch.object(statusline, 'quota_source', return_value='openai'), \
+                patch.object(statusline, 'provider_quota', return_value=(quota, None)), \
+                patch.object(statusline.time, 'time', return_value=2000000000), \
+                patch.object(statusline, 'settings_ultracode', return_value=False), \
+                patch.object(statusline, 'keyword_ultracode', return_value=False), \
+                patch.object(statusline, 'load_json', return_value={}):
+            rendered = re.sub(r'\x1b\[[0-9;]*m', '', statusline.render({'model': {'id': 'gpt-6.1-sol'}}))
+        self.assertIn('usage unavailable', rendered)
+        self.assertIn('reset', rendered)
+        self.assertIn('36m', rendered)
+
+
+    def test_tools_effort_dots_low_default_and_explicit_override(self):
+        files = {'routes.json': {'L': {'provider': 'openai-oauth', 'model': 'main-model', 'effort': 'high'}}}
+        with patch.object(statusline, 'load_json', side_effect=lambda name: files.get(os.path.basename(name), {})), \
+                patch.object(statusline, 'quota_source', return_value=None), \
+                patch.object(statusline, 'settings_ultracode', return_value=False), \
+                patch.object(statusline, 'keyword_ultracode', return_value=False), \
+                patch.object(statusline, 'effort_levels', return_value=['low', 'medium', 'high']), \
+                patch.dict(os.environ, {'CC_LAUNCH_ID': 'L'}):
+            rendered = statusline.render({'model': {'id': 'main-model'}, 'effort': {'level': 'high'}})
+            tools = rendered.split('Tools: ')[1].splitlines()[0]
+            self.assertIn('main-model', tools)
+            self.assertEqual(tools.count('●'), 1)
+            files['routes.json']['L']['helpers'] = {'tools': {'provider': 'openai-oauth', 'model': 'picked', 'effort': 'medium'}}
+            tools = statusline.render({'model': {'id': 'main-model'}, 'effort': {'level': 'high'}}).split('Tools: ')[1].splitlines()[0]
+            self.assertIn('picked', tools)
+            self.assertEqual(tools.count('●'), 2)
+            files['routes.json']['L'].pop('helpers')
+            with patch.object(statusline, 'effort_levels', return_value=None):
+                tools = statusline.render({'model': {'id': 'main-model'}, 'effort': {'level': 'high'}}).split('Tools: ')[1].splitlines()[0]
+            self.assertIn('●●●', tools)
+
     def test_openai_plan_labels(self):
         for raw, expected in (("prolite", "ChatGPT Pro Lite"), ("pro", "ChatGPT Pro"), (None, "ChatGPT")):
             with self.subTest(raw=raw), patch("builtins.open", return_value=io.StringIO(json.dumps({"tokens": {"access_token": "test"}}))), patch.object(statusline, "fetch_json", return_value={"plan_type": raw}):
@@ -44,7 +107,7 @@ class PlanLabelTests(unittest.TestCase):
                 patch.object(statusline, "load_json", side_effect=lambda name: saved if name == "ratelimit-gemini.json" else {}), patch.dict(os.environ, {"CC_MAIN_PROVIDER": "gemini"}):
             rendered = statusline.render({"model": {"id": "gemini-2.5-pro"}})
         self.assertIn("req", rendered)
-        self.assertIn("75%", rendered)
+        self.assertIn("▰▱▱▱", re.sub(r"\x1b\[[0-9;]*m", "", rendered))  # 75%: seven of ten cells
 
     def test_fallback_shown_and_highlighted_while_serving(self):
         files = {"fallbacks.json": {"L": {"provider": "gemini", "model": "gemini-2.5-flash"}}}
@@ -64,7 +127,8 @@ class PlanLabelTests(unittest.TestCase):
 
     def test_cached_label_display(self):
         quota = {"plan": "ChatGPT Prolite", "rate_limits": {"seven_day": {"used_percentage": 0}}}
-        with patch.object(statusline, "quota_source", return_value="openai"), patch.object(statusline, "provider_quota", return_value=(quota, None)), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False):
+        with patch.object(statusline, "quota_source", return_value="openai"), patch.object(statusline, "provider_quota", return_value=(quota, None)), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
+                patch.dict(os.environ, {"CC_LAUNCH_ID": ""}):  # the running session's /model route must not leak in
             rendered = statusline.render({"model": {"id": "gpt-test"}})
         self.assertIn("ChatGPT Pro Lite", rendered)
         self.assertNotIn("ChatGPT Prolite", rendered)
@@ -142,8 +206,8 @@ class ApiBillingTests(unittest.TestCase):
         payload = {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
                    "rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": time.time() + 3600}}}
         rendered = self.render(payload, {}, {})
-        self.assertRegex(rendered, r"↻ \d")
-        self.assertNotIn(r"↻\d", rendered)
+        self.assertNotIn("↻", rendered)
+        self.assertIn("▰▰▰▰▰▰▰▰▰▰ 59m", rendered)  # the countdown follows the bar, no icon
 
 
 class SubagentLineTests(unittest.TestCase):
@@ -221,12 +285,12 @@ class ConfiguredAgentLineTests(unittest.TestCase):
         self.assertIn('OAuth', text)
         self.assertIn('●●●●', text)
 
-    def test_same_provider_is_visible_and_explicitly_marked(self):
+    def test_same_provider_is_visible_without_a_label(self):
         for provider in ('official', 'openai-oauth'):
             with self.subTest(provider=provider):
                 text = self.render(provider, {'sub': {'provider': provider, 'model': 'worker-model'}})
                 self.assertIn('worker model', text)
-                self.assertIn('same provider', text)
+                self.assertNotIn('same provider', text)  # the main route needs no label
 
     def test_provider_without_quota_api_is_still_visible(self):
         text = self.render('official', {'sub': {'provider': 'nvidia', 'model': 'worker-model'}})
@@ -244,8 +308,8 @@ class ConfiguredAgentLineTests(unittest.TestCase):
         line = self.render('official', {'sub': {'provider': 'openai-oauth', 'model': 'gpt-6.1-sol', 'effort': 'xhigh'}}, quota).splitlines()[-1]
         self.assertIn('Plus', line)
         self.assertNotIn('ChatGPT', line)
-        self.assertIn('5h ▰▰▰▰▰▱ 81%', line)
-        self.assertIn('7d ▰▱▱▱▱▱ 12%', line)
+        self.assertIn('5h ▰▰▰▰▰▰▰▰▱▱', line)  # one cell per full 10%, no number
+        self.assertIn('7d ▰▱▱▱▱▱▱▱▱▱', line)
         self.assertLess(len(line), 90)
 
     def test_effort_circles_share_main_mapping_with_lower_brightness(self):
@@ -307,5 +371,234 @@ class EffortLevelTests(unittest.TestCase):
             self.assertIsNone(statusline.effort_levels('nvidia', 'minimax-m3'))
 
 
+class QuotaCredentialTests(unittest.TestCase):
+    def test_provider_environment_precedes_windows_saved_environment(self):
+        with patch.dict(os.environ, {'USERPROFILE': str(Path.home()), 'OPENROUTER_API_KEY': 'process-key'}, clear=True), \
+                patch('winreg.OpenKey') as registry:
+            self.assertEqual(statusline.cc_key('openrouter'), 'process-key')
+            registry.assert_not_called()
+        with patch.dict(os.environ, {'USERPROFILE': str(Path.home())}, clear=True), \
+                patch('winreg.OpenKey'), patch('winreg.QueryValueEx', return_value=('user-key', 1)):
+            self.assertEqual(statusline.cc_key('openrouter'), 'user-key')
+
+    def test_switched_provider_uses_cc_saved_key_not_launch_token(self):
+        for provider, fetcher, response in (
+                ('commandcode', statusline.commandcode_quota, {}),
+                ('opencode-go', statusline.opencode_go_quota, {}),
+                ('openrouter', statusline.openrouter_quota, {'data': {}})):
+            original_open = open
+            def opened(path, *args, **kwargs):
+                if str(path).endswith(('.py', '.pyc')):
+                    return original_open(path, *args, **kwargs)
+                if os.path.basename(path) == 'keys.json':
+                    return io.StringIO(json.dumps({provider: 'saved-provider-key'}))
+                raise FileNotFoundError(path)
+            with self.subTest(provider=provider), patch.dict(os.environ, {
+                    'ANTHROPIC_BASE_URL': 'http://127.0.0.1:10532/official',
+                    'ANTHROPIC_AUTH_TOKEN': 'wrong-launch-token', 'USERPROFILE': str(Path.home())}, clear=True), \
+                    patch('builtins.open', side_effect=opened), \
+                    patch('winreg.OpenKey', side_effect=OSError), \
+                    patch.object(statusline, 'fetch_json', return_value=response) as fetch:
+                fetcher()
+                self.assertEqual(fetch.call_args.args[1]['Authorization'], 'Bearer saved-provider-key')
+
+
+class ModelSwitchTests(unittest.TestCase):
+    def render(self, route, profiles=None, launch_provider='official'):
+        files = {'routes.json': {'L': route} if route else {},
+                 'ratelimit-nvidia.json': {'rate_limits': {'req': {'used_percentage': 37}}}}
+        quotas = {'openai': {'plan': 'ChatGPT Plus', 'rate_limits': {'five_hour': {'used_percentage': 15}}},
+                  'commandcode': {'plan': 'Command Code', 'extra': '$2.00 left'},
+                  'opencode-go': {'plan': 'OpenCode Go', 'rate_limits': {'month': {'used_percentage': 23}}},
+                  'openrouter': {'plan': 'OpenRouter', 'extra': '$3.00 left'}}
+        payload = {'model': {'id': 'claude-opus-5-5'}, 'effort': 'high',
+                   'rate_limits': {'five_hour': {'used_percentage': 99}},
+                   'cost': {'total_cost_usd': 12}, 'prompt_cache': {'warm': False}}
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'CC_LAUNCH_ID': 'L', 'CC_MAIN_PROVIDER': launch_provider,
+                'ANTHROPIC_BASE_URL': 'http://127.0.0.1:10532/' + launch_provider, 'CC_AGENT_CHILD': ''}, clear=True))
+            for name, value in {'claude_json': {'oauthAccount': {'organizationType': 'claude_max'}},
+                                'credentials': {'claudeAiOauth': {'accessToken': 'test'}},
+                                'settings_effort': None, 'settings_ultracode': False, 'keyword_ultracode': False,
+                                'cc_routing_enabled': bool(profiles), 'cc_profiles': profiles or {},
+                                'cc_fallback_jobs': {}, 'cc_running_jobs': 0, 'cc_orphans': [],
+                                'subagent_sources': {}}.items():
+                stack.enter_context(patch.object(statusline, name, return_value=value))
+            stack.enter_context(patch.object(statusline, 'load_json', side_effect=lambda name: files.get(os.path.basename(name), {})))
+            saved = stack.enter_context(patch.object(statusline, 'save_json'))
+            fetched = stack.enter_context(patch.object(statusline, 'provider_quota', side_effect=lambda source, now: (quotas[source], None)))
+            levels = stack.enter_context(patch.object(statusline, 'effort_levels', return_value=['low', 'high']))
+            text = re.sub(r'\x1b\[[0-9;]*m', '', statusline.render(payload))
+            return text, fetched.call_args_list, levels.call_args_list, saved.call_args_list
+
+    def test_switch_selects_quota_and_effort_from_effective_provider(self):
+        for provider, model, source, label in (
+                ('openai-oauth', 'gpt-test', 'openai', 'ChatGPT Plus'),
+                ('commandcode', 'claude-test', 'commandcode', 'Command Code'),
+                ('commandcode-cli', 'claude-test', 'commandcode', 'Command Code'),
+                ('opencode-go', 'claude-test', 'opencode-go', 'OpenCode Go'),
+                ('openrouter', 'anthropic/claude-test', 'openrouter', 'OpenRouter')):
+            with self.subTest(provider=provider):
+                text, fetched, levels, saved = self.render({'provider': provider, 'model': model})
+                self.assertIn(label, text)
+                self.assertNotIn('via ', text)
+                self.assertNotIn('99%', text)
+                self.assertNotIn('api $', text)
+                self.assertNotIn('cache off', text)
+                self.assertEqual(fetched[0].args[0], source)
+                self.assertEqual(levels[0].args, (provider, model))
+                self.assertFalse(saved)
+
+    def test_switch_to_provider_without_quota_never_reuses_claude_quota(self):
+        for provider in ('nvidia', 'minimax', 'opencode-zen', 'gpt4free', 'gemini', 'ollama-cloud', 'lmstudio'):
+            with self.subTest(provider=provider):
+                text, fetched, _, _ = self.render({'provider': provider, 'model': 'claude-test'})
+                self.assertNotIn('99%', text)
+                self.assertNotIn('api $', text)
+                self.assertNotIn('cache off', text)
+                self.assertFalse(fetched)
+                if provider == 'nvidia':
+                    self.assertIn('req ▰▰▰▱▱▱▱▱▱▱', text)  # 37%
+
+    def test_same_provider_subagent_quota_is_not_duplicated_after_switch(self):
+        text, fetched, _, _ = self.render({'provider': 'openai-oauth', 'model': 'gpt-test'},
+                                         {'sub': {'provider': 'openai-oauth', 'model': 'gpt-test'}})
+        self.assertNotIn('same provider', text)
+        self.assertEqual(text.count('▰▱▱▱▱▱▱▱▱▱'), 1)  # 15%, shown once
+        self.assertEqual(len(fetched), 1)
+
+    def test_commandcode_api_and_cli_share_one_quota(self):
+        text, fetched, _, _ = self.render({'provider': 'commandcode', 'model': 'claude-test'},
+                                         {'sub': {'provider': 'commandcode-cli', 'model': 'worker-test'}})
+        self.assertEqual(text.count('$2.00 left'), 1)
+        self.assertEqual(len(fetched), 1)
+
+    def test_helper_targets_are_shown_without_changing_main_model(self):
+        text, _, _, _ = self.render({'provider': 'openai-oauth', 'model': 'gpt-6.1-sol', 'helpers': {
+            'auto': {'provider': 'openai-oauth', 'model': 'gpt-6-luna', 'effort': 'low'},
+            'tools': {'provider': 'official', 'model': 'claude-opus-5-5', 'effort': 'medium'},
+        }})
+        self.assertTrue(text.startswith('gpt-6.1-sol '))
+        self.assertIn('Auto: gpt-6-luna', text)
+        self.assertIn('Tools: Opus 5.5', text)
+        self.assertNotIn('via ', text)
+        self.assertNotIn('selected', text)  # a picked helper shows bare; only an unpicked one says "inherit"
+        text, _, _, _ = self.render({'provider': 'openai-oauth', 'model': 'gpt-6.1-sol'})
+        self.assertIn('Auto:', text)
+        self.assertIn('Tools: gpt-6.1-sol', text)
+        self.assertIn('inherit', text)
+
+    def test_official_route_uses_friendly_model_label(self):
+        text, _, _, _ = self.render({'provider': 'official', 'model': 'claude-opus-5-5'})
+        self.assertTrue(text.startswith('Opus 5.5 '), text)
+        self.assertNotIn('claude-opus-5-5', text)
+        text, _, _, _ = self.render({'provider': 'commandcode', 'model': 'claude-opus-5-5'})
+        self.assertTrue(text.startswith('claude-opus-5-5 '), text)
+
+    def test_explicit_official_route_uses_claude_plan(self):
+        text, fetched, levels, _ = self.render({'provider': 'official', 'model': 'claude-opus-5-5'})
+        self.assertIn('5h ▰▰▰▰▰▰▰▰▰▱', text)
+        self.assertNotIn('via ', text)
+        self.assertIn('cache off', text)
+        self.assertEqual(levels[0].args[0], 'official')
+        self.assertFalse(fetched)
+
+    def test_worker_model_does_not_change_main_cache_visibility(self):
+        text, _, _, _ = self.render(None, {'sub': {'provider': 'openai-oauth', 'model': 'gpt-test'}})
+        self.assertIn('cache off', text.splitlines()[0])
+        text, _, _, _ = self.render({'provider': 'openai-oauth', 'model': 'gpt-test'},
+                                   {'sub': {'provider': 'official', 'model': 'claude-opus-5-5'}})
+        self.assertNotIn('cache off', text.splitlines()[0])
+
+    def test_clearing_route_restores_launch_provider(self):
+        text, fetched, _, _ = self.render(None)
+        self.assertIn('5h ▰▰▰▰▰▰▰▰▰▱', text)
+        self.assertNotIn('via ', text.splitlines()[0])
+        self.assertFalse(fetched)
+        text, fetched, _, _ = self.render(None, launch_provider='openai-oauth')
+        self.assertIn('ChatGPT Plus', text)
+        self.assertEqual(fetched[0].args[0], 'openai')
+
+    def test_provider_detection_covers_adapter_and_direct_routes(self):
+        cases = {'http://127.0.0.1:10532/openrouter': ('openrouter', 'openrouter'),
+                 'http://127.0.0.1:10532/openai-oauth': ('openai-oauth', 'openai'),
+                 'http://127.0.0.1:10532/official': ('official', 'anthropic'),
+                 'https://opencode.ai/zen/go': ('opencode-go', 'opencode-go'),
+                 'https://openrouter.ai/api': ('openrouter', 'openrouter')}
+        for url, (provider, source) in cases.items():
+            with self.subTest(url=url), patch.dict(os.environ, {'ANTHROPIC_BASE_URL': url}, clear=True):
+                self.assertEqual(statusline.quota_source(), source)
+                self.assertEqual(statusline.cc_main_provider(None), provider)
+
+
+class CacheWindowTests(unittest.TestCase):
+    def test_official_countdown_comes_from_claude_codes_own_expiry(self):
+        now = 1_000_000.0
+        state = statusline.cache_state(
+            {'prompt_cache': {'warm': True, 'expires_at': now + 240, 'ttl': '5m'}},
+            'official', 'anthropic', 'claude-opus-5-5', now)
+        self.assertEqual(state, (20, 240))
+        self.assertIsNone(statusline.cache_state(
+            {'prompt_cache': {'warm': False}}, 'official', 'anthropic', 'claude-opus-5-5', now))
+
+    def test_other_providers_count_down_the_cache_after_the_last_write(self):
+        now = 1_000_000.0
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            path = handle.name
+        try:
+            os.utime(path, (now - 60, now - 60))
+            for provider in ('openai-oauth', 'commandcode', 'commandcode-cli', 'openrouter', 'opencode-go'):
+                with self.subTest(provider=provider):
+                    self.assertEqual(statusline.cache_state({'transcript_path': path}, provider, None, 'm', now),
+                                     (20, 240))
+                    # Claude Code's own Anthropic warm flag says nothing about these providers' caches.
+                    self.assertEqual(statusline.cache_state(
+                        {'transcript_path': path, 'prompt_cache': {'warm': False}}, provider, None, 'm', now),
+                        (20, 240))
+            os.utime(path, (now - 600, now - 600))
+            self.assertIsNone(statusline.cache_state({'transcript_path': path}, 'openai-oauth', None, 'm', now))
+            self.assertIsNone(statusline.cache_state({}, 'openai-oauth', None, 'm', now))
+            self.assertIsNone(statusline.cache_state({'transcript_path': path}, 'nvidia', None, 'm', now))
+        finally:
+            os.remove(path)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionCostTests(unittest.TestCase):
+    def test_main_and_subagent_cost_with_cache_share(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(statusline, "STATE_DIR", os.path.join(tmp, "state")):
+            main = os.path.join(tmp, "s.jsonl")
+            reply = lambda mid, model, **u: json.dumps({"message": {"id": mid, "model": model, "usage": u}}) + "\n"
+            with open(main, "w") as f:  # the same reply twice (two content lines) counts once
+                f.write(reply("a", "claude-opus-5-5", input_tokens=1_000_000, cache_read_input_tokens=1_000_000) * 2)
+            os.makedirs(os.path.join(tmp, "s", "subagents"))
+            with open(os.path.join(tmp, "s", "subagents", "agent-1.jsonl"), "w") as f:
+                f.write(reply("b", "claude-haiku-5-5", output_tokens=2_000_000, cache_creation_input_tokens=1_000_000,
+                              cache_creation={"ephemeral_1h_input_tokens": 1_000_000}))
+                f.write(reply("c", "unpriced-model", input_tokens=5))  # no known price: tokens only
+            with open(os.path.join(tmp, "s", "subagents", "agent-1.meta.json"), "w") as f:
+                json.dump({"agentType": "cc-sub-live"}, f)
+            self.assertAlmostEqual(statusline.transcript_cost(main)["usd"], 4.2)  # $4 input + $0.20 cache read
+            self.assertEqual(statusline.transcript_cost(main)["sent"], 2_000_000)  # incremental re-read adds nothing
+            sub = statusline.subagent_costs(main)["sub"]
+            self.assertAlmostEqual(sub["usd"], 6.0)  # past 100K: $5 output + 1h write at 2x $0.50
+            self.assertEqual(sub["ctx"], 5)  # the newest reply's context, not a sum
+            self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", statusline.cached_text(statusline.transcript_cost(main))), " 50% cached")
+            self.assertEqual(re.sub(r"\x1b\[[0-9;]*m", "", statusline.cost_text(statusline.transcript_cost(main))), "$4.20 (50% cached)")
+
+
+class HaikuTierTests(unittest.TestCase):
+    def test_haiku_long_prompt_bills_whole_request_at_long_rate(self):
+        short = statusline.usage_cost("claude-haiku-5-5", {"input_tokens": 100_000, "output_tokens": 1_000_000})
+        long = statusline.usage_cost("claude-haiku-5-5", {"input_tokens": 100_001, "output_tokens": 1_000_000})
+        self.assertAlmostEqual(short, 0.01 + 0.5)
+        self.assertAlmostEqual(long, 100_001 * 0.5 / 1e6 + 2.5)
+
+
+class BarTests(unittest.TestCase):
+    def test_empty_bar_outlines_green_and_partial_bar_dim(self):
+        self.assertTrue(statusline.bar(9).startswith(statusline.DIM + statusline.color(0) + "▱" * 10))
+        self.assertIn(statusline.DIM + "▱" * 9, statusline.bar(10))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import math
@@ -17,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any, Iterable, List, Tuple
 from urllib.parse import urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 try:
@@ -1785,7 +1787,8 @@ class AIService:
         `system` is a system message on chat endpoints and is prepended to the
         prompt elsewhere; `temperature` reaches chat endpoints only. A config with
         "stream": true streams chat replies (slow reasoning models outlive a
-        gateway's idle timeout on a non-streamed request).
+        gateway's idle timeout on a non-streamed request). "prompt_cache": true
+        sends `system` as a cache_control block on Anthropic-format endpoints.
 
         Waits until the reset time the notice names; otherwise retries every
         LIMIT_RETRY seconds, with a LIMIT_PAUSE wait every LIMIT_TRIES-th time when
@@ -1841,6 +1844,31 @@ class AIService:
             r.raise_for_status()
             items = [(d.get("index", i), list(d["embedding"])) for i, d in enumerate(r.json()["data"])]
         return [vector for _index, vector in sorted(items, key=lambda pair: pair[0])]
+
+    def generate_image(self, prompt: str, *, size: Optional[str] = None,
+                       quality: Optional[str] = None, model: Optional[str] = None) -> bytes:
+        """Image bytes (PNG) for `prompt` from an OpenAI-compatible /images/generations
+        endpoint; the openai-oauth proxy serves it on the ChatGPT sign-in. Opt-in, one
+        request, no retries or ledger; errors raise TransportError with the status."""
+        payload = {"model": model or self.config.get("image_model") or "gpt-image-2", "prompt": prompt}
+        if size:
+            payload["size"] = size
+        if quality:
+            payload["quality"] = quality
+        headers = {"Content-Type": "application/json", **self._extra_headers()}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
+        request = Request(self.base_url.rstrip("/") + "/images/generations",
+                          data=json.dumps(payload).encode(), headers=headers)
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read())
+        except HTTPError as error:
+            raise TransportError(f"HTTP {error.code}: {error.read().decode('utf-8', 'replace')[:300]}",
+                                 error.code) from error
+        except OSError as error:
+            raise TransportError(f"image request failed: {getattr(error, 'reason', error)}") from error
+        return base64.b64decode(body["data"][0]["b64_json"])
 
     def _note_model_used(self, model: Optional[str], model_type: str) -> None:
         """Append [provider, model] to AI_MODELS_USED_PATH once, so a book can credit every model that wrote it."""
@@ -2095,6 +2123,12 @@ class AIService:
                             "max_tokens": completion_tokens,
                             "thinking_budget": 0,  # Disable extended thinking to get direct text response
                         }
+                        if system and self.config.get("prompt_cache") is True:
+                            # Explicit breakpoint for endpoints that honour cache_control;
+                            # MiniMax-M3 ignores it and caches prefixes automatically.
+                            payload["system"] = [{"type": "text", "text": system,
+                                                  "cache_control": {"type": "ephemeral"}}]
+                            payload["messages"] = [{"role": "user", "content": prompt}]
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"

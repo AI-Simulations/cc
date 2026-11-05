@@ -5,11 +5,25 @@ import type { Col, Grid, GridTab, Row } from '../types'
 
 // shortcut: fixed path to the user's cc install, make it configurable if the mod is shared
 const CC = '~/.config/cc/cc-switch.py'
+const COST = '~/.config/cc/statusline.py'
 // Claude Code's ladder, for models whose provider publishes none of its own
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // the Compact column: auto-compact at this share of the context window, or the default threshold
-const PERCENTS = ['default', ...Array.from({ length: 10 }, (_, i) => String(95 - i * 5))]
+const PERCENTS = ['default', '100k', '200k', '300k', '400k', '600k', ...Array.from({ length: 10 }, (_, i) => String(95 - i * 5))]
+// "100k" / "1.5m" as tokens; undefined for a percentage
+const compactTokens = (v: string) => /^\d+(\.\d+)?[km]$/.test(v) ? Number(v.slice(0, -1)) * (v.endsWith('k') ? 1e3 : 1e6) : undefined
+const compactLabel = (v: string) => v === 'default' ? 'def' : compactTokens(v) ? v : `${v}%`
 const grid = atom({ plugin: 'subagent-picker', key: 'grid' } as const, null)
+const cost = atom({ plugin: 'subagent-picker', key: 'cost' } as const, '')
+// Green at $0 through yellow to red at $100 and above, the status line's gradient (hsv, s 0.6, v 0.9).
+export const costColor = (usd: number) => {
+  const hue = 120 * (1 - Math.min(Math.max(usd, 0), 100) / 100)
+  const f = (n: number) => {
+    const k = (n + hue / 60) % 6
+    return Math.round(255 * 0.9 * (1 - 0.6 * Math.max(0, Math.min(k, 4 - k, 1))))
+  }
+  return '#' + [f(5), f(3), f(1)].map(c => c.toString(16).padStart(2, '0')).join('')
+}
 
 type Target = { provider: string; model: string; effort?: string }
 type Profile = { name: string; provider: string; model: string; effort: string; autocompact: string; fallback?: Target }
@@ -135,8 +149,75 @@ export function parseModels(out: string) {
   return out.split(/\r?\n/).filter(l => /^\s+\S/.test(l)).map(l => l.trim().replace(/^\*\s+/, ''))
 }
 
+// The family a model id belongs to, so one provider's list reads by category: every Claude together,
+// every GPT together. Matched on the id's last segment; an unknown id falls back to its first word.
+const FAMILIES: readonly (readonly [RegExp, string])[] = [
+  [/claude|sonnet|opus|haiku|fable/i, 'Claude'],
+  [/gpt|^o[1-9]\b|chatgpt/i, 'GPT'],
+  [/gemini|gemma/i, 'Gemini'],
+  [/deepseek/i, 'DeepSeek'],
+  [/glm|zhipu|z-ai/i, 'GLM'],
+  [/qwen|tongyi/i, 'Qwen'],
+  [/kimi|moonshot/i, 'Kimi'],
+  [/llama|meta-llama/i, 'Llama'],
+  [/mistral|codestral|devstral/i, 'Mistral'],
+  [/minimax/i, 'MiniMax'],
+  [/mimo|xiaomi/i, 'MiMo'],
+  [/grok|x-ai/i, 'Grok'],
+  [/nemotron/i, 'Nemotron'],
+  [/phi-/i, 'Phi'],
+  [/command[-_ ]?code|cmdc/i, 'Command Code'],
+]
+export function modelFamily(id: string) {
+  const tail = (id.split('/').pop() ?? id).trim()
+  const known = (s: string) => FAMILIES.find(([pattern]) => pattern.test(s))?.[1]
+  const family = known(tail) ?? known(id)
+  if (family) return family
+  const word = /^[a-z]+/i.exec(tail)?.[0]
+  return word && word.length > 1 ? word[0]!.toUpperCase() + word.slice(1).toLowerCase() : 'Other'
+}
+
+// The typed search: rows whose name reads it, case-insensitively; the value is the name for most providers.
+export function filterRows(rows: Row[], query: string) {
+  const needle = query.trim().toLowerCase()
+  return needle ? rows.filter(r => `${r.label ?? ''}\n${r.value}`.toLowerCase().includes(needle)) : rows
+}
+
+// The same list sorted by family, then by name: one category block per family.
+export function familySort(rows: Row[]) {
+  return [...rows].sort((a, b) => {
+    const [fa, fb] = [modelFamily(a.value), modelFamily(b.value)]
+    return fa === fb ? a.value.localeCompare(b.value) : fa.localeCompare(fb)
+  })
+}
+
+export function shapeModels(rows: Row[], query: string, sort: Grid['sort']) {
+  return filterRows(sort === 'family' ? familySort(rows) : rows, query)
+}
+
+// `cc presets` rows: provider, model, effort and the label the column shows; the value carries all three
+// as JSON, model ids having their own slashes.
+export function parsePresets(out: string): Row[] {
+  return out.split(/\r?\n/).flatMap(line => {
+    const [provider, model, effort, label] = line.split('\t')
+    if (!provider || !model) return []
+    const target: Target = { provider, model, ...(effort && effort !== 'default' ? { effort } : {}) }
+    return [{ value: JSON.stringify(target), label: label || `${provider}/${model}` }]
+  })
+}
+
+export function presetTarget(value: string | undefined): Target | undefined {
+  if (!value) return undefined
+  try {
+    const target = JSON.parse(value) as Target
+    return typeof target.provider === 'string' && typeof target.model === 'string' ? target : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // `Route: provider/model/with/slashes` (or `Fallback: …`) and an optional `Effort: level` line.
-export function parseTarget(out: string, name: 'Route' | 'Fallback'): Target | undefined {
+export function parseTarget(out: string, name: 'Route' | 'Fallback' | 'Helper'): Target | undefined {
   const m = new RegExp(`^${name}: (\\S+?)/(\\S+)$`, 'm').exec(out)
   const effort = /^Effort: (\S+)$/m.exec(out)?.[1]
   return m ? { provider: m[1]!, model: m[2]!, ...(effort ? { effort } : {}) } : undefined
@@ -168,7 +249,7 @@ try:
     elif provider == 'openai-oauth':
         home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
         rows = json.load(open(os.path.join(home, 'models_cache.json'), encoding='utf-8')).get('models') or []
-        default = next((r.get('default_reasoning_level') for r in rows if str(r.get('slug', '')).lower() == model.lower()), None)
+        default = cc.default_effort(provider, model) or next((r.get('default_reasoning_level') for r in rows if str(r.get('slug', '')).lower() == model.lower()), None)
     elif provider == 'official':
         cfg = json.load(open(os.path.expanduser('~/.claude/settings.json'), encoding='utf-8-sig'))
         default = ((cfg.get('modelSettings') or {}).get(model) or {}).get('effortLevel') or cfg.get('effortLevel')
@@ -197,21 +278,24 @@ function effortInfo($: EngineInterface, provider: string, model: string) {
 // ---------------- /model: a grid in the command's own chat row ----------------
 
 // The effort rows: the model's own ladder, its default level flagged on that level's row (which
-// stores `default`, so the setting follows the provider) rather than listed as a level of its own;
-// with no flagged level a plain `default` row leads.
+// stores its explicit level, so choosing it updates an existing session) and a separate `default`
+// row leads, so following the provider never disguises a named effort selection.
 export function effortOptions(levels: readonly string[], fallback: string | null) {
   const flagged = fallback && levels.includes(fallback) ? fallback : null
   const pad = Math.max(...levels.map(v => v.length)) + 1
   const rows = levels.map(v => ({
-    value: v === flagged ? 'default' : v,
+    value: v,
     label: `${v.padEnd(pad)}${effortBar(v, levels)}${v === flagged ? ' def' : ''}`,
   }))
-  return flagged ? rows : [{ value: 'default', label: 'default' }, ...rows]
+  return [{ value: 'default', label: 'default' }, ...rows]
 }
 
 const seqs: number[] = []
 let sessionRoute: Target | undefined
 let sessionFallback: Target | undefined
+let autoTarget: Target | undefined
+let toolsTarget: Target | undefined
+const helperTab = (t: GridTab) => t.name === 'Auto' || t.name === 'Tools'
 // Set when this session runs on Claude Code's own model (not a cc adapter route): the Main model tab
 // then sets it through the built-in /model and /effort.
 let nativeModel: string | undefined
@@ -227,6 +311,8 @@ const show = (t?: Target) => (t ? `${t.provider}/${t.model}${t.effort ? `, effor
 
 // What the tab's chosen subagent (or the session) runs on now.
 function targetOf(t: GridTab, who: string | undefined): Target | undefined {
+  if (t.name === 'Auto') return autoTarget
+  if (t.name === 'Tools') return toolsTarget
   if (t.name === 'Model') return nativeModel ? { provider: 'official', model: nativeModel } : sessionRoute
   if (t.name === 'Fallback' && who === 'session') return sessionFallback
   const p = cachedProfiles?.find(x => x.name === who)
@@ -236,7 +322,8 @@ function targetOf(t: GridTab, who: string | undefined): Target | undefined {
 
 function nowLine(t: GridTab, who: string | undefined) {
   const now = targetOf(t, who)
-  if (t.name === 'Model' && nativeModel) return `This session: Claude Code's own ${nativeModel}. Claude models switch now; another provider copies its cc relaunch command.`
+  if (helperTab(t)) return `${t.name === 'Auto' ? 'Safety classifier' : 'WebFetch extraction and model-backed hooks'}: ${now ? show(now) : 'inherit session provider'}. ${t.name === 'Tools' ? 'Default: main model, low effort if supported; otherwise inherit. External search backends are separate.' : 'Permission checks remain enabled.'}`
+  if (t.name === 'Model' && nativeModel) return `This session: Claude Code's own ${nativeModel}. Claude models switch now; another provider copies a cc command that resumes this conversation there.`
   if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return 'A session fallback needs a session started by cc on an adapter route (cc gemini …, cc nvidia …).'
   if (t.name === 'Model') return `This session:${now ? show(now) : 'its launch route'}. Applies to the next request.`
   if (t.name === 'Subagent') return `Subagent ${who}: ${show(now)}. Applies to its next task.`
@@ -252,14 +339,14 @@ async function providerRows($: EngineInterface, t: GridTab, who: string | undefi
   // the session's fallback list leaves out its own provider; shortcut: a subagent's `official` fallback
   // (a rerun on Claude) is set with `cc fallback subagent`, not listed here
   const routes = tabRows((await cc($, t.name === 'Fallback' && who === 'session' ? ['fallback', 'routes'] : ['route', 'routes'])).out)
-  return [{ value: 'off', label: t.name === 'Model' ? 'off (launch)' : 'off' }, ...routes.map(r => ({ value: r.value }))]
+  return [{ value: 'off', label: helperTab(t) ? 'inherit session' : t.name === 'Model' ? 'off (launch)' : 'off' }, ...routes.map(r => ({ value: r.value }))]
 }
 
 function modelList($: EngineInterface, t: GridTab, who: string | undefined, provider: string) {
   if (t.name === 'Model' && nativeModel && provider === 'official') return Promise.resolve(CLAUDE_MODELS.includes(nativeModel) ? CLAUDE_MODELS : [nativeModel, ...CLAUDE_MODELS])
   // cc lists a provider's models through a profile; any one serves
   if (t.name === 'Model' && nativeModel) return models($, cachedProfiles?.[0]?.name ?? 'sub', provider)
-  if (t.name === 'Model') return routeModels($, provider)
+  if (t.name === 'Model' || helperTab(t)) return routeModels($, provider)
   if (t.name === 'Fallback') return fallbackModels($, provider)
   return models($, who ?? '', provider).then(list => ['default', ...list])
 }
@@ -268,15 +355,77 @@ function setTab($: EngineInterface, ti: number, change: (t: GridTab) => GridTab)
   return update($, grid, g => (g ? { ...g, tabs: g.tabs.map((t, i) => (i === ti ? change(t) : t)) } : g))
 }
 
+// The model list's view: a family order and a typed search over each column's unfiltered `all`,
+// so either can change without asking cc for the list again.
+let viewQuery = ''
+let viewSort: Grid['sort']
+const viewOf = (rows: Row[]) => shapeModels(rows, viewQuery, viewSort)
+
 function setCol($: EngineInterface, ti: number, ci: number, col: Partial<Col>) {
-  return setTab($, ti, t => ({ ...t, cols: t.cols.map((c, i) => (i === ci ? { ...c, ...col } : c)) }))
+  return setTab($, ti, t => ({
+    ...t,
+    cols: t.cols.map((c, i) => {
+      if (i !== ci) return c
+      const merged = { ...c, ...col }
+      if (!col.rows || merged.title !== 'Model') return merged
+      const picked = merged.rows[merged.pick ?? merged.at]?.value
+      merged.all = col.rows
+      merged.rows = viewOf(col.rows)
+      const found = picked ? merged.rows.findIndex(r => r.value === picked) : -1
+      if (found >= 0) merged.at = merged.pick = found
+      else {
+        merged.at = Math.max(0, Math.min(merged.at, merged.rows.length - 1))
+        merged.pick = merged.at
+      }
+      if (viewQuery && col.rows.length && !merged.rows.length) merged.note = 'no match'
+      else if (!viewQuery && merged.note === 'no match') merged.note = undefined
+      return merged
+    }),
+  }))
+}
+
+// Re-shape every tab's model columns from their source lists: a new search or order, no refetch.
+function reflow($: EngineInterface) {
+  return update($, grid, x => {
+    if (!x) return x
+    return {
+      ...x,
+      tabs: x.tabs.map(tab => ({
+        ...tab,
+        cols: tab.cols.map(c => {
+          if (c.title !== 'Model' || !c.all) return c
+          const picked = c.rows[c.pick ?? c.at]?.value
+          const rows = viewOf(c.all)
+          const found = picked ? rows.findIndex(r => r.value === picked) : -1
+          const fit = (n: number) => Math.max(0, Math.min(n, rows.length - 1))
+          const note = viewQuery
+            ? (c.all.length && !rows.length ? 'no match' : undefined)
+            : (c.note === 'no match' ? undefined : c.note)
+          return found >= 0 ? { ...c, rows, at: found, pick: found, note }
+            : { ...c, rows, at: fit(c.at), pick: fit(c.pick ?? c.at), note }
+        }),
+      })),
+    }
+  })
+}
+
+async function setQuery($: EngineInterface, query: string) {
+  viewQuery = query
+  await update($, grid, g => (g ? { ...g, query } : g))
+  await reflow($)
+}
+
+async function toggleSort($: EngineInterface) {
+  viewSort = viewSort === 'family' ? undefined : 'family'
+  await update($, grid, g => (g ? { ...g, sort: viewSort } : g))
+  await reflow($)
 }
 
 const at = (rows: Row[], value: string | undefined) => Math.max(0, rows.findIndex(r => r.value === value))
 // A refilled column's cursor and pick both start on its default: the value in use, else the first row.
 const cursor = (rows: Row[], value: string | undefined) => ({ at: at(rows, value), pick: at(rows, value) })
 
-const COMPACT_ROWS: Row[] = PERCENTS.map(v => ({ value: v, label: v === 'default' ? 'def' : `${v}%` }))
+const COMPACT_ROWS: Row[] = PERCENTS.map(v => ({ value: v, label: compactLabel(v) }))
 // The main session's threshold, kept per session id so a resume keeps it.
 const compactKey = async ($: EngineInterface) => `compact:${await $.session.id()}`
 async function mainCompact($: EngineInterface) {
@@ -296,6 +445,7 @@ async function refill($: EngineInterface, ti: number, changed: number) {
   if (!t) return
   const iw = colIndex(t, 'Subagent', 'For')
   const ip = colIndex(t, 'Provider')
+  if (ip < 0) return // the Presets tab is a plain list; it has nothing to refill
   const im = colIndex(t, 'Model')
   const ie = colIndex(t, 'Effort')
   const who = whoOf(t)
@@ -353,12 +503,17 @@ async function refill($: EngineInterface, ti: number, changed: number) {
   const rows = effortOptions(levels, info.default)
   const same = now?.provider === provider && now.model === model
   // an explicit level equal to the flagged default ticks that row
-  const effort = now?.effort && now.effort === info.default && rows.some(r => r.value === 'default') ? 'default' : now?.effort ?? 'default'
+  const effort = now?.effort ?? 'default'
   await setCol($, ti, ie, { rows, current: same ? effort : undefined, ...cursor(rows, same ? effort : 'default') })
 }
 
 async function buildGrid($: EngineInterface, start: GridTab['name'], who?: string): Promise<Grid> {
-  const [route, fallback, profiles] = await Promise.all([cc($, ['route']), cc($, ['fallback']), loadProfiles($)])
+  const [route, fallback, profiles, auto, tools, preset] = await Promise.all([
+    cc($, ['route']), cc($, ['fallback']), loadProfiles($), cc($, ['helper', 'auto']), cc($, ['helper', 'tools']),
+    cc($, ['presets']),
+  ])
+  autoTarget = auto.ok ? parseTarget(auto.out, 'Helper') : undefined
+  toolsTarget = tools.ok ? parseTarget(tools.out, 'Helper') : undefined
   sessionRoute = route.ok ? parseTarget(route.out, 'Route') : undefined
   sessionFallback = fallback.ok ? parseTarget(fallback.out, 'Fallback') : undefined
   nativeModel = route.ok ? undefined : await $.session.model()
@@ -366,19 +521,37 @@ async function buildGrid($: EngineInterface, start: GridTab['name'], who?: strin
   const cols = (...titles: string[]): Col[] => titles.map(title => ({ title, rows: [], at: 0, note: title === 'Provider' ? 'Loading…' : '' }))
   const names = profiles.map(p => p.name)
   const subagents = names.map(value => ({ value }))
+  // Each provider's default pick: the same helper defaults the launcher uses, one Enter away.
+  const presets = preset.ok ? parsePresets(preset.out) : []
+  const here = presets.find(r => {
+    const t = presetTarget(r.value)
+    return !!t && !!sessionRoute && t.provider === sessionRoute.provider && t.model === sessionRoute.model
+  })
   const tabs: GridTab[] = [
     { name: 'Model', now: '', cols: cols('Provider', 'Model', 'Effort', 'Compact') },
+    presets.length
+      ? { name: 'Presets', now: 'Provider defaults; Enter sets this session route.', cols: [{ title: 'Preset', rows: presets, ...cursor(presets, here?.value) }] }
+      : { name: 'Presets', now: preset.ok ? 'No provider defaults listed.' : preset.out, cols: [] },
     names.length
       ? { name: 'Subagent', now: '', cols: names.length > 1 ? [{ title: 'Subagent', rows: subagents, ...cursor(subagents, who) }, ...cols('Provider', 'Model', 'Effort', 'Compact')] : cols('Provider', 'Model', 'Effort', 'Compact') }
       : { name: 'Subagent', now: 'No configured cc subagents.', cols: [] },
   ]
+  tabs.push(
+    auto.ok ? { name: 'Auto', now: '', cols: cols('Provider', 'Model', 'Effort') }
+      : { name: 'Auto', now: auto.out, cols: [] },
+    tools.ok ? { name: 'Tools', now: '', cols: cols('Provider', 'Model', 'Effort') }
+      : { name: 'Tools', now: tools.out, cols: [] },
+  )
   // the session's row stays when it cannot have a fallback, saying why
   const forRows = [{ value: 'session' }, ...names.map(value => ({ value }))]
   tabs.push(forRows.length
     ? { name: 'Fallback', now: '', cols: [{ title: 'For', rows: forRows, ...cursor(forRows, who) }, ...cols('Provider', 'Model', 'Effort')] }
     : { name: 'Fallback', now: fallback.out.split(/\r?\n/).pop() ?? fallback.out, cols: [] })
   const tab = Math.max(0, tabs.findIndex(t => t.name === start))
-  return { tab, col: Math.max(0, colIndex(tabs[tab]!, 'Provider')), tabs, room: 10 }
+  return {
+    tab, col: Math.max(0, colIndex(tabs[tab]!, 'Provider')), tabs, room: 10,
+    ...(viewQuery ? { query: viewQuery } : {}), ...(viewSort ? { sort: viewSort } : {}),
+  }
 }
 
 // /model's grid: a pane holding the keyboard, as the built-in picker does (nothing reaches the prompt).
@@ -387,6 +560,9 @@ const GRID_SIZE = { rows: 22, columns: 110 } as const
 
 // /model (and /fallback) with no arguments: the grid, opened on `start`.
 async function openGrid($: EngineInterface, start: GridTab['name'], who?: string) {
+  // a reopened grid starts unfiltered, in the provider's own order
+  viewQuery = ''
+  viewSort = undefined
   const g = await buildGrid($, start, who)
   await update($, grid, () => g)
   g.tabs.forEach((t, ti) => {
@@ -439,15 +615,23 @@ async function takeGridKeys($: EngineInterface) {
 // between the two tab targets, and one target sits above, below, left and right of it.
 export const RING_KEYS: Record<string, [string, boolean]> = {
   'T-': ['tab', true], 'T+': ['tab', false], U: ['up', false], D: ['down', false], L: ['left', false], R: ['right', false],
+  F: ['find', false], S: ['sort', false],
 }
 
+// Focus the search field: its typing filters the model list, and arrows then walk the result.
+const focusFind = ($: EngineInterface) =>
+  $.ui.focus({ requestId: GRID_PANE, key: 'Q' }).catch(err => $.ui.toast(String(err)))
+
 // A key for the grid: Tab cycles the tabs, ←/→ the columns, ↑/↓ the cursor (wrapping), Space picks the
-// cursor's row, Enter sets every column's pick (each starts on the value in use).
+// cursor's row, Enter sets every column's pick (each starts on the value in use). `f` finds by name,
+// `s` toggles the family order.
 async function onGridKey($: EngineInterface, key: string, shift: boolean) {
   marquee = 0
   const g = (await read($, grid)) as Grid | null
   if (!g) return
   const t = g.tabs[g.tab]!
+  if (key === 'find') return focusFind($)
+  if (key === 'sort') return toggleSort($)
   if (key === 'tab') {
     const tab = (g.tab + (shift ? -1 : 1) + g.tabs.length) % g.tabs.length
     return update($, grid, x => (x ? { ...x, tab, col: Math.max(0, colIndex(x.tabs[tab]!, 'Provider')), status: undefined } : x))
@@ -476,18 +660,23 @@ async function onGridKey($: EngineInterface, key: string, shift: boolean) {
   if (key === 'return') return applyGrid($, g)
 }
 
+// The cc command that resumes this conversation on another route.
+export function relaunchCommand(provider: string, model: string, effort: string, session: string) {
+  return `cc ${provider} ${model}${EFFORTS.includes(effort) ? ` --effort ${effort}` : ''} --resume ${session}`
+}
+
 // A session on Claude Code's own model: the built-in /model, then /effort when one was picked.
 async function applyNative($: EngineInterface, g: Grid, provider: string, model: string, effort: string) {
   if (provider !== 'official') {
-    const command = `cc ${provider} ${model}${effort === 'default' ? '' : ` --effort ${effort}`}`
+    const command = relaunchCommand(provider, model, effort, await $.session.id())
     const copied = !(await $.ui.copy({ text: command }).catch(() => ({ deny: 'no clipboard' })) as { deny?: string }).deny
-    return update($, grid, x => (x ? { ...x, status: `Relaunch to switch provider: ${command}${copied ? '  (copied)' : ''}` } : x))
+    return update($, grid, x => (x ? { ...x, status: `Exit, then relaunch to switch: ${command}${copied ? '  (copied)' : ''}` } : x))
   }
   const ran = [await $.command.run({ command: 'model', args: model })]
   if (effort !== 'default') ran.push(await $.command.run({ command: 'effort', args: effort }))
   const compact = selected(g.tabs[g.tab]!.cols[colIndex(g.tabs[g.tab]!, 'Compact')])
   const said = (ran.map(r => String((r as { text?: string }).text ?? '').split(/\r?\n/)[0]).filter(Boolean).join(', ') || `model ${model}`)
-    + (compact ? `, compact ${compact === 'default' ? 'default' : `${compact}%`}` : '')
+    + (compact ? `, compact ${compact === 'default' ? 'default' : compactLabel(compact)}` : '')
   const fresh = await buildGrid($, 'Model')
   await update($, grid, () => ({ ...fresh, tab: g.tab, col: g.col, status: `✔ ${said}` }))
   fresh.tabs.forEach((x, ti) => {
@@ -498,6 +687,22 @@ async function applyNative($: EngineInterface, g: Grid, provider: string, model:
 // Enter: the tab's selection, through the same cc commands the terminal uses; the grid stays for more.
 async function applyGrid($: EngineInterface, g: Grid) {
   const t = g.tabs[g.tab]!
+  // Presets carry their own provider, model and effort: one Enter is the whole pick.
+  if (t.name === 'Presets') {
+    const target = presetTarget(selected(t.cols[colIndex(t, 'Preset')]))
+    if (!target) return
+    if (nativeModel) return applyNative($, g, target.provider, target.model, target.effort ?? 'default')
+    const { ok, out } = await cc($, ['route', target.provider, target.model, ...(target.effort ? [target.effort] : [])])
+    if (!ok) return update($, grid, x => (x ? { ...x, status: out.split(/\r?\n/).pop() ?? out } : x))
+    const said = `${target.provider}/${target.model}${target.effort ? `, effort ${target.effort}` : ''}`
+    const fresh = await buildGrid($, 'Presets')
+    await update($, grid, () => ({ ...fresh, tab: g.tab, col: g.col, status: `✔ ${said}` }))
+    fresh.tabs.forEach((x, ti) => {
+      if (x.cols.length) void refill($, ti, colIndex(x, 'Subagent', 'For')).catch(() => undefined)
+    })
+    $.ui.toast(said)
+    return
+  }
   const who = whoOf(t)
   const provider = selected(t.cols[colIndex(t, 'Provider')])
   const model = selected(t.cols[colIndex(t, 'Model')])
@@ -511,13 +716,15 @@ async function applyGrid($: EngineInterface, g: Grid) {
   if (provider !== 'off' && !model) return update($, grid, x => (x ? { ...x, status: 'Pick a model first (the list is still loading or empty).' } : x))
   if (t.name === 'Model' && nativeModel) return applyNative($, g, provider, model!, effort)
   const pair = provider === 'off' ? ['off'] : [provider, model!, ...(effort === 'default' ? [] : [effort])]
-  const args = t.name === 'Model' ? ['route', ...pair]
+  const args = helperTab(t) ? ['helper', t.name.toLowerCase(), ...(provider === 'off' ? ['inherit'] : pair)]
+    : t.name === 'Model' ? ['route', ...pair]
     : t.name === 'Subagent' ? ['agents', 'set', who!, '--provider', provider, '--model', model!, '--effort', effort, ...(compact ? ['--autocompact', compact] : [])]
     : who === 'session' ? ['fallback', ...pair] : ['fallback', 'subagent', who!, ...pair]
   const { ok, out } = await cc($, args)
   const said = (t.name === 'Subagent' ? `${who}: ${provider}/${model}, effort ${effort}` : out.split(/\r?\n/).filter(Boolean).join(', '))
-    + (compact && t.name !== 'Fallback' ? `, compact ${compact === 'default' ? 'default' : `${compact}%`}` : '')
+    + (compact && t.name !== 'Fallback' ? `, compact ${compact === 'default' ? 'default' : compactLabel(compact)}` : '')
   if (!ok) return update($, grid, x => (x ? { ...x, status: out.split(/\r?\n/).pop() ?? out } : x))
+  // Adapter route effort is launch-scoped; native /effort would also persist it globally.
   // re-read what is set so the ticks move, on the same tab and column
   const fresh = await buildGrid($, t.name, who)
   await update($, grid, () => ({ ...fresh, tab: g.tab, col: g.col, status: `✔ ${said}` }))
@@ -556,9 +763,21 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   const CAP: Record<string, number> = { Provider: 15, Effort: 20, Compact: 8 }
   const fixed = (c: Col) => c.title === 'Model' ? 0
     : Math.min(CAP[c.title] ?? 14, Math.max(c.title.length + 1, ...c.rows.map(r => (r.label ?? r.value).length + 4)))
-  const rest = Math.max(12, width - MARGIN - 2 - t.cols.reduce((n, c) => n + fixed(c), 0) - GAP * Math.max(0, t.cols.length - 1))
-  const w = t.cols.map(c => fixed(c) || rest)
-  const x = w.map((_, i) => MARGIN + w.slice(0, i).reduce((n, v) => n + v + GAP, 0))
+  const available = width - MARGIN - 2
+  const fixedWidth = t.cols.reduce((n, c) => n + fixed(c), 0) + GAP * Math.max(0, t.cols.length - 1)
+  const wrapped = t.cols.length > 2 && fixedWidth + (t.cols.some(c => c.title === 'Model') ? 24 : 0) > available
+  const across = wrapped ? 2 : Math.max(1, t.cols.length)
+  const groups = Math.ceil(t.cols.length / across)
+  const activeGroup = wrapped ? Math.floor(g.col / across) : 0
+  const hidden = wrapped ? t.cols.map((_, i) => i).filter(i => Math.floor(i / across) !== activeGroup) : []
+  if (wrapped) room = Math.max(1, room - Math.ceil(hidden.length / 2))
+  const rest = Math.max(12, available - fixedWidth)
+  const w = t.cols.map((c, i) => wrapped
+    ? Math.floor((available - GAP) / 2) + (i % 2 ? (available - GAP) % 2 : 0)
+    : fixed(c) || rest)
+  const x = w.map((_, i) => MARGIN + (wrapped ? (i % 2 ? w[i - 1]! + GAP : 0)
+    : w.slice(0, i).reduce((n, v) => n + v + GAP, 0)))
+  const first = (_ci: number) => FIRST
   const tops = t.cols.map(c => colTop(c.at, c.rows.length, room))
   const fit = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s.padEnd(n))
   const cell = (ci: number, i: number) => {
@@ -575,42 +794,56 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
     const n = t.cols[ci]!.rows.length - tops[ci]! - room
     return fit(n > 0 ? `  … +${n} more` : '', w[ci]!)
   }
-  const row = (f: (ci: number) => string) => ' '.repeat(MARGIN) + t.cols.map((_, ci) => f(ci)).join(' '.repeat(GAP))
+  const row = (group: number, f: (ci: number) => string) => ' '.repeat(MARGIN)
+    + t.cols.slice(group * across, (group + 1) * across).map((_, i) => f(group * across + i)).join(' '.repeat(GAP))
   const names = g.tabs.map((x, i) => {
     const name = x.name === 'Model' ? 'Main model' : x.name === 'Fallback' ? 'Fallbacks' : x.name
     return i === g.tab ? `[ ${name} ]` : `  ${name}  `
   })
   const strip = ' '.repeat(MARGIN) + names.join(' ')
-  const lines: Line[] = [{ text: strip, style: { bold: true } }, { text: t.now, style: { dimColor: true } }, { text: '' }]
-  if (t.cols.length) {
-    lines.push({ text: row(title), style: { bold: true } })
-    for (let r = 0; r < room; r++) lines.push({ text: row(ci => cell(ci, tops[ci]! + r)) })
-    lines.push({ text: row(more), style: { dimColor: true } })
+  const lines: Line[] = [{ text: fit(strip, width), style: { bold: true } }, { text: fit(t.now, width), style: { dimColor: true } }, { text: '' }]
+  for (let group = activeGroup; group < (wrapped ? activeGroup + 1 : groups); group++) {
+    lines.push({ text: row(group, title), style: { bold: true } })
+    for (let r = 0; r < room; r++) lines.push({ text: row(group, ci => cell(ci, tops[ci]! + r)) })
+    lines.push({ text: row(group, more), style: { dimColor: true } })
+  }
+  for (let i = 0; i < hidden.length; i += 2) {
+    lines.push({ text: ' '.repeat(MARGIN) + hidden.slice(i, i + 2).map(ci => {
+      const c = t.cols[ci]!
+      const r = c.rows[c.pick ?? c.at]
+      return fit(`${c.title}: ${r?.label ?? r?.value ?? c.note ?? '—'}${r && r.value === c.current ? ' ✔' : ''}`, w[ci]!)
+    }).join(' '.repeat(GAP)), style: { dimColor: true } })
   }
   lines.push({ text: '' })
-  if (g.status) lines.push({ text: g.status, style: { color: g.status.startsWith('✔') ? 'success' : 'warning' } })
-  lines.push({ text: 'Tab tabs · ←/→ column · ↑/↓ move · Space pick · Enter set picks · Esc close', style: { dimColor: true } })
+  if (g.status) lines.push({ text: fit(g.status, width), style: { color: g.status.startsWith('✔') ? 'success' : 'warning' } })
+  const help = 'Tab tabs · ←/→ column · ↑/↓ move · Space pick · Enter set · f find · s sort · Esc close'
+  for (let at = 0; at < help.length; at += width) lines.push({ text: help.slice(at, at + width), style: { dimColor: true } })
+  // The find field and the sort toggle sit on the blank line, out of the arrows' way.
+  const sortLabel = `sort: ${g.sort === 'family' ? 'family' : 'listed'}`
+  const sortSpot = { x: Math.max(MARGIN + 24, width - sortLabel.length - 2), y: 2, label: sortLabel }
+  const findSpot = { x: MARGIN, y: 2, label: 'find' }
+  const filterSpot = { x: MARGIN + 8, y: 2, width: Math.max(8, sortSpot.x - MARGIN - 10) }
   // where an index of column ci is drawn; an empty column's note sits on its first row
-  const spot = (ci: number, i: number): Spot => ({ x: x[ci]!, y: FIRST + Math.max(0, i - tops[ci]!), label: cell(ci, i) })
+  const spot = (ci: number, i: number): Spot => ({ x: x[ci]!, y: first(ci) + Math.max(0, i - tops[ci]!), label: cell(ci, i) })
   const blank = (sx: number, y: number): Spot => ({ x: sx, y, label: ' ' })
   const col = Math.min(g.col, Math.max(0, t.cols.length - 1))
   const c = t.cols[col]
   // a tab without columns still holds the ring, on its now line
   if (!c) {
     const here = { x: MARGIN, y: 1, label: fit(t.now || ' ', Math.max(1, width - MARGIN - 2)) }
-    return { lines, room, tabEnd: strip.length + 1, scrolls: false, c: here, u: blank(MARGIN, 0), d: blank(MARGIN, 2), l: blank(0, 1), r: blank(width - 1, 1) }
+    return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls: false, c: here, u: blank(MARGIN, 0), d: blank(MARGIN, 2), l: blank(0, 1), r: blank(width - 1, 1), find: findSpot, filter: filterSpot, sort: sortSpot }
   }
   const at = c.rows.length ? c.at : 0
   const here = spot(col, at)
-  const u = c.rows.length && at - 1 >= tops[col]! ? spot(col, at - 1) : { x: x[col]!, y: FIRST - 1, label: title(col) }
+  const u = c.rows.length && at - 1 >= tops[col]! ? spot(col, at - 1) : { x: x[col]!, y: first(col) - 1, label: title(col) }
   const below = at + 1 < Math.min(c.rows.length, tops[col]! + room)
-  const d = below ? spot(col, at + 1) : { x: x[col]!, y: here.y + 1, label: here.y + 1 === FIRST + room ? more(col) : fit('', w[col]!) }
+  const d = below ? spot(col, at + 1) : { x: x[col]!, y: here.y + 1, label: here.y + 1 === first(col) + room ? more(col) : fit('', w[col]!) }
   const side = (ci: number) => spot(ci, t.cols[ci]!.rows.length ? t.cols[ci]!.at : 0)
-  const l = col > 0 ? side(col - 1) : blank(0, here.y)
-  const r = col < t.cols.length - 1 ? side(col + 1) : blank(x[col]! + w[col]! + 1, here.y)
+  const l = wrapped ? blank(Math.max(0, here.x - 1), here.y) : col > 0 ? side(col - 1) : blank(0, here.y)
+  const r = wrapped ? blank(here.x + w[col]!, here.y) : col < t.cols.length - 1 ? side(col + 1) : blank(x[col]! + w[col]! + 1, here.y)
   const cur = c.rows[at]
   const scrolls = !!cur && `${cur.label ?? cur.value}${cur.value === c.current ? ' ✔' : ''}`.length > w[col]! - 2
-  return { lines, room, tabEnd: strip.length + 1, scrolls, c: here, u, d, l, r }
+  return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls, c: here, u, d, l, r, find: findSpot, filter: filterSpot, sort: sortSpot }
 }
 
 async function warm($: EngineInterface) {
@@ -622,7 +855,30 @@ async function warm($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     void warm($).catch(() => undefined)
+    // The session's API-price cost (main, subagents), drawn at the end of the mode row under the prompt.
+    $.ui.status(undefined)  // an earlier load pinned it as a status notice above the status line
+    const showCost = async () => {
+      const r = await $.process.run(['python', '-B', COST, '--cost', await $.session.id()], { timeoutMs: 30000 })
+      update($, cost, () => r.stdout.trim())
+    }
+    void showCost().catch(() => undefined)
+    $.clock.every(10000, () => showCost().catch(() => undefined))
     return next(e)
+  })
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const part = /^api (\$([\d,.]+))(.*)$/.exec(await read($, cost))
+    if (!part) return next(e)
+    // The engine's own line fills its row (a tree beside it wraps below) and its `tail` is always dim, so the
+    // row is drawn here from its text: the hint dim, then the total coloured by how much it is.
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row">
+        <Text dimColor>{`${e.props.hint} · api `}</Text>
+        <Text color={costColor(Number(part[2].replace(/,/g, '')))}>{part[1]}</Text>
+        <Text dimColor>{part[3]}</Text>
+      </Box>
+    )
   })
 
   // The grid's ring never leaves the cursor cell: a move onto one of its targets is the key that target
@@ -632,6 +888,15 @@ export const register: Register = on => {
     const key = RING_KEYS[e.element ?? '']
     if (key) void onGridKey($, key[0], key[1]).catch(err => $.ui.toast(String(err)))
     return { deny: 'the grid moves its own cursor' }
+  })
+
+  // Esc clears a typed search before it closes the picker, as a password field's first Esc does.
+  on('ui.close', { id: GRID_PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person' && viewQuery) {
+      await setQuery($, '')
+      return { deny: 'cleared the search' }
+    }
+    return next(e)
   })
 
   // ↑/↓ scroll a pane taller than its body instead of moving the ring (the grid is drawn so): a
@@ -647,10 +912,13 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: GRID_PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button } = ui
+    // Mobile has no Input; the other surfaces do, so draw the field only where it exists.
+    const Input = 'Input' in ui ? ui.Input : undefined
     const g = (await read($, grid)) as Grid | null
     if (!g) return <Text dimColor>Loading…</Text>
-    const L = gridLayout(g, Math.max(40, e.props.bodyColumns), Math.max(3, Math.min(12, e.props.scroll.bodyRows - 9)), marquee)
+    const L = gridLayout(g, Math.max(20, e.props.bodyColumns), Math.max(3, Math.min(12, e.props.scroll.bodyRows - 9)), marquee)
     marqueeWanted = L.scrolls
     if (L.room !== g.room) void update($, grid, x => (x ? { ...x, room: L.room } : x))
     const at = (k: string, x: number, y: number, label: string, dim = false) => {
@@ -666,6 +934,18 @@ export const register: Register = on => {
       </Box>
       )
     }
+    // A one-letter control: pressed from the grid, or clicked, it runs its key.
+    const hot = (k: string, x: number, y: number, label: string, letter: string) => {
+      const [key, shift] = RING_KEYS[k] ?? ['', false]
+      return (
+        <Box key={`at:${k}`} position="absolute" left={x} top={y} width={Math.max(1, label.length + 4)} height={1} flexShrink={0} overflow="hidden">
+          <Button key={k} plain dimColor hotkey={letter}
+            onPress={() => void onGridKey($, key, shift).catch(err => $.ui.toast(String(err)))}>
+            {label}
+          </Button>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
         {L.lines.map((l, i) => <Text key={`l:${i}`} {...l.style} wrap="truncate-end">{l.text || ' '}</Text>)}
@@ -678,6 +958,15 @@ export const register: Register = on => {
         {at('D', L.d.x, L.d.y, L.d.label)}
         {at('L', L.l.x, L.l.y, L.l.label)}
         {at('R', L.r.x, L.r.y, L.r.label)}
+        {hot('F', L.find.x, L.find.y, L.find.label, 'f')}
+        {hot('S', L.sort.x, L.sort.y, L.sort.label, 's')}
+        {Input !== undefined && (
+          <Box key="at:Q" position="absolute" left={L.filter.x} top={L.filter.y} width={L.filter.width} height={1} flexShrink={0} overflow="hidden">
+            <Input key="Q" placeholder="search models" value={g.query ?? ''}
+              onInput={value => void setQuery($, value).catch(err => $.ui.toast(String(err)))}
+              onSubmit={() => void focusFind($)} />
+          </Box>
+        )}
       </Box>
     )
   })
@@ -690,7 +979,9 @@ export const register: Register = on => {
   let compacting = false
   on('session.measure', async ($, e, next) => {
     const out = await next(e)
-    const pct = Number(await mainCompact($))
+    const pick = String((await mainCompact($)) ?? '')
+    const tokens = compactTokens(pick)
+    const pct = tokens ? tokens / e.context.window * 100 : Number(pick)
     const used = e.context.percent ?? (e.context.tokens ?? 0) / e.context.window * 100
     if (pct && !compacting && used >= pct) {
       compacting = true
@@ -706,6 +997,15 @@ export const register: Register = on => {
     // `/model <name>` stays Claude Code's; a complete /fallback call stays with cc-switch.py.
     const dialog = command === 'model' ? !words.length : !words.length || (head === 'subagent' && words.length <= 2)
     if (!dialog) return next(e)
+    // The picker is its own window (cc gui) on a cc adapter session; the in-terminal grid stays as
+    // the fallback when the window cannot open (no Tk, a missing file, a refused launch). A native
+    // session keeps the grid: only it can run Claude Code's own /model and /effort, which its Model
+    // tab switches; the window would refuse its Apply.
+    let window: { ok: boolean; out: string } | undefined
+    if ((await cc($, ['route'])).ok) {
+      window = await cc($, ['gui', command === 'model' ? 'model' : 'fallback'])
+      if (window.ok) return { text: window.out.split(/\r?\n/).pop() || `/${command}: opened the picker window.` }
+    }
     const failed = await openGrid($, command === 'model' ? 'Model' : 'Fallback', words[1])
     if (failed) {
       // the built-in /model, or cc-switch.py's settings hook, answers instead
@@ -713,6 +1013,7 @@ export const register: Register = on => {
       return next(e)
     }
     void takeGridKeys($).catch(() => undefined)
-    return { text: `/${command}: Tab switches tabs, arrows move, Space picks, Enter sets, Esc closes.` }
+    const reason = window ? window.out.split(/\r?\n/).pop() : 'this session has no cc launch'
+    return { text: `/${command}: the picker window is unavailable (${reason ?? 'cc gui failed'}); Tab switches tabs, arrows move, Space picks, Enter sets, Esc closes.` }
   })
 }

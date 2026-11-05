@@ -50,6 +50,7 @@ SESSION_AGENTS_FILE = os.path.join(CFG_DIR, "session-agents.json")
 ROUTES_FILE = os.path.join(CFG_DIR, "routes.json")
 KEYS_FILE = os.path.join(CFG_DIR, "keys.json")
 EFFORTS_FILE = os.path.join(CFG_DIR, "efforts.json")
+CLAUDE_SETTINGS = os.path.expanduser(r"~\.claude\settings.json")
 AGENTS_DIR = os.path.expanduser(r"~\.claude\agents")
 OPENCODE_AUTH = os.path.expanduser(r"~\.local\share\opencode\auth.json")
 OPENCODE_CONFIG = os.path.expanduser(r"~\.config\opencode\opencode.jsonc")
@@ -62,7 +63,8 @@ CC_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_MODE_SERVER", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ENABLE_CLAUDEAI_MCP_SERVERS", "API_TIMEOUT_MS",
-           "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"]
+           "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+           "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"]
 # /model picker entries beyond the chosen model (which also takes Opus and Haiku, so
 # background work stays on it), filled with this provider's other models.
 PICKER_SLOTS = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION"]
@@ -70,6 +72,7 @@ PICKER_SLOTS = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 # Auto-compact thresholds offered by the menus; --autocompact takes any 1-100.
 AUTOCOMPACTS = [50, 60, 70, 80, 90, 95]
+COMPACT_TOKENS = ["100k", "200k", "300k", "400k", "600k"]
 AGENT_FLAGS = ("--provider", "--model", "--effort", "--autocompact", "--description")
 OAI_VARS = ["OPENAI_BASE_URL", "OPENAI_API_KEY"]
 CC_VARS += [slot + "_SUPPORTED_CAPABILITIES" for slot in ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", *PICKER_SLOTS]]
@@ -109,7 +112,7 @@ FALLBACK_MODELS = {
                      ("openai/gpt-6-sol", ""), ("deepseek/deepseek-v4.1-flash", "")],
     "commandcode-cli": [("deepseek/deepseek-v4.1-flash", ""), ("moonshotai/kimi-k3", ""), ("zai-org/glm-5.3", "")],
     "nvidia":       [("deepseek-ai/deepseek-v4.1-flash", ""), ("z-ai/glm-5.3", ""), ("moonshotai/kimi-k2.6", "")],
-    "openai-oauth": [("gpt-6.1-sol", ""), ("gpt-6-sol", ""), ("gpt-6-luna", "")],
+    "openai-oauth": [("gpt-6.1-sol", ""), ("gpt-6.1-terra", ""), ("gpt-6-sol", ""), ("gpt-6-luna", "")],
     "minimax":      [("MiniMax-M3", ""), ("MiniMax-M2.7", "")],
     "gpt4free":     [("deepseek-v4-pro", ""), ("deepseek-v4.1-flash", ""), ("glm-5.3", ""), ("kimi-k3", "")],
 }
@@ -228,7 +231,8 @@ def ensure_key(name):
 
 def load_state():
     try:
-        return json.load(open(STATE_FILE, encoding="utf-8"))
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return {}
 
@@ -394,6 +398,390 @@ def codex_efforts(model_id):
             if not isinstance(levels, list):
                 return None
             return [e["effort"] for e in levels if isinstance(e, dict) and isinstance(e.get("effort"), str)]
+    return None
+
+
+def helper_default(kind, provider):
+    """Provider-specific helper defaults; explicit launch selections take precedence."""
+    try:
+        with open(os.path.join(CFG_DIR, "helper-defaults.json"), encoding="utf-8") as f:
+            target = json.load(f).get(kind, {}).get(provider)
+        if isinstance(target, dict) and isinstance(target.get("model"), str) and target.get("effort") in EFFORTS:
+            return {"provider": provider, "model": target["model"], "effort": target["effort"]}
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def lowest_effort(name, model_id):
+    """Tools default to low when supported; otherwise inherit the main effort."""
+    levels = model_efforts(name, model_id)
+    return "low" if name == "official" or levels is not None and "low" in levels else None
+
+
+def preset_targets():
+    """The /model picker's quick presets: each provider's default model and effort.
+
+    A preset the person saved wins, then the curated auto-helper default, then the model this
+    account picked last, then the first mirror of its model list. One Enter per provider.
+    """
+    try:
+        with open(os.path.join(CFG_DIR, "helper-defaults.json"), encoding="utf-8") as f:
+            defaults = json.load(f).get("auto") or {}
+    except (OSError, ValueError, AttributeError, TypeError):
+        defaults = {}
+    if not isinstance(defaults, dict):
+        defaults = {}
+    saved = load_presets()
+    recent = load_state().get("recent") or {}
+    names = route_providers()
+    if not on_adapter():
+        names = ["official", *names]  # a native session's own model, then the relaunch presets
+    rows = []
+    for name in names:
+        custom = saved.get(name)
+        if isinstance(custom, dict) and isinstance(custom.get("model"), str) and custom["model"]:
+            effort = custom.get("effort") if custom.get("effort") in EFFORTS else None
+            rows.append({"provider": name, "model": custom["model"], "effort": effort, "custom": True})
+            continue
+        default = defaults.get(name) if isinstance(defaults.get(name), dict) else {}
+        model = default.get("model") if isinstance(default.get("model"), str) else None
+        if name == "official":
+            # the classifier's helper default is not a main-model preset: the last pick is
+            model = next((m for m in recent.get("official") or [] if isinstance(m, str)), None) or model or "claude-opus-5-5"
+        if not model:
+            model = next((m for m in recent.get(name) or [] if isinstance(m, str)), None)
+        if not model:
+            first = FALLBACK_MODELS.get(name) or []
+            model = first[0][0] if first else None
+        if not model:
+            continue
+        effort = default.get("effort") if name != "official" and default.get("effort") in EFFORTS else None
+        rows.append({"provider": name, "model": model, "effort": effort})
+    return rows
+
+
+def presets_path():
+    return os.path.join(CFG_DIR, "presets.json")
+
+
+def load_presets():
+    """The presets the person edited, by provider; a missing or broken file is empty."""
+    try:
+        with open(presets_path(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_presets(data):
+    write_json(presets_path(), data, indent=1)
+
+
+PRESET_CATEGORIES = ("model", "subagent", "fallback", "auto", "tools")
+
+
+def preset_bundle(row):
+    """Expand legacy main-model presets without rewriting the person's saved file."""
+    main = {"provider": row["provider"], "model": row["model"]}
+    if row.get("effort"):
+        main["effort"] = row["effort"]
+    settings = {"model": dict(main), "subagent": dict(main), "fallback": {"provider": "off"},
+                "auto": helper_default("auto", row["provider"]) or dict(main),
+                "tools": helper_default("tools", row["provider"]) or dict(main)}
+    if not helper_default("tools", row["provider"]):
+        level = lowest_effort(row["provider"], row["model"])
+        if level:
+            settings["tools"]["effort"] = level
+    custom = load_presets().get(row["provider"])
+    overrides = custom.get("settings") if isinstance(custom, dict) else None
+    if isinstance(overrides, dict):
+        for key in PRESET_CATEGORIES[1:]:
+            target = overrides.get(key)
+            if isinstance(target, dict) and isinstance(target.get("provider"), str):
+                if target["provider"] == "off" and key in ("fallback", "auto", "tools"):
+                    settings[key] = {"provider": "off"}
+                elif target["provider"] in PROVIDERS and isinstance(target.get("model"), str) and target["model"]:
+                    settings[key] = {"provider": target["provider"], "model": target["model"]}
+                    if target.get("effort") in EFFORTS:
+                        settings[key]["effort"] = target["effort"]
+    return settings
+
+
+def saved_bundle(name):
+    """The five-category preset saved for this provider in /model's Presets tab, or None."""
+    custom = load_presets().get(name)
+    settings = custom.get("settings") if isinstance(custom, dict) else None
+    if not (isinstance(settings, dict) and set(PRESET_CATEGORIES) <= set(settings)
+            and all(isinstance(settings[k], dict) for k in PRESET_CATEGORIES)):
+        return None
+    return settings
+
+
+def preset_agents(name):
+    """Every subagent profile on the saved preset's subagent route; None without a saved preset."""
+    bundle = saved_bundle(name)
+    target = bundle and bundle["subagent"]
+    if not (target and target.get("provider") in PROVIDERS and target.get("model")):
+        return None
+    route = {"provider": target["provider"], "model": target["model"], **({"effort": target["effort"]} if target.get("effort") else {})}
+    profiles = load_agents(session=False) or {"sub": {}}
+    return {n: {**{k: v for k, v in a.items() if k not in ("provider", "model", "effort")}, **route} for n, a in profiles.items()}
+
+
+def is_resume(claude_args):
+    return any(a in ("--resume", "-r", "--continue", "-c") or a.startswith("--resume=") for a in claude_args)
+
+
+def seed_launch_from_preset(name, launch, adapter, providers):
+    """A new launch starts on its provider's saved preset: subagents, and on adapter routes the auto/tools helpers."""
+    agents = preset_agents(name)
+    # save_agents writes the global file outside a launch; only seed the launch it would edit
+    if agents and session_launch() == launch and _session_agents(launch) is None:
+        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+            save_agents(agents)
+    bundle = saved_bundle(name)
+    if not bundle or not adapter:
+        return
+    data = load_routes()
+    row = dict(data.get(launch) or {})
+    if row.get("helpers"):
+        return
+    helpers = {k: {key: bundle[k][key] for key in ("provider", "model", "effort") if bundle[k].get(key)}
+               for k in ("auto", "tools") if bundle[k].get("provider") in providers and bundle[k].get("model")}
+    if helpers:
+        data[launch] = {**row, "helpers": helpers, "at": time.time()}
+        write_json(ROUTES_FILE, data, indent=1)
+
+
+def presets_command(words):
+    """List main-model picks or edit a complete five-category preset bundle."""
+    if words == ["bundles"]:
+        print(json.dumps([{**row, "settings": preset_bundle(row)} for row in preset_targets()]))
+        return
+    if words[:1] == ["set-bundle"] and len(words) == 3:
+        name = words[1].lower()
+        if name not in PROVIDERS:
+            die(f"Unknown provider '{name}'.")
+        try:
+            settings = json.loads(words[2])
+        except ValueError:
+            die("Invalid preset JSON.")
+        if not isinstance(settings, dict) or set(settings) != set(PRESET_CATEGORIES):
+            die("A preset must include model, subagent, fallback, auto and tools.")
+        cleaned = {}
+        for key, target in settings.items():
+            if not isinstance(target, dict):
+                die(f"Invalid {key} preset.")
+            provider = target.get("provider")
+            if provider == "off" and key in ("fallback", "auto", "tools"):
+                cleaned[key] = {"provider": "off"}
+                continue
+            model, effort = target.get("model"), target.get("effort", "default")
+            allowed = FALLBACK_ROUTES if key == "fallback" else route_providers() if key in ("auto", "tools") else PROVIDERS
+            if not isinstance(provider, str) or provider not in allowed:
+                die(f"Invalid {key} provider.")
+            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", model):
+                die(f"Invalid {key} model id.")
+            if effort != "default" and effort not in EFFORTS:
+                die(f"Invalid {key} effort.")
+            if effort != "default":
+                levels = model_efforts(provider, model)
+                if levels is not None and effort not in levels:
+                    die(f"{provider}/{model} does not support effort {effort}.")
+            cleaned[key] = {"provider": provider, "model": model, **({"effort": effort} if effort != "default" else {})}
+        if cleaned["model"]["provider"] != name:
+            die("The main model must use the preset's provider.")
+        saved = load_presets()
+        saved[name] = {"model": cleaned["model"]["model"],
+                       **({"effort": cleaned["model"]["effort"]} if cleaned["model"].get("effort") else {}),
+                       "settings": cleaned}
+        save_presets(saved)
+        print(f"Preset saved: {name} (all five categories)")
+        return
+    if not words or words == ["list"]:
+        for row in preset_targets():
+            effort = row["effort"] or ""
+            label = f'{row["provider"]} · {row["model"]}' + (f' · {row["effort"]}' if row["effort"] else "")
+            print(f'{row["provider"]}\t{row["model"]}\t{effort}\t{label}\t{"1" if row.get("custom") else ""}')
+        return
+    if words[0] == "set" and len(words) in (3, 4):
+        name, model = words[1].lower(), words[2]
+        if name not in PROVIDERS:
+            die(f"Unknown provider '{name}'. Valid: {', '.join(PROVIDERS)}")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", model):
+            die("Invalid model id.")
+        effort = words[3].lower() if len(words) == 4 else "default"
+        if effort != "default" and effort not in EFFORTS:
+            die(f"Effort must be one of: {', '.join(['default', *EFFORTS])}.")
+        saved = load_presets()
+        previous = saved.get(name)
+        settings = previous.get("settings") if isinstance(previous, dict) else None
+        saved[name] = {"model": model, **({"effort": effort} if effort != "default" else {}),
+                       **({"settings": settings} if isinstance(settings, dict) else {})}
+        save_presets(saved)
+        print(f"Preset: {name}/{model}" + (f", effort {effort}" if effort != "default" else ""))
+        return
+    if words[0] == "reset" and len(words) == 2:
+        name = words[1].lower()
+        saved = load_presets()
+        if saved.pop(name, None) is None:
+            die(f"No custom preset for '{name}'.")
+        save_presets(saved)
+        print(f"Preset reset: {name}")
+        return
+    die("Usage: cc presets [list | set <provider> <model> [effort] | reset <provider>]")
+
+
+def models_command(words):
+    """cc models <provider>: the provider's model ids, for the pickers' editors."""
+    if len(words) != 1:
+        die("Usage: cc models <provider>")
+    name = words[0].lower()
+    if name not in PROVIDERS:
+        die(f"Unknown provider '{name}'. Valid: {', '.join(PROVIDERS)}")
+    ensure_key(name)
+    for model in get_models(name):
+        print(model["id"])
+
+
+def model_facts_command(words):
+    """cc facts <provider>: one JSON row per model, the same facts the launch menu sorts by."""
+    if len(words) != 1:
+        die("Usage: cc facts <provider>")
+    name = words[0].lower()
+    if name not in PROVIDERS:
+        die(f"Unknown provider '{name}'. Valid: {', '.join(PROVIDERS)}")
+    ensure_key(name)
+    with catalog._loading(f"{name} model facts"):
+        models = get_models(name)
+        catalog._models_dev()
+        catalog._artificial_analysis()
+    facts_name = {"official": "claude", "commandcode-cli": "commandcode"}.get(name, name)
+    infos = []
+    for model in models:
+        info = catalog._model_facts(facts_name, model["id"])
+        if type(model.get("context")) is int and model["context"] > 0:
+            info = {**info, "limit": {**(info.get("limit") or {}), "context": model["context"]}}
+        infos.append(info)
+    scales = catalog._scales(infos)
+    for model, info, scale in zip(models, infos, scales):
+        context = (info.get("limit") or {}).get("context")
+        cost = info.get("cost") or {}
+        print(json.dumps({
+            "id": model["id"],
+            "ctx": context if type(context) is int and context > 0 else None,
+            "in": cost.get("input") if "input" in cost else None,
+            "out": cost.get("output") if "output" in cost else None,
+            "aa": info.get("intelligence"),
+            "score": round(float(scale.get("score") or 0) * 100, 1),
+            "missing": catalog._missing(info),
+        }))
+
+
+def process_alive(pid):
+    """Whether a PID is still running (Windows: its exit code is STILL_ACTIVE; elsewhere: signal 0)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def gui_lock_path():
+    """The pid file cc-gui.py writes for this session (same naming rule as its lock_file)."""
+    key = os.environ.get("CC_LAUNCH_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "default"
+    safe = "".join(ch for ch in key if ch.isalnum() or ch in "-_")[:60] or "default"
+    return os.path.join(CFG_DIR, f"gui-{safe}.pid")
+
+
+def gui_lock_pid(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def gui_command(words):
+    """cc gui [model|subagent|fallback|auto|tools|presets]: the picker as its own window."""
+    tabs = ("model", "subagent", "fallback", "auto", "tools", "presets")
+    tab = (words[0].lower() if words else "model")
+    tab = "fallback" if tab == "fallbacks" else tab
+    if len(words) > 1 or tab not in tabs:
+        die("Usage: cc gui [model|subagent|fallback|auto|tools|presets]")
+    script = os.path.join(CFG_DIR, "cc-gui.py")
+    if not os.path.isfile(script):
+        die(f"Missing {script}; reinstall cc.")
+    python = sys.executable
+    if os.name == "nt":
+        windowed = os.path.join(os.path.dirname(python), "pythonw.exe")
+        if os.path.isfile(windowed):
+            python = windowed  # no console window behind the picker
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    log = os.path.join(CFG_DIR, "gui-error.log")
+    try:  # a stale failure from a previous launch must not name this one's cause
+        log_before = os.path.getmtime(log)
+    except OSError:
+        log_before = None
+    try:
+        proc = subprocess.Popen([python, "-B", script, "--tab", tab], cwd=CFG_DIR,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                creationflags=flags, close_fds=True)
+    except OSError as exc:
+        die(f"Could not open the picker window: {exc}")
+    # A detached child cannot report a Tk or startup failure through its exit code. The window
+    # registers its pid first, so wait for that: the launcher then tells the mod the truth, and
+    # the mod keeps its in-terminal grid when no window can open.
+    lock, deadline = gui_lock_path(), time.time() + 2.0
+    while time.time() < deadline:
+        if process_alive(gui_lock_pid(lock)):
+            time.sleep(0.15)  # a Tk failure unlinks the lock and exits just after claiming it
+            if proc.poll() is None and process_alive(gui_lock_pid(lock)):
+                print(f"Opened the model picker window ({tab}).")
+                return
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    if process_alive(gui_lock_pid(lock)):
+        print(f"Opened the model picker window ({tab}).")
+        return
+    detail = ""
+    try:
+        if os.path.getmtime(log) != log_before:
+            with open(log, encoding="utf-8") as f:
+                detail = (f.read().strip().splitlines() or [""])[-1]
+    except OSError:
+        pass
+    code = proc.poll()
+    die(f"Could not open the picker window: {detail or (f'cc-gui.py exited {code}' if code is not None else 'it did not start')}")
+
+
+def default_effort(name, model_id):
+    """Launcher defaults, independent of another provider's persisted /effort."""
+    main = (saved_bundle(name) or {}).get("model") or {}
+    if main.get("effort") and (model_id or "").casefold() == str(main.get("model", "")).casefold():
+        return main["effort"]
+    if name == "openai-oauth" and (model_id or "").casefold() == "gpt-6.1-sol":
+        return "high"
     return None
 
 
@@ -589,9 +977,41 @@ def stop_port_owner(port):
     die(f"Could not stop the outdated adapter on port {port}; end it in Task Manager and retry.")
 
 
+@contextlib.contextmanager
+def adapter_start_lock():
+    """One launcher replaces the shared adapter; other sessions wait and recheck health."""
+    import msvcrt
+    os.makedirs(CFG_DIR, exist_ok=True)
+    with open(os.path.join(CFG_DIR, 'adapter-start.lock'), 'a+b') as lock:
+        lock.seek(0, os.SEEK_END)
+        if not lock.tell():
+            lock.write(b'0')
+            lock.flush()
+        deadline = time.monotonic() + 30
+        while True:
+            lock.seek(0)
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    die('Another cc launcher is still starting the adapter; retry shortly.')
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def ensure_anthropic_proxy():
+    with adapter_start_lock():
+        return _ensure_anthropic_proxy()
+
+
+def _ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 26}
+    expected = {"service": "cc-anthropic-proxy", "version": 35}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -670,20 +1090,72 @@ def effort_menu(default=None):
                                  back=True)
 
 
+TOKENS_RE = r"\d+(\.\d+)?[km]"
+
+
 def parse_pct(value):
-    """An --autocompact value: 1-100, or "" for "default" (Claude's own threshold)."""
-    if str(value).lower() == "default":
+    """An --autocompact value: a percentage 1-100 (int), a token window like "100k" or "1m" (str),
+    or "" for "default"/"inherit" (a subagent then inherits its parent's limit)."""
+    value = str(value).strip().lower().removesuffix("%")
+    if value in ("default", "inherit", ""):
         return ""
-    if not re.fullmatch(r"\d{1,3}", str(value)) or not 1 <= int(value) <= 100:
-        die(f"Auto-compact must be a whole percentage from 1 to 100 or 'default', not '{value}'.")
+    if re.fullmatch(TOKENS_RE, value) and compact_tokens(value) >= 1000:
+        return value
+    if not re.fullmatch(r"\d{1,3}", value) or not 1 <= int(value) <= 100:
+        die(f"Auto-compact must be a percentage from 1 to 100, a token window like 100k, or 'inherit', not '{value}'.")
     return int(value)
+
+
+def compact_tokens(value):
+    """Tokens of a "100k"/"1.5m" window."""
+    return int(float(value[:-1]) * (1000 if value[-1] == "k" else 1_000_000))
+
+
+def compact_text(value, unset="inherit"):
+    return unset if not value else f"{value}%" if type(value) is int else value
+
+
+def compact_launch(env, args, value):
+    """Apply an auto-compact limit to a Claude launch: a percentage through Claude's env override,
+    a token window through --settings. Either stays in CC_AUTOCOMPACT for its workers to inherit."""
+    env.pop("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", None)
+    env.pop("CC_AUTOCOMPACT", None)
+    if type(value) is int:
+        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(value)
+    elif value:
+        args += ["--settings", json.dumps({"autoCompactWindow": compact_tokens(value)})]
+    if value:
+        env["CC_AUTOCOMPACT"] = str(value)
+
+
+def parent_compact(context):
+    """The limit a subagent without its own inherits: its parent's cc limit, else the parent model's
+    autoCompactWindow (or the global one) in Claude's settings."""
+    own = os.environ.get("CC_AUTOCOMPACT") or os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+    if own:
+        return int(own) if own.isdigit() else own
+    try:
+        with open(Path.home() / ".claude" / "settings.json", encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return None
+    model = None
+    source = (context or {}).get("source", "")
+    if source and Path(source).is_file():
+        with open(source, "rb") as f:
+            f.seek(max(0, Path(source).stat().st_size - 400_000))
+            found = re.findall(rb'"model":"([^"]+)"', f.read())
+        model = found[-1].decode() if found else None
+    window = ((settings.get("modelSettings") or {}).get(model) or {}).get("autoCompactWindow") or settings.get("autoCompactWindow")
+    return f"{window // 1000}k" if isinstance(window, int) and window >= 1000 else None
 
 
 def autocompact_menu(default, role=""):
     """Auto-compact threshold as a percentage of the context window ("" = Claude's default)."""
     title = f"{role.capitalize()} auto-compact" if role else "Auto-compact"
-    pcts = sorted({*AUTOCOMPACTS, *([default] if default else [])})
-    rows = [("default", "default  Claude's own threshold")] + [(str(p), f"{p}%  of the context window") for p in pcts]
+    pcts = sorted({*AUTOCOMPACTS, *([default] if type(default) is int else [])})
+    rows = ([("default", "inherit  the parent session's limit" if role == "subagent" else "default  Claude's own threshold")]
+            + [(t, f"{t}  tokens") for t in COMPACT_TOKENS] + [(str(p), f"{p}%  of the context window") for p in pcts])
     picked = catalog._arrow_menu(title, rows, str(default or "default"), name=title, back=True)
     # Off a console the remembered pick stands, as for effort.
     return default if picked is None else parse_pct(picked)
@@ -715,14 +1187,68 @@ def load_routes():
         return {}
 
 
+def sync_claude_effort(model, effort):
+    """Claude Code's "thinking with <effort>" label reads its own settings, so mirror the /model effort there."""
+    try:
+        with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return  # never create or clobber an unreadable settings file
+    entry = settings.setdefault("modelSettings", {}).setdefault(model, {})
+    if entry.get("effortLevel") != effort:
+        entry["effortLevel"] = effort
+        write_json(CLAUDE_SETTINGS, settings, indent=2, ensure_ascii=False)
+
+
 def set_route(launch, provider=None, model=None, effort=None):
     """Sets (or with no provider clears) this launch's provider/model override, and its effort."""
     data = {k: v for k, v in load_routes().items() if time.time() - v.get("at", 0) < 86400}
+    helpers = data.get(launch, {}).get("helpers")
     if provider:
+        effort = effort or default_effort(provider, model)
         data[launch] = {"provider": provider, "model": model, **({"effort": effort} if effort else {}), "at": time.time()}
+        if helpers:
+            data[launch]["helpers"] = helpers
+        if provider == "official" and model and effort in ("low", "medium", "high", "xhigh"):
+            sync_claude_effort(model, effort)
+    elif helpers:
+        data[launch] = {"helpers": helpers, "at": time.time()}
     else:
         data.pop(launch, None)
     write_json(ROUTES_FILE, data, indent=1)
+
+
+def helper_command(words):
+    """cc helper <auto|tools> [inherit | <provider> <model> [effort]]; picker selections per launch."""
+    if not words or words[0] not in ("auto", "tools"):
+        die("Usage: cc helper <auto|tools> [inherit | <provider> <model> [effort]]")
+    kind, rest = words[0], words[1:]
+    launch = os.environ.get("CC_LAUNCH_ID")
+    if not launch or not on_adapter():
+        die("Helper routing needs a cc adapter session; restart with cc before choosing helper models.")
+    data = load_routes()
+    row = dict(data.get(launch) or {})
+    helpers = dict(row.get("helpers") or {})
+    if rest == ["inherit"]:
+        helpers.pop(kind, None)
+    elif len(rest) in (2, 3) and rest[0] in route_providers():
+        provider, model = rest[:2]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", model):
+            die("Invalid helper model id.")
+        effort = route_effort(rest[2:])
+        if effort and effort not in ("low", "medium", "high", "xhigh", "max", "off", "none", "minimal"):
+            die("Invalid helper effort.")
+        levels = model_efforts(provider, model) if effort else None
+        if levels is not None and effort and effort not in levels:
+            die(f"{provider}/{model} does not support effort {effort}.")
+        helpers[kind] = {"provider": provider, "model": model, **({"effort": effort} if effort else {})}
+    elif rest:
+        die("Usage: cc helper <auto|tools> [inherit | <provider> <model> [effort]]")
+    if rest:
+        row["helpers"], row["at"] = helpers, time.time()
+        data[launch] = row
+        write_json(ROUTES_FILE, data, indent=1)
+    print_target("Helper", helpers.get(kind), "inherit session provider")
 
 
 def on_adapter():
@@ -766,7 +1292,8 @@ def route_command(words):
         set_route(launch, words[0].lower(), words[1], route_effort(words[2:]))
     elif words:
         die(f"Usage: cc route [<provider> <model> [effort] | off]; providers: {', '.join(routes)}")
-    print_target("Route", load_routes().get(launch), "launch default")
+    target = load_routes().get(launch)
+    print_target("Route", target if target and target.get("model") else None, "launch default")
 
 
 def route_effort(rest):
@@ -783,9 +1310,18 @@ def print_target(name, target, unset):
         print(f"Effort: {target['effort']}")
 
 
+def preset_fallback(name):
+    """The saved preset's fallback route for this provider, or None."""
+    target = (saved_bundle(name) or {}).get("fallback") or {}
+    if target.get("provider") in FALLBACK_ROUTES and target["provider"] != name and target.get("model"):
+        return {"provider": target["provider"], "model": target["model"]}
+    return None
+
+
 def fallback_menu(name, current=None):
-    """The fallback route for this launch: none unless picked."""
-    enabled = catalog._arrow_menu("Add a fallback model?", [("no", "No (default)"), ("yes", "Yes")], "no", back=True)
+    """The fallback route for this launch: none unless picked (or the saved preset has one)."""
+    enabled = catalog._arrow_menu("Add a fallback model?", [("no", "No" + ("" if current else " (default)")),
+                                  ("yes", "Yes" + (" (preset)" if current else ""))], "yes" if current else "no", back=True)
     if enabled != "yes":
         return None
     provider = provider_menu((current or {}).get("provider") or "skip", "fallback",
@@ -835,7 +1371,7 @@ def fallback_command(words):
     launch = os.environ.get("CC_LAUNCH_ID")
     if not launch:
         die(f"This session has no cc launch id; fallback needs a session started by cc on one of: {', '.join(FALLBACK_ROUTES)}.")
-    if os.environ.get("CC_MAIN_PROVIDER") not in FALLBACK_ROUTES:
+    if not on_adapter():
         die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly, so there is "
             f"nothing to fall back from; fallback works on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
@@ -938,6 +1474,9 @@ def route_env(name, model_id, passthrough=False):
             try:
                 ensure_anthropic_proxy()
                 env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/official"
+                # The adapter passes it to Anthropic, so Claude Code keeps its first-party behaviour
+                # (Haiku agent summaries, request classes); the adapter strips the extras on reroutes.
+                env["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] = "1"
             except (SystemExit, Exception) as exc:
                 print(f"Adapter unavailable ({exc}); connecting to Anthropic directly.", file=sys.stderr)
     elif fmt == "anthropic":
@@ -1033,10 +1572,18 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autoco
             set_fallback(launch, fallback["provider"], fallback["model"])
     env["CC_MAIN_PROVIDER"] = name
     env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"
+    base = env.get("ANTHROPIC_BASE_URL", "")
+    if not is_resume(claude_args):  # a resume takes its old session's settings back (link_session)
+        seed_launch_from_preset(name, launch, adapter=name in FALLBACK_ROUTES or base.endswith(f":{ADAPTER_PORT}/official"),
+                                providers=[n for n in PROVIDERS if n != "official" or base.endswith(f":{ADAPTER_PORT}/official")])
     if autocompact:
-        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = autocompact
+        claude_args = [*claude_args]
+        compact_launch(env, claude_args, autocompact)
     run_claude = not no_run
-    if effort and run_claude:
+    explicit_effort = any(a == "--effort" or a.startswith("--effort=") for a in claude_args)
+    if effort is None and not explicit_effort:
+        effort = default_effort(name, model_id)
+    if effort and run_claude and not explicit_effort:
         claude_args = ["--effort", effort, *claude_args]
 
     state = load_state()
@@ -1053,7 +1600,7 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autoco
           f"model={model_id or ''}  OPENAI_BASE_URL={env.get('OPENAI_BASE_URL', '')}  "
           f"context={env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'Claude default')}  "
           f"effort={effort or 'Claude default'} (/effort changes it)  "
-          f"autocompact={str(autocompact) + '%' if autocompact else 'Claude default'}  "
+          f"autocompact={compact_text(autocompact, 'Claude default')}  "
           f"fallback={fallback['provider'] + '/' + fallback['model'] if fallback else 'off'} (/fallback changes it)")
 
 
@@ -1100,6 +1647,63 @@ def _latest_session_agents():
     return max(entries, key=lambda e: e.get("at", 0))["agents"] if entries else None
 
 
+def link_session(sid):
+    """Tags this launch's subagents with the Claude session id; a resume (new launch) takes them back."""
+    launch = session_launch()
+    if not (launch and sid):
+        return
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    def kept(e):
+        return isinstance(e, dict) and (isinstance(e.get("agents"), dict) or e.get("off"))
+    entry = data.get(launch)
+    if kept(entry):
+        if sid in entry.setdefault("sessions", []):
+            return
+        entry["sessions"].append(sid)
+    else:
+        old = [e for e in data.values() if kept(e) and sid in e.get("sessions", ())]
+        if not old:
+            return
+        last = max(old, key=lambda e: e.get("at", 0))
+        data[launch] = {**{k: last[k] for k in ("agents", "off") if k in last}, "sessions": [sid], "at": time.time()}
+    write_json(SESSION_AGENTS_FILE, data, indent=1)
+
+
+def subagents_off(launch=None):
+    """True when this session turned subagents off: it works on the main model alone."""
+    launch = launch or session_launch()
+    if not launch:
+        return False
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            entry = json.load(f).get(launch)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(entry, dict) and bool(entry.get("off"))
+
+
+def set_subagents_off(off):
+    """cc agents off|on: this session only; its profiles stay as they were for when it turns them back on."""
+    launch = session_launch()
+    if not launch:
+        die("cc agents on|off works only inside a Claude session.")
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    entry = data.get(launch) if isinstance(data.get(launch), dict) else {}
+    entry = {k: v for k, v in entry.items() if k != "off"}
+    data[launch] = {**entry, **({"off": True} if off else {}), "at": time.time()}
+    write_json(SESSION_AGENTS_FILE, data, indent=1)
+    print("Subagents off for this session: the main model does all the work." if off
+          else "Subagents on for this session.")
+
+
 def all_agent_names():
     """Profiles that some session or the global file still uses; none may be deleted."""
     names = set()
@@ -1142,8 +1746,9 @@ def check_agents(agents):
         if a.get("effort") not in (None, *EFFORTS):
             die(f"Subagent '{agent}': effort must be one of {', '.join(EFFORTS)}.")
         pct = a.get("autocompact")
-        if pct is not None and not (type(pct) is int and 1 <= pct <= 100):
-            die(f"Subagent '{agent}': autocompact must be a whole percentage from 1 to 100.")
+        if pct is not None and not ((type(pct) is int and 1 <= pct <= 100)
+                                    or (isinstance(pct, str) and re.fullmatch(TOKENS_RE, pct))):
+            die(f"Subagent '{agent}': autocompact must be a percentage from 1 to 100 or a token window like 100k.")
         model = a.get("model")
         if model is not None and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:\-@]*", model)):
             die(f"Subagent '{agent}': invalid model id '{model}'.")
@@ -1154,7 +1759,7 @@ def check_agents(agents):
 
 def agent_summary(a):
     return (f"{a.get('provider', 'official')}/{a.get('model') or 'Claude default'}, effort {a.get('effort') or 'default'}, "
-            f"autocompact {str(a['autocompact']) + '%' if a.get('autocompact') else 'default'}")
+            f"autocompact {compact_text(a.get('autocompact'))}")
 
 
 def agent_options(args):
@@ -1213,7 +1818,8 @@ def save_agents(agents):
         except (OSError, ValueError):
             data = {}
         data = {k: v for k, v in data.items() if time.time() - (v.get("at", 0) if isinstance(v, dict) else 0) < 30 * 86400}
-        data[launch] = {"agents": agents, "at": time.time()}
+        entry = data.get(launch) if isinstance(data.get(launch), dict) else {}
+        data[launch] = {**entry, "agents": agents, "at": time.time()}
         write_json(SESSION_AGENTS_FILE, data, indent=1)
     else:
         write_json(AGENTS_FILE, agents, indent=2)
@@ -1295,18 +1901,18 @@ def edit_agent(agents, agent, skip="", draft=None):
     save_agents(agents)
 
 
-def startup_subagent(navigation=None):
+def startup_subagent(navigation=None, provider=None):
     """Startup prompt after the main session's: one subagent's provider, model, effort, auto-compact.
 
     With several profiles it first asks which; `cc agents` adds, removes and edits the rest."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return  # a piped run keeps its profiles, as the effort menu keeps its pick
     agents = load_agents()
-    last = _latest_session_agents() if _session_agents() is None else None
+    last = (preset_agents(provider) or _latest_session_agents()) if _session_agents() is None else None
     if last and last != agents:
         # Start from the last launch's picks; "keep" then keeps them for this launch too.
         agents = check_agents(last)
-        with contextlib.redirect_stdout(open(os.devnull, "w")):  # the relay listing would break the menu
+        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):  # the relay listing would break the menu
             save_agents(agents)
     navigation = {} if navigation is None else navigation
     drafts = navigation.setdefault("drafts", {})
@@ -1393,7 +1999,8 @@ WORKER_UNUSED_TOOLS = ("Artifact,ArtifactComments,ArtifactData,Workflow,Schedule
                        "DesignSync,SendFeedback,ReportFindings,EnterPlanMode,ExitPlanMode,EnterWorktree,ExitWorktree,NotebookEdit,"
                        "PushNotification,AskUserQuestion")
 # Caveman's and ponytail's rules for every worker: their hooks do not all reach a headless or in-process one.
-WORKER_RULES = """Save tokens. Write terse fragments: no articles or filler, no preamble, no recap; keep code, paths, numbers, errors exact.
+WORKER_RULES = """Save tokens. Write terse fragments: no articles or filler, no recap; keep code, paths, numbers, errors exact.
+Before each batch of tool calls write one short line: what you check or change and why. The person follows your work by these lines.
 Make the smallest change that fully solves the task: reuse what exists, add nothing unasked.
 Where the project has .codegraph/, call codegraph_explore before Read or Grep, and do not re-read what it returned."""
 
@@ -1516,12 +2123,12 @@ def run_agent(agent, prompt, opts=None, require_context=False):
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [route.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-worker-profile: {agent}", f"x-cc-launch: agent-{agent}"]))
     env.update(CC_AGENT_CHILD="1", CC_WORKER_PROFILE=agent, CC_MAIN_PROVIDER=name,
                CLAUDE_CODE_FORK_SUBAGENT="0")
-    if a.get("autocompact"):
-        env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(a["autocompact"])
+    compact = a.get("autocompact") or parent_compact(context)
     # Only codegraph, unwatched: each worker otherwise starts every MCP server, and a codegraph that indexes and watches the repo.
     command = ["claude", "-p", "--strict-mcp-config", "--mcp-config", worker_mcp(), "--disallowedTools", WORKER_UNUSED_TOOLS,
                "--append-system-prompt", WORKER_RULES,
                *(["--model", model_id] if model_id else []), *(["--effort", effort] if effort else []), *a.get("args", [])]
+    compact_launch(env, command, compact)
     if context:
         conflicts = {"--resume", "-r", "--continue", "-c", "--session-id", "--fork-session"}
         if any(arg.split("=", 1)[0] in conflicts for arg in a.get("args", [])):
@@ -1911,7 +2518,7 @@ def sync_agents():
 
     def label(a):
         route = f"{a.get('provider', 'official')}/{a.get('model') or 'Claude default'}"
-        return route, f"effort {a.get('effort') or 'default'}, autocompact {str(a['autocompact']) + '%' if a.get('autocompact') else 'default'}"
+        return route, f"effort {a.get('effort') or 'default'}, autocompact {compact_text(a.get('autocompact'))}"
 
     os.makedirs(AGENTS_DIR, exist_ok=True)
     for file in Path(AGENTS_DIR).glob("cc-*.md"):
@@ -2023,6 +2630,9 @@ def agent_hook(data):
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                         "permissionDecisionReason": reason}}
 
+    if subagents_off():
+        return deny("Subagents are off for this session. Do the work yourself in the main session; "
+                    "do not call Agent or Task again. The user can turn them back on in /model's Subagent tab.")
     try:
         profiles = load_agents()
         if not profiles:
@@ -2186,9 +2796,16 @@ def subagent_stop(data):
 def hook_context(data):
     if os.environ.get("CC_AGENT_CHILD") == "1":
         return {}
+    if isinstance(data.get("session_id"), str):
+        link_session(data["session_id"])
+    orphans = deliver_orphans(data.get("session_id") or "") if isinstance(data.get("session_id"), str) else ""
+    if subagents_off():
+        return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
+                "additionalContext": "Subagents are off for this session: do all work in the main session "
+                "with your own tools. Do not call Agent or Task; every such call is blocked."
+                + ("\n\n" + orphans if orphans else "")}}
     profiles = load_agents()
     choices = "; ".join(f"cc-{name}: {agent_summary(a)}" for name, a in profiles.items())
-    orphans = deliver_orphans(data.get("session_id") or "") if isinstance(data.get("session_id"), str) else ""
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
             "additionalContext": "Delegate only through configured cc subagents: " + (choices or "none configured") +
             ". Native fork/general-purpose/custom worker calls are blocked. Use a cc-* subagent_type and "
@@ -2209,7 +2826,11 @@ def _worker_path(record):
 def _worker_tokens(path):
     """A worker's own token use, read from its transcript: a relay only counts its own."""
     try:
-        seen, out, ctx, total, cached = set(), 0, 0, 0, 0
+        seen, out, ctx, total, cached, usd, priced = set(), 0, 0, 0, 0, 0.0, False
+        try:
+            usage_cost = _statusline().usage_cost
+        except Exception:  # no price table: the row keeps its token counts
+            usage_cost = lambda model, usage: None
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if '"usage"' not in line:
@@ -2224,11 +2845,25 @@ def _worker_tokens(path):
                 ctx = sent or ctx  # a synthetic closing message reports zero usage
                 total += sent  # every request resends the context: this is what the quota pays for
                 cached += usage.get("cache_read_input_tokens") or 0
+                cost = usage_cost(message.get("model"), usage)
+                if cost is not None:
+                    usd, priced = usd + cost, True
     except (StopIteration, OSError, ValueError, KeyError, TypeError, AttributeError):
         return ""
     k = lambda n: f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+    # Kept short for the panel: all tokens sent with their cache share, then the API cost.
     hit = f" ({cached * 100 // total}% cached)" if total else ""
-    return f"ctx {k(ctx)} ↑ {k(total)}{hit} ↓ {k(out)}" if seen else ""
+    money = (f" · ${usd:,.2f}" if usd >= 1 else f" · ${usd:.3f}") if priced else ""
+    return f"{k(total)}{hit}{money}" if seen else ""
+
+
+def _statusline():
+    """The sibling statusline.py, for its API price table (one copy of the prices)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cc_statusline", Path(__file__).with_name("statusline.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _worker_now(path):
@@ -2289,7 +2924,11 @@ def agent_statusline(data):
             label = " · ".join(filter(None, [model, _worker_tokens(path) if path else ""]))
             now = _worker_now(path) if path and task.get("status") == "running" else ""
         else:
-            label, now = task.get("model") or "model pending", ""
+            try:
+                tokens = _worker_tokens(_agent_files(data, task["id"]).with_suffix(".jsonl"))
+            except (ValueError, KeyError, TypeError):
+                tokens = ""
+            label, now = " · ".join(filter(None, [task.get("model") or "model pending", tokens])), ""
         label += f" · {task.get('description') or ''}" + (f" › {now}" if now else "")
         label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:width]
         if task.get("status") == "running":
@@ -2298,6 +2937,7 @@ def agent_statusline(data):
 
 
 def main():
+    global _STARTUP_LAUNCH
     args = sys.argv[1:]
     if args[:1] in (["hook-agent"], ["hook-context"], ["hook-command"], ["agent-statusline"]):
         try:
@@ -2332,6 +2972,16 @@ def main():
         return fallback_command(args[1:])
     if args[:1] == ["route"]:
         return route_command(args[1:])
+    if args[:1] == ["helper"]:
+        return helper_command(args[1:])
+    if args[:1] == ["presets"]:
+        return presets_command(args[1:])
+    if args[:1] == ["models"]:
+        return models_command(args[1:])
+    if args[:1] == ["facts"]:
+        return model_facts_command(args[1:])
+    if args[:1] == ["gui"]:
+        return gui_command(args[1:])
     if args[:1] == ["hook-subagent-stop"]:
         try:
             data = json.load(sys.stdin)
@@ -2348,6 +2998,8 @@ def main():
         return save_agents(agents)
     if args[:2] == ["agents", "models"] and len(args) in (2, 3, 4):
         return agent_models(args[2].lower() if len(args) >= 3 else None, *args[3:])
+    if args in (["agents", "off"], ["agents", "on"]):
+        return set_subagents_off(args[1] == "off")
     if args == ["agents", "providers"]:
         for n, p in PROVIDERS.items():
             print(f"{n}	{p['label']}")
@@ -2374,7 +3026,8 @@ def main():
         if args[0].lower() in ("-norun", "--norun"):
             no_run = True
             args.pop(0)
-        elif args[0].startswith("-") or len(pos) >= 2:
+        # PowerShell drops the profile's `--` after `cc plain`, so all of plain's words go to Claude.
+        elif args[0].startswith("-") or len(pos) >= 2 or pos == ["plain"]:
             break
         else:
             pos.append(args.pop(0))
@@ -2384,7 +3037,7 @@ def main():
     if no_run and claude_args:
         die("-NoRun cannot be combined with Claude launch arguments.")
     if not pos and claude_args in (["--help"], ["-h"]):
-        print("Usage: cc [provider] [model] [-NoRun] [--autocompact <1-100|default>] [Claude arguments]")
+        print("Usage: cc [provider] [model] [-NoRun] [--autocompact <1-100|100k|default>] [Claude arguments]")
         print("cc --resume [session-id-or-name] | cc --continue | cc status")
         print("cc agents (edit menu, then write subagents) | cc agents set <name> [--provider P] [--model M]")
         print("    [--effort E|default] [--autocompact N|default] [--description D] | cc agents models <name> [provider]")
@@ -2408,7 +3061,18 @@ def main():
     if pos == ["plain"]:
         # Plain `claude` (the PowerShell profile's function): the claude.ai login with no menus, through
         # the adapter, so /model can still move the session to another provider in place.
-        apply("official", claude_args=claude_args)
+        resuming = is_resume(claude_args)
+        model = take_option(list(claude_args), "--model")
+        preset = ((saved_bundle("official") or {}).get("model") or {}).get("model")
+        if not resuming:
+            # A fresh launch id: the terminal may still hold an earlier launch's, whose settings are not this session's.
+            _STARTUP_LAUNCH = os.environ["CC_LAUNCH_ID"] = uuid.uuid4().hex
+            if model is None and preset:
+                model, claude_args = preset, ["--model", preset, *claude_args]  # the saved Claude preset's model
+        # Fresh default Opus launches must not inherit a gateway's persisted effort; the saved preset's wins.
+        effort = (default_effort("official", "claude-opus-5-5" if model in (None, "opus") else model)
+                  or ("medium" if model in (None, "opus", "claude-opus-5-5") else None)) if not resuming else None
+        apply("official", claude_args=claude_args, effort=effort)
         return
 
     try:
@@ -2424,7 +3088,6 @@ def main():
             steps.append("effort")
         if menus and autocompact is None:
             steps.append("autocompact")
-        global _STARTUP_LAUNCH
         launch = _STARTUP_LAUNCH = uuid.uuid4().hex
         os.environ["CC_LAUNCH_ID"] = launch  # the startup subagent prompt edits this launch only
         fallback, backing = None, False
@@ -2444,9 +3107,10 @@ def main():
                         model_id = None
                     name = picked
                 elif steps[step] == "model":
-                    model_id = model_menu(name, model_id) if model_id else model_menu(name)
+                    default = model_id or ((saved_bundle(name) or {}).get("model") or {}).get("model")
+                    model_id = model_menu(name, default) if default else model_menu(name)
                 elif steps[step] == "effort":
-                    effort = effort_menu(effort)
+                    effort = effort_menu(effort or default_effort(name, model_id) or "")
                 elif steps[step] == "autocompact":
                     autocompact = autocompact_menu(load_state().get("autocompact", "")
                                                   if autocompact is None else autocompact)
@@ -2454,9 +3118,9 @@ def main():
                     if name not in FALLBACK_ROUTES:  # only adapter routes can fall back
                         step += -1 if backing else 1
                         continue
-                    fallback = fallback_menu(name, fallback)
+                    fallback = fallback_menu(name, fallback or preset_fallback(name))
                 else:
-                    startup_subagent(subagent_navigation)
+                    startup_subagent(subagent_navigation, name)
                 backing = False
                 step += 1
             except catalog.MenuBack:
@@ -2468,6 +3132,8 @@ def main():
         print("No change.")  # a cancel is not a failure: the PowerShell wrapper must not throw
         return
 
+    if not menus and fallback is None and name in FALLBACK_ROUTES:
+        fallback = preset_fallback(name)
     apply(name, model_id, no_run, claude_args=claude_args, effort=effort, autocompact=autocompact, fallback=fallback)
 
 

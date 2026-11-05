@@ -1,0 +1,1765 @@
+"""cc's model picker as its own dark window (stdlib Tkinter, no dependencies).
+
+Tabs mirror the /model grid: Model, Subagent, Fallbacks, Auto, Tools and Presets. Every list has a
+search field; the model lists group by family on demand. Apply runs the same cc commands the
+terminal menus run, so the session route, profiles and fallbacks stay one source of truth.
+"""
+import json
+import os
+import subprocess
+import sys
+import threading
+import tempfile
+import traceback
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import ttk
+
+CC = Path(__file__).with_name('cc-switch.py')
+TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
+        ('auto', 'Auto'), ('tools', 'Tools'), ('presets', 'Presets')]
+TARGET_TABS = ('subagent', 'fallback')
+
+# Dark by default, independent of the desktop's light/dark setting.
+BG, PANEL, FIELD, HOVER = '#0f1319', '#171c25', '#1d2430', '#2a3444'
+FG, DIM, FAINT, ACCENT = '#eef3fb', '#a9b5c8', '#7f8da3', '#5b8cff'
+SELECTED, CURRENT = '#2b4a74', '#1d3b33'
+ZEBRA, BORDER = '#1a212c', '#2a3546'
+FONT = ('Segoe UI', 10)
+MONO = ('Consolas', 10)
+BUSY = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+# Claude Code's own ladder, used when a provider publishes none (as the launch menu does).
+EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+
+# The browsing view (provider, pick, sort, search, effort) kept per session, so reopening the
+# window lands where the person left it. Applying is still explicit: this never routes anything.
+VIEW_FILE = Path.home() / '.config/cc/gui-view.json'
+
+
+def view_key():
+    return os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
+
+
+def load_view():
+    try:
+        data = json.loads(VIEW_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def session_view():
+    """The tabs' browsing state for this launch, never another session's."""
+    entry = load_view().get(view_key())
+    return entry if isinstance(entry, dict) else {}
+
+
+def save_view(tab, entry):
+    data = load_view()
+    session = data.get(view_key())
+    if not isinstance(session, dict):
+        session = {}
+    session[tab] = entry
+    data[view_key()] = session
+    try:
+        VIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+        VIEW_FILE.write_text(json.dumps(data, indent=1), encoding='utf-8')
+    except OSError:
+        pass
+
+
+VIEW_VERSION = 2
+
+
+def migrate_view(entry):
+    """A view saved before Intelligence was the default keeps Family only if it was a real pick."""
+    if not isinstance(entry, dict):
+        return {}
+    if 'v' not in entry and entry.get('sort') == 'Family':
+        return {**entry, 'sort': 'Intelligence'}
+    return entry
+
+FAMILIES = [
+    (('claude', 'sonnet', 'opus', 'haiku', 'fable'), 'Claude'),
+    (('gpt', 'chatgpt'), 'GPT'),
+    (('gemini', 'gemma'), 'Gemini'),
+    (('deepseek',), 'DeepSeek'),
+    (('glm', 'zhipu', 'z-ai'), 'GLM'),
+    (('qwen', 'tongyi'), 'Qwen'),
+    (('kimi', 'moonshot'), 'Kimi'),
+    (('llama', 'meta-llama'), 'Llama'),
+    (('mistral', 'codestral', 'devstral'), 'Mistral'),
+    (('minimax',), 'MiniMax'),
+    (('mimo', 'xiaomi'), 'MiMo'),
+    (('grok', 'x-ai'), 'Grok'),
+    (('nemotron',), 'Nemotron'),
+    (('phi-',), 'Phi'),
+]
+
+# A monogram chip per provider, in the provider's own color: the picker's brand marks.
+BRANDS = {
+    'official': ('#d97757', 'C'),      # Claude
+    'commandcode': ('#4f8cff', 'cmdc'),
+    'commandcode-cli': ('#4f8cff', 'cmdc'),
+    'opencode-go': ('#14b8a6', 'OC'),
+    'opencode-zen': ('#14b8a6', 'OC'),
+    'openai-oauth': ('#10a37f', 'AI'),
+    'openrouter': ('#8b5cf6', 'OR'),
+    'nvidia': ('#76b900', 'NV'),
+    'gemini': ('#4285f4', 'G'),
+    'minimax': ('#e64c3c', 'MM'),
+    'ollama-cloud': ('#52525b', 'OL'),
+    'lmstudio': ('#7c3aed', 'LM'),
+    'gpt4free': ('#f59e0b', 'G4'),
+}
+
+
+def brand(name):
+    """A provider's color and monogram; anything unknown gets a neutral tile."""
+    return BRANDS.get(name, (PANEL, (name[:2] or '?').upper()))
+
+
+# Real marks, kept locally in ~/.config/cc/logos (Simple Icons, CC0) and loaded when present.
+LOGO_DIR = Path.home() / '.config/cc/logos'
+PROVIDER_LOGOS = {
+    'official': 'claude',
+    'openai-oauth': 'openai',
+    'opencode-go': 'opencode',
+    'opencode-zen': 'opencode',
+    'openrouter': 'openrouter',
+    'nvidia': 'nvidia',
+    'gemini': 'gemini',
+    'minimax': 'minimax',
+    'ollama-cloud': 'ollama',
+    'lmstudio': 'lmstudio',
+}
+FAMILY_LOGOS = {
+    'Claude': 'claude',
+    'GPT': 'openai',
+    'Gemini': 'gemini',
+    'DeepSeek': 'deepseek',
+    'GLM': 'glm',
+    'Qwen': 'qwen',
+    'Kimi': 'moonshot',
+    'Llama': 'meta',
+    'Mistral': 'mistral',
+    'MiniMax': 'minimax',
+    'MiMo': 'xiaomi',
+    'Grok': 'xai',
+    'Nemotron': 'nvidia',
+}
+
+
+def brand_fg(color):
+    """Dark initials on a light tile, white on a dark one."""
+    try:
+        red, green, blue = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, IndexError):
+        return FG
+    return '#101114' if 0.299 * red + 0.587 * green + 0.114 * blue > 150 else 'white'
+
+
+def model_family(model_id):
+    """The family a model id belongs to, as the terminal picker groups it."""
+    tail = model_id.rsplit('/', 1)[-1].strip().lower()
+    for words, family in FAMILIES:
+        if any(word in tail for word in words):
+            return family
+    for words, family in FAMILIES:
+        if any(word in model_id.lower() for word in words):
+            return family
+    letters = ''
+    for ch in tail:
+        if not ch.isalpha():
+            break
+        letters += ch
+    return letters[:1].upper() + letters[1:].lower() if len(letters) > 1 else 'Other'
+
+
+def family_sorted(models):
+    return sorted(models, key=lambda m: (model_family(m), m.lower()))
+
+
+def filtered(models, query):
+    needle = query.strip().lower()
+    return [m for m in models if not needle or needle in m.lower()]
+
+
+# The order the launch model menu uses: best first, rows missing a displayed fact last.
+SORTS = {'Intelligence': 'intelligence', 'Score': 'score', 'Context': 'context',
+         'Price': 'price', 'Family': 'family', 'Listed': 'listed'}
+
+
+def tokens(n):
+    """1048576 -> '1M', 131072 -> '131K'."""
+    return f'{n / 1e6:.3g}M' if n >= 999_500 else f'{round(n / 1e3)}K'
+
+
+def facts_text(info):
+    """'ctx 1M · $4/$20 · AA 45 · → 72', as the terminal menu writes it, minus the colors."""
+    if not info:
+        return ''
+    context = info.get('ctx')
+    parts = [f'ctx {tokens(context)}' if context else 'ctx ?']
+    price_in, price_out = info.get('in'), info.get('out')
+    if price_in is not None and price_out is not None:
+        parts.append('free' if not (price_in or price_out) else f'${price_in:.3g}/${price_out:.3g}')
+    else:
+        parts.append('$?')
+    score = info.get('aa')
+    parts.append(f'AA {score:.0f}' if score is not None else 'AA ?')
+    if info.get('score') is not None:
+        parts.append(f'→ {info["score"]:.0f}')
+    return ' · '.join(parts)
+
+
+def fact_values(info):
+    """One value per fact column; a fact the provider does not publish reads '?'."""
+    if not info:
+        return ('?', '?', '?', '?')
+    context = info.get('ctx')
+    price_in, price_out = info.get('in'), info.get('out')
+    if price_in is not None and price_out is not None:
+        price = 'free' if not (price_in or price_out) else f'${price_in:.3g}/${price_out:.3g}'
+    else:
+        price = '?'
+    return (tokens(context) if context else '?', price,
+            f'{info["aa"]:.0f}' if info.get('aa') is not None else '?',
+            f'{info["score"]:.0f}' if info.get('score') is not None else '?')
+
+
+SETTINGS_FILE = Path.home() / '.claude' / 'settings.json'
+COMPACT_TOKENS = ['100k', '200k', '300k', '400k', '600k']
+
+
+def compact_window(value):
+    """Tokens of a "400k"/"1m" pick; None for anything else."""
+    value = value.strip().lower()
+    try:
+        tokens = int(float(value[:-1]) * (1000 if value.endswith('k') else 1_000_000)) if value[-1:] in ('k', 'm') else None
+    except ValueError:
+        return None
+    return tokens if tokens and 100_000 <= tokens <= 1_000_000 else None
+
+
+def model_compact(model):
+    """The main session's window for this model in Claude's settings, or 'global' for the shared one."""
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return 'global'
+    window = ((settings.get('modelSettings') or {}).get(model) or {}).get('autoCompactWindow')
+    return f'{window // 1000}k' if isinstance(window, int) else 'global'
+
+
+def set_model_compact(model, value):
+    """Store the model's autoCompactWindow ('global' removes it, so the shared window applies)."""
+    tokens = None if value == 'global' else compact_window(value)
+    if value != 'global' and tokens is None:
+        return False, f"Compact must be 'global' or a token window from 100k to 1m, not '{value}'."
+    settings = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+    entry = dict((settings.setdefault('modelSettings', {})).get(model) or {})
+    if tokens:
+        entry['autoCompactWindow'] = tokens
+    else:
+        entry.pop('autoCompactWindow', None)
+    if entry:
+        settings['modelSettings'][model] = entry
+    else:
+        settings['modelSettings'].pop(model, None)
+    tmp = SETTINGS_FILE.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    os.replace(tmp, SETTINGS_FILE)
+    return True, f'compact {value}'
+
+
+def effort_values(levels, current=None):
+    """The model's own ladder, else Claude's; the current pick stays offered either way."""
+    values = ['default', *(levels or EFFORTS)]
+    if current and current not in values:
+        values.append(current)
+    return values
+
+
+def sort_models(models, facts, mode):
+    """One of SORTS' modes: family, context, price, intelligence, score or the provider's order."""
+    if mode == 'family':
+        return family_sorted(models)
+    if mode == 'listed':
+        return list(models)
+
+    def key(model):
+        info = facts.get(model) or {}
+        missing = info.get('missing') or 0
+        if mode == 'context':
+            value = info.get('ctx') or 0
+            return (missing > 0, missing, value <= 0, -value)
+        if mode == 'price':
+            price_in, price_out = info.get('in'), info.get('out')
+            priced = price_in is not None and price_out is not None
+            return (missing > 0, missing, not priced,
+                    price_out if priced else 0, price_in if priced else 0)
+        if mode == 'intelligence':
+            value = info.get('aa')
+            return (missing > 0, missing, value is None, -(value or 0))
+        value = info.get('score') or 0
+        return (missing > 0, missing, -value)
+
+    return sorted(models, key=key)
+
+
+def tab_rows(out):
+    """cc's `value<TAB>label` picker rows."""
+    rows = []
+    for line in out.splitlines():
+        if '\t' in line:
+            value, label = line.split('\t', 1)
+            if value:
+                rows.append((value, label.strip() or value))
+    return rows
+
+
+def plain_rows(out):
+    """cc's `route/fallback models` listing: one id per line."""
+    return [line.strip() for line in out.splitlines() if line.strip() and not line.strip().startswith('(')]
+
+
+def indented_rows(out):
+    """`agents models`: indented ids, the profile's current one starred."""
+    return [line.strip().lstrip('* ').strip() for line in out.splitlines()
+            if line[:1].isspace() and line.strip()]
+
+
+def parse_target(out, name):
+    """`Route: provider/model` (or Fallback/Helper) and an optional `Effort: level` line."""
+    target = None
+    for line in out.splitlines():
+        if line.startswith(name + ': '):
+            rest = line[len(name) + 2:].strip()
+            if rest and '/' in rest:
+                provider, model = rest.split('/', 1)
+                target = [provider, model]
+        elif line.startswith('Effort: ') and target:
+            target.append(line.split(': ', 1)[1].strip())
+    return target
+
+
+def run_cc(*args):
+    """Run cc beside this window, hidden; (ok, stdout-or-stderr)."""
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    try:
+        done = subprocess.run([sys.executable, '-B', str(CC), *args], capture_output=True,
+                              text=True, creationflags=flags, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f'{type(exc).__name__}: {exc}'
+    return done.returncode == 0, (done.stdout.strip() or done.stderr.strip())
+
+
+def session_launch_id():
+    """The key cc files this session's settings under, or '' outside a session."""
+    sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    return os.environ.get('CC_LAUNCH_ID') or (f'claude-{sid}' if sid else '')
+
+
+def session_entry():
+    """This session's session-agents.json entry ({} when it has none)."""
+    try:
+        entry = json.loads((Path.home() / '.config/cc/session-agents.json').read_text(encoding='utf-8')).get(session_launch_id())
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+def load_profiles():
+    """agents.json profiles for this session, as the picker names them."""
+    agents = {}
+    try:
+        agents = json.loads((Path.home() / '.config/cc/agents.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        pass
+    agents = session_entry().get('agents', agents)
+    return agents if isinstance(agents, dict) else {}
+
+
+class ThinScrollbar(tk.Canvas):
+    """A slim dark scrollbar: Tk 9's native one ignores these colors."""
+
+    def __init__(self, master, command):
+        super().__init__(master, width=10, height=10, highlightthickness=0, bd=0, bg=BG)
+        self.command = command
+        self.first, self.last = 0.0, 1.0
+        self.bind('<Configure>', lambda _e: self.draw())
+        self.bind('<Button-1>', self.grab)
+        self.bind('<B1-Motion>', self.grab)
+
+    def set(self, first, last):
+        self.first, self.last = float(first), float(last)
+        self.draw()
+
+    def draw(self):
+        self.delete('all')
+        height = max(1, self.winfo_height())
+        if self.last - self.first >= 1.0:
+            return
+        top = int(self.first * height)
+        bottom = max(top + 24, int(self.last * height))
+        self.create_rectangle(2, top, 8, min(height, bottom), fill='#33405a', outline='')
+
+    def grab(self, event):
+        height = max(1, self.winfo_height())
+        span = self.last - self.first
+        self.command('moveto', str(max(0.0, min(1.0 - span, event.y / height - span / 2))))
+
+
+class RowHover:
+    """A hover highlight for a Treeview's selectable rows (Tk has no built-in row hover).
+
+    Treeview tag priority is creation order, so a zebra tag would win over a hover tag; the
+    hovered row's tags are swapped instead and restored when the pointer leaves."""
+
+    def __init__(self, tree, selectable):
+        self.tree, self.selectable, self.iid, self.saved = tree, selectable, '', None
+        tree.bind('<Motion>', self.move, add='+')
+        tree.bind('<Leave>', lambda _e: self.clear(), add='+')
+
+    def reset(self):
+        self.restore()
+        self.iid = ''
+        self.tree.configure(cursor='')
+
+    def clear(self):
+        self.tree.configure(cursor='')
+        self.show('')
+
+    def show(self, iid):
+        if iid == self.iid:
+            return
+        self.restore()
+        self.iid = iid
+        self.highlight(iid)
+
+    def restore(self):
+        if not self.saved:
+            return
+        iid, original = self.saved
+        self.saved = None
+        if not self.tree.exists(iid):
+            return
+        # Re-read the live tags: Current may have moved here while the pointer rested.
+        tags = [tag for tag in self.tree.item(iid, 'tags') if tag != 'hover']
+        if 'zebra' in original and 'zebra' not in tags:
+            tags.append('zebra')
+        self.tree.item(iid, tags=tuple(tags))
+
+    def highlight(self, iid):
+        if not iid or not self.tree.exists(iid):
+            return
+        tags = tuple(self.tree.item(iid, 'tags'))
+        if iid in self.tree.selection() or 'current' in tags or 'family' in tags:
+            return
+        self.saved = (iid, tags)
+        self.tree.item(iid, tags=tuple(tag for tag in tags if tag not in ('zebra', 'hover')) + ('hover',))
+
+    def move(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid and not self.selectable(iid):
+            iid = ''
+        self.tree.configure(cursor='hand2' if iid else '')
+        self.show(iid)
+
+
+class PickerTab(ttk.Frame):
+    """One tab: a provider, a searchable model list and an effort, applied through cc."""
+
+    def __init__(self, app, key, parent=None):
+        super().__init__(parent if parent is not None else app, style='Tab.TFrame')
+        self.app = app
+        self.key = key
+        self.providers = []
+        self.models = []
+        self.iids = {}  # model id -> tree item
+        self.current = None
+        self.model_request = 0
+        self.load_request = 0
+        self.rows_target = None  # the target the rows in the list were fetched for
+        self.facts = {}
+        self.busy_job = None
+        self.busy_text = ''
+        self.busy_i = 0
+        saved = session_view().get(key)
+        self.view = migrate_view(saved)
+
+        bar = ttk.Frame(self)
+        bar.pack(fill='x', padx=18, pady=(16, 6))
+        ttk.Label(bar, text='Find', style='Dim.TLabel').pack(side='left')
+        self.query = tk.StringVar(value=str(self.view.get('query') or ''))
+        self.query.trace_add('write', lambda *_: self.render_models())
+        ttk.Entry(bar, textvariable=self.query, width=34).pack(side='left', padx=(8, 16), ipady=4)
+        ttk.Label(bar, text='Sort', style='Dim.TLabel').pack(side='left')
+        self.sort_mode = tk.StringVar(value=self.view.get('sort') if self.view.get('sort') in SORTS else 'Intelligence')
+        self.sort_box = ttk.Combobox(bar, textvariable=self.sort_mode, state='readonly', width=13,
+                                     values=list(SORTS))
+        self.sort_box.pack(side='left', padx=(8, 0))
+        self.sort_box.bind('<<ComboboxSelected>>', lambda _e: self.render_models())
+        if key == 'subagent':
+            # Off: this session's main model does all the work; every Agent call is refused.
+            self.use_agents = tk.BooleanVar(value=not session_entry().get('off'))
+            ttk.Checkbutton(bar, text='Use subagents in this session', variable=self.use_agents,
+                            command=self.toggle_agents,
+                            state='normal' if session_launch_id() else 'disabled').pack(side='right')
+
+        pick = ttk.Frame(self)
+        pick.pack(fill='x', padx=18, pady=(2, 10))
+        self.target_label = ttk.Label(pick, text='Target', style='Dim.TLabel')
+        self.target = tk.StringVar()
+        self.target_box = ttk.Combobox(pick, textvariable=self.target, state='readonly', width=15)
+        if key in TARGET_TABS:
+            self.target_label.pack(side='left')
+            self.target_box.pack(side='left', padx=(8, 18))
+            self.target_box.bind('<<ComboboxSelected>>', lambda _e: self.load())
+            # Say why the picker exists: one route per profile, not one route per tab.
+            hint = ('Target chooses the subagent profile this tab edits: each profile keeps its own provider, '
+                    'model, effort and auto-compact.') if key == 'subagent' else (
+                    'Target chooses whose fallback this tab edits: this session, or one subagent profile. '
+                    'A session fallback needs a cc adapter launch.')
+            ttk.Label(self, text=hint, style='Faint.TLabel', wraplength=900).pack(fill='x', padx=18, pady=(0, 8))
+        ttk.Label(pick, text='Provider', style='Dim.TLabel').pack(side='left')
+        self.provider = tk.StringVar()
+        self.provider_box = ttk.Combobox(pick, textvariable=self.provider, state='readonly', width=24)
+        self.provider_box.pack(side='left', padx=(8, 8))
+        self.badge = tk.Label(pick, text='', bg=PANEL, fg='white', font=('Segoe UI Semibold', 8),
+                              padx=6, pady=3)
+        self.badge.pack(side='left', padx=(0, 18))
+        self.provider_box.bind('<<ComboboxSelected>>', lambda _e: (self.update_badge(), self.load_models()))
+        ttk.Label(pick, text='Effort', style='Dim.TLabel').pack(side='left')
+        self.effort = tk.StringVar(value=self.view.get('effort') or 'default')
+        self.effort_box = ttk.Combobox(pick, textvariable=self.effort, state='readonly', width=10)
+        self.effort_box.pack(side='left', padx=(8, 0))
+        self.effort.trace_add('write', lambda *_: self.remember())
+        self.compact = tk.StringVar(value='inherit')
+        if key in ('subagent', 'model'):
+            # Typed values work too: a token window such as 150k, or (subagents) a 1-100 percentage.
+            # The Model tab stores the main session's window per model in Claude's settings.
+            ttk.Label(pick, text='Compact', style='Dim.TLabel').pack(side='left', padx=(18, 0))
+            ttk.Combobox(pick, textvariable=self.compact, width=9,
+                         values=['inherit', *COMPACT_TOKENS, '50%', '70%', '90%'] if key == 'subagent'
+                         else ['global', *COMPACT_TOKENS]).pack(side='left', padx=(8, 0))
+
+        card = tk.Frame(self, bg=BORDER)
+        card.pack(fill='both', expand=True, padx=18, pady=(0, 10))
+        inner = ttk.Frame(card, style='Card.TFrame')
+        inner.pack(fill='both', expand=True, padx=1, pady=1)
+        self.list = ttk.Treeview(inner, columns=('context', 'price', 'intelligence', 'score'),
+                                 show='tree headings', style='Picker.Treeview', selectmode='browse',
+                                 height=6)
+        self.list.heading('#0', text='Model', anchor='w')
+        self.list.column('#0', width=360, stretch=True, anchor='w')
+        for column, title, width in (('context', 'Context', 90), ('price', 'Price', 105),
+                                     ('intelligence', 'AA', 70), ('score', 'Score', 70)):
+            self.list.heading(column, text=title, anchor='w')
+            self.list.column(column, width=width, stretch=False, anchor='w')
+        self.list.tag_configure('family', foreground=DIM, background=PANEL,
+                                font=('Segoe UI Semibold', 9))
+        self.list.tag_configure('current', background=CURRENT, foreground='#a8ebcf')
+        self.list.tag_configure('zebra', background=ZEBRA)
+        self.list.tag_configure('hover', background=HOVER, foreground=FG)
+        self.hover = RowHover(self.list, lambda iid: iid in self.iids.values())
+        scroll = ThinScrollbar(inner, self.list.yview)
+        self.list.configure(yscrollcommand=scroll.set)
+        self.list.bind('<MouseWheel>', lambda e: self.list.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
+        self.list.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=10)
+        scroll.pack(side='right', fill='y', padx=(6, 6), pady=10)
+        self.list.bind('<<TreeviewSelect>>', lambda _e: self.on_select())
+        self.list.bind('<Double-Button-1>', lambda _e: self.apply())
+        self.list.bind('<Return>', lambda _e: self.apply())
+        # An overlay in the empty list: the spinner while a list loads, else why it is empty.
+        self.empty = ttk.Label(inner, text='', style='Empty.TLabel')
+        self.empty.place(relx=0.5, rely=0.5, anchor='center')
+
+        foot = ttk.Frame(self)
+        foot.pack(fill='x', padx=18, pady=(0, 14))
+        self.status = ttk.Label(foot, text='', style='Dim.TLabel')
+        self.status.pack(side='left')
+        ttk.Button(foot, text='Close', command=self.app.destroy).pack(side='right', padx=(8, 0))
+        ttk.Button(foot, text='Apply', style='Accent.TButton', command=self.apply).pack(side='right')
+
+        self.now = ttk.Label(self, text='', style='Faint.TLabel')
+        self.now.pack(fill='x', padx=18, pady=(0, 12))
+
+    def toggle_agents(self):
+        ok, out = run_cc('agents', 'on' if self.use_agents.get() else 'off')
+        if not ok:
+            self.use_agents.set(not self.use_agents.get())
+        self.status.configure(text=out)
+
+    # ---- data ----
+
+    def busy(self, text):
+        """An animated status line, and the same spinner in an empty list."""
+        self.busy_text = text
+        if self.busy_job is None:
+            self.busy_i = 0
+            self.busy_tick()
+
+    def busy_tick(self):
+        frame = BUSY[self.busy_i % len(BUSY)]
+        self.busy_i += 1
+        self.status.configure(text=f'{frame}  {self.busy_text}')
+        if not self.iids:
+            self.empty.configure(text=f'{frame}  {self.busy_text}')
+            self.empty.place(relx=0.5, rely=0.5, anchor='center')
+        self.busy_job = self.after(90, self.busy_tick)
+
+    def settle(self, text):
+        if self.busy_job is not None:
+            self.after_cancel(self.busy_job)
+            self.busy_job = None
+        self.status.configure(text=text)
+        self.show_empty()
+
+    def show_empty(self):
+        if self.busy_job is not None:
+            return  # the spinner owns the overlay
+        if self.iids:
+            self.empty.place_forget()
+        else:
+            self.empty.configure(text='No models match' if self.query.get().strip() else 'No models listed')
+            self.empty.place(relx=0.5, rely=0.5, anchor='center')
+
+    def provider_rows(self):
+        if self.key == 'subagent':
+            return tab_rows(run_cc('agents', 'providers')[1])
+        if self.key == 'fallback':
+            # a subagent fallback picks from the routes the adapter can reach
+            command = 'fallback' if self.target.get() in ('', 'session') else 'route'
+            return tab_rows(run_cc(command, 'routes')[1])
+        return tab_rows(run_cc('route', 'routes')[1])
+
+    def model_command(self, provider):
+        if self.key == 'subagent':
+            return ['agents', 'models', self.target.get().lower(), provider]
+        if self.key == 'fallback':
+            return ['fallback', 'models', provider]
+        return ['route', 'models', provider]
+
+    def load(self):
+        self.busy('Loading providers…')
+        targets = [('', '')]
+        if self.key == 'subagent':
+            targets = [(name, name) for name in load_profiles()]
+        elif self.key == 'fallback':
+            targets = [('session', 'session')] + [(name, name) for name in load_profiles()]
+        names = [value for _, value in targets]
+        self.target_box.configure(values=names)
+        current, saved = self.target.get(), self.view.get('target') or ''
+        # A change made in the combobox wins over the cached one; the cache is only the first open.
+        self.target.set(current if current in names else saved if saved in names else (names[0] if names else ''))
+        if self.rows_target is not None and self.rows_target != self.target.get():
+            # The old target's rows must not be redrawn (or picked) while the new list loads.
+            self.models, self.facts = [], {}
+            self.list.delete(*self.list.get_children())
+            self.iids = {}
+            self.current = None
+            self.rows_target = None
+            self.show_empty()
+        self.load_request += 1
+        request, target = self.load_request, self.target.get()
+
+        def done(rows):
+            if request == self.load_request and target == self.target.get():
+                self.show_providers(rows if isinstance(rows, list) else [])
+
+        self.app.background(self.provider_rows, done)
+
+    def remember(self):
+        """Keep this tab's browsing picks (never the applied route) for the next opening."""
+        previous = self.view if isinstance(self.view, dict) else {}
+        same = previous.get('target', '') == self.target.get()
+        picks = dict(previous.get('picks') or {}) if same and isinstance(previous.get('picks'), dict) else {}
+        chosen = self.chosen()
+        if chosen:
+            picks[self.provider.get()] = chosen
+        entry = {
+            'v': VIEW_VERSION,
+            'target': self.target.get(),
+            'provider': self.provider.get(),
+            'picks': picks,
+            'model': picks.get(self.provider.get()),
+            'sort': self.sort_mode.get(),
+            'query': self.query.get(),
+            'effort': self.effort.get(),
+        }
+        self.view = entry
+        save_view(self.key, entry)
+
+    def same_target(self):
+        return self.view.get('target', '') == self.target.get()
+
+    def picks(self):
+        picks = self.view.get('picks') if self.same_target() else None
+        return picks if isinstance(picks, dict) else {}
+
+    def show_providers(self, rows):
+        self.providers = rows
+        self.provider_box.configure(values=[r[0] for r in rows])
+        self.render_now()
+        wanted = (self.view.get('provider') if self.same_target() else '') or (
+            self.current[0] if self.current else '') or ''
+        choice = next((r[0] for r in rows if r[0] == wanted), rows[0][0] if rows else '')
+        if not self.same_target() or choice != self.provider.get():
+            # neither the old target's row nor the old provider's model is a pick for this one
+            self.list.selection_remove(self.list.selection())
+        self.provider.set(choice)
+        effort = self.view.get('effort') if self.same_target() and self.view.get('provider') == choice else None
+        # 'default' is not a pick: it falls back to the effort the route in use was launched with.
+        self.effort.set(effort if effort not in (None, '', 'default')
+                        else (self.current[2] if self.current and len(self.current) > 2 else 'default'))
+        self.update_badge()
+        self.remember()
+        self.load_models()
+
+    def update_badge(self):
+        name = self.provider.get()
+        color, text = brand(name)
+        image = self.app.logo(PROVIDER_LOGOS.get(name))
+        if image is not None:
+            self.badge.configure(image=image, text='', bg=color)
+        else:
+            self.badge.configure(image='', text=text, bg=color, fg=brand_fg(color))
+
+    def load_models(self):
+        provider = self.provider.get()
+        self.model_request += 1
+        request = self.model_request
+        target = self.target.get()
+        self.models, self.facts = [], self.app.facts_cache.get(provider, {})
+        self.rows_target = None
+        self.render_models()
+        if not provider:
+            self.settle('No provider here.')
+            return
+        cached = self.app.models_cache.get((self.key, target, provider))
+        if cached is not None:
+            self.show_models(cached)
+            return
+        self.busy(f'Loading {provider} models…')
+        args = self.model_command(provider)
+
+        def done(result):
+            if request == self.model_request and (provider, target) == (self.provider.get(), self.target.get()):
+                if result[0]:
+                    self.app.models_cache[(self.key, target, provider)] = result
+                self.show_models(result)
+
+        self.app.background(lambda: run_cc(*args), done)
+        self.load_facts(provider)
+
+    def load_facts(self, provider):
+        """The launch menu's facts (context, price, intelligence, score) for these models."""
+        if provider in self.app.facts_cache:
+            self.facts = self.app.facts_cache[provider]
+            return
+        self.app.background(lambda: run_cc('facts', provider),
+                            lambda result: self.show_facts(provider, result))
+
+    def show_facts(self, provider, result):
+        ok, out = result
+        facts = {}
+        if ok:
+            for line in out.splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get('id'), str):
+                    facts[row['id']] = row
+        self.app.facts_cache[provider] = facts
+        if provider == self.provider.get():
+            self.facts = facts
+            self.render_models()
+
+    def show_models(self, result):
+        ok, out = result
+        if not ok:
+            self.models = []
+            self.render_models()
+            self.settle(out.splitlines()[-1] if out else 'Could not list models.')
+            return
+        self.models = indented_rows(out) if self.key == 'subagent' else plain_rows(out)
+        self.rows_target = self.target.get()
+        cached = self.picks().get(self.provider.get())
+        wanted = cached or (self.current[1] if self.current and self.current[0] == self.provider.get() else None)
+        self.render_models(wanted)
+        self.settle(f'{len(self.models)} models' if self.models else 'No models listed.')
+        self.load_efforts()
+
+    def render_models(self, select=None):
+        wanted = select or self.chosen() or self.picks().get(self.provider.get())
+        if not wanted and self.current and self.current[0] == self.provider.get():
+            wanted = self.current[1]
+        mode = SORTS.get(self.sort_mode.get(), 'intelligence')
+        models = sort_models(filtered(self.models, self.query.get()), self.facts, mode)
+        self.hover.reset()
+        self.list.delete(*self.list.get_children())
+        self.iids = {}
+        zebra = 0
+        if mode == 'family':
+            groups = {}
+            for model in models:
+                groups.setdefault(model_family(model), []).append(model)
+            for family in sorted(groups):
+                logo = self.app.mark(FAMILY_LOGOS.get(family), FAINT)
+                parent = self.list.insert('', 'end', text=f' {family.upper()}', image=logo,
+                                          open=True, tags=('family',))
+                for model in groups[family]:
+                    self.insert_model(model, parent, zebra % 2 == 1)
+                    zebra += 1
+        else:
+            for model in models:
+                self.insert_model(model, '', zebra % 2 == 1)
+                zebra += 1
+        iid = self.iids.get(wanted) if wanted else None
+        if iid is None and self.iids:
+            iid = next(iter(self.iids.values()))
+        if iid:
+            self.list.selection_set(iid)
+            self.list.focus(iid)
+            self.after_idle(lambda i=iid: self.reveal(i))
+        self.show_empty()
+        self.remember()
+
+    def row_index(self, iid):
+        """The row's position in drawing order; Treeview.index() only counts within one parent."""
+        rows = []
+
+        def walk(parent=''):
+            for child in self.list.get_children(parent):
+                rows.append(child)
+                walk(child)
+
+        walk()
+        return rows.index(iid)
+
+    def reveal(self, iid):
+        """Keep the top of the ranking on screen when the pick is inside the first screenful."""
+        try:
+            if not self.list.winfo_exists():
+                return
+            if not self.list.exists(iid):
+                return
+            # Before the window maps, height is 1: assume a screenful rather than scrolling one row.
+            height = self.list.winfo_height()
+            rows = max(1, height // 36) if height >= 36 else 8
+            if self.row_index(iid) < rows:
+                self.list.yview_moveto(0)
+            else:
+                self.list.see(iid)
+        except tk.TclError:  # the window closed before the idle callback ran
+            pass
+
+    def insert_model(self, model, parent='', zebra=False):
+        logo = self.app.mark(FAMILY_LOGOS.get(model_family(model)), FAINT)
+        current = bool(self.current and self.current[:2] == [self.provider.get(), model])
+        tags = ('zebra',) if zebra else ()
+        if current:
+            tags += ('current',)
+        iid = self.list.insert(parent, 'end', text=f' {model}' + ('  ·  Current' if current else ''), image=logo,
+                               values=fact_values(self.facts.get(model)), tags=tags)
+        self.iids[model] = iid
+
+    def chosen(self):
+        picked = self.list.selection()
+        if not picked:
+            return None
+        return next((model for model, iid in self.iids.items() if iid == picked[0]), None)
+
+    def on_select(self):
+        self.hover.clear()
+        if self.chosen() is None:
+            picked = self.list.selection()
+            children = self.list.get_children(picked[0]) if picked else ()
+            if children:
+                self.list.selection_set(children[0])
+                self.list.focus(children[0])
+                return
+        self.remember()
+        self.load_efforts()
+
+    def load_efforts(self):
+        model, provider = self.chosen(), self.provider.get()
+        if not model or not provider:
+            return
+        self.app.background(lambda: efforts_for(provider, model),
+                            lambda levels: self.show_efforts(levels)
+                            if (provider, model) == (self.provider.get(), self.chosen()) else None)
+
+    def show_efforts(self, levels):
+        values = effort_values(levels, self.effort.get())
+        self.effort_box.configure(values=values)
+        if self.effort.get() not in values:
+            self.effort.set('default')
+
+    def render_now(self):
+        if self.key == 'subagent' or (self.key == 'fallback' and self.target.get() not in ('', 'session')):
+            profile = load_profiles().get(self.target.get(), {})
+            target = profile if self.key == 'subagent' else profile.get('fallback') or {}
+            self.current = ([target['provider'], target['model'], target.get('effort') or 'default']
+                            if target.get('provider') and target.get('model') else None)
+            if self.key == 'subagent':
+                own = profile.get('autocompact')
+                self.compact.set(f'{own}%' if type(own) is int else own or 'inherit')
+            label = '/'.join(self.current[:2]) + ' · ' + self.current[2] if self.current else 'not configured'
+            self.now.configure(text=f'Current · {self.target.get()} · {label}')
+            return
+        command = {'model': ('route',), 'fallback': ('fallback',), 'auto': ('helper', 'auto'),
+                   'tools': ('helper', 'tools')}.get(self.key)
+        if not command:
+            self.current = None
+            self.now.configure(text='')
+            return
+        out = run_cc(*command)[1]
+        name = {'model': 'Route', 'fallback': 'Fallback', 'auto': 'Helper', 'tools': 'Helper'}[self.key]
+        self.current = parse_target(out, name)
+        if self.key == 'model' and self.current:
+            self.compact.set(model_compact(self.current[1]))
+        lines = [line for line in out.splitlines() if line.strip()]
+        self.now.configure(text='   ·   '.join(lines))
+
+    # ---- apply ----
+
+    def apply(self):
+        model = self.chosen()
+        if not model:
+            self.status.configure(text='Pick a model first.')
+            return
+        provider, effort, target = self.provider.get(), self.effort.get(), self.target.get().lower()
+        compact = self.compact.get().strip() or 'inherit'
+        self.busy(f'Setting {provider}/{model}…')
+        self.app.background(lambda: self.apply_command(provider, model, effort, target, compact), self.show_result)
+
+    def apply_command(self, provider, model, effort, target, compact='inherit'):
+        level = [] if effort in ('', 'default') else [effort]
+        if self.key == 'model':
+            ok, said = set_model_compact(model, compact if compact != 'inherit' else 'global')
+            if not ok:
+                return ok, said
+            ok, out = run_cc('route', provider, model, *level)
+            return ok, f'{out.rstrip()}\n{said}' if ok else out
+        if self.key in ('auto', 'tools'):
+            return run_cc('helper', self.key, provider, model, *level)
+        if self.key == 'subagent':
+            return run_cc('agents', 'set', target, '--provider', provider,
+                          '--model', model, '--effort', effort or 'default', '--autocompact', compact)
+        if self.key == 'fallback' and target == 'session':
+            return run_cc('fallback', provider, model, *level)
+        if self.key == 'fallback':
+            return run_cc('fallback', 'subagent', target, provider, model, *level)
+        return False, 'Nothing to apply.'
+
+    def mark_current(self):
+        """Move the Current mark without rebuilding the list, so scroll and selection stay put."""
+        for model, iid in self.iids.items():
+            current = bool(self.current and self.current[:2] == [self.provider.get(), model])
+            tags = tuple(tag for tag in self.list.item(iid, 'tags') if tag != 'current')
+            if current:
+                tags += ('current',)
+            self.list.item(iid, text=f' {model}' + ('  ·  Current' if current else ''), tags=tags)
+
+    def show_result(self, result):
+        ok, out = result
+        self.settle(out.splitlines()[-1] if out else ('Applied.' if ok else 'Failed.'))
+        if not ok:
+            return
+        if self.key == 'subagent':
+            self.render_now()
+            self.mark_current()
+        else:
+            name = {'model': 'Route', 'fallback': 'Fallback', 'auto': 'Helper', 'tools': 'Helper'}[self.key]
+            self.current = parse_target(out, name) or self.current
+            lines = [line for line in out.splitlines() if line.strip()]
+            self.now.configure(text='   ·   '.join(lines))
+            self.mark_current()
+        self.remember()
+
+
+class PresetsTab(ttk.Frame):
+    """Each provider's default pick, one Enter away."""
+
+    def __init__(self, app, parent=None):
+        super().__init__(parent if parent is not None else app, style='Tab.TFrame')
+        self.app = app
+        self.presets = []
+        self.shown = []
+        self.iids = []  # (tree item, preset)
+        self.current = None
+        self.busy_job = None
+        self.busy_text = ''
+        self.busy_i = 0
+
+        bar = ttk.Frame(self)
+        bar.pack(fill='x', padx=18, pady=(16, 10))
+        self.badge = tk.Label(bar, text='', bg=PANEL, fg='white', font=('Segoe UI Semibold', 8),
+                              padx=6, pady=3)
+        self.badge.pack(side='left', padx=(0, 12))
+        ttk.Label(bar, text='Find', style='Dim.TLabel').pack(side='left')
+        self.query = tk.StringVar()
+        self.query.trace_add('write', lambda *_: self.render())
+        ttk.Entry(bar, textvariable=self.query, width=34).pack(side='left', padx=(8, 0), ipady=4)
+
+        card = tk.Frame(self, bg=BORDER)
+        card.pack(fill='both', expand=True, padx=18, pady=(0, 10))
+        inner = ttk.Frame(card, style='Card.TFrame')
+        inner.pack(fill='both', expand=True, padx=1, pady=1)
+        self.list = ttk.Treeview(inner, columns=('model', 'effort', 'source', 'state'),
+                                 show='tree headings', style='Picker.Treeview', selectmode='browse',
+                                 height=6)
+        self.list.heading('#0', text='Provider', anchor='w')
+        self.list.column('#0', width=170, minwidth=100, stretch=True, anchor='w')
+        for column, title, width in [('model', 'Model', 300), ('effort', 'Effort', 80),
+                                     ('source', 'Preset', 90), ('state', 'Session', 80)]:
+            self.list.heading(column, text=title, anchor='w')
+            self.list.column(column, width=width, minwidth=65, stretch=column == 'model', anchor='w')
+        self.list.tag_configure('current', background=CURRENT, foreground='#a8ebcf')
+        self.list.tag_configure('zebra', background=ZEBRA)
+        self.list.tag_configure('hover', background=HOVER, foreground=FG)
+        self.hover = RowHover(self.list, lambda iid: any(iid == item for item, _ in self.iids))
+        scroll = ThinScrollbar(inner, self.list.yview)
+        self.list.configure(yscrollcommand=scroll.set)
+        self.list.bind('<MouseWheel>', lambda e: self.list.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
+        self.list.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=10)
+        scroll.pack(side='right', fill='y', padx=(6, 6), pady=10)
+        self.list.bind('<<TreeviewSelect>>', lambda _e: (self.hover.clear(), self.update_badge()))
+        self.list.bind('<Double-Button-1>', lambda _e: self.edit())
+        self.list.bind('<Return>', lambda _e: self.apply())
+        self.empty = ttk.Label(inner, text='', style='Empty.TLabel')
+        self.empty.place(relx=0.5, rely=0.5, anchor='center')
+
+        foot = ttk.Frame(self)
+        foot.pack(fill='x', padx=18, pady=(0, 14))
+        self.status = ttk.Label(foot, text='', style='Dim.TLabel')
+        self.status.pack(side='left')
+        ttk.Button(foot, text='Close', command=self.app.destroy).pack(side='right', padx=(8, 0))
+        ttk.Button(foot, text='Use in this session', style='Accent.TButton', command=self.apply).pack(side='right')
+        ttk.Button(foot, text='Edit preset…', command=self.edit).pack(side='right', padx=(0, 8))
+        ttk.Label(self, text='Use = this session only  ·  Edit = save the preset  ·  Double-click edits  ·  Enter uses',
+                  style='Faint.TLabel').pack(fill='x', padx=18, pady=(0, 8))
+        self.render()
+
+    def busy(self, text):
+        self.busy_text = text
+        if self.busy_job is None:
+            self.busy_i = 0
+            self.busy_tick()
+
+    def busy_tick(self):
+        frame = BUSY[self.busy_i % len(BUSY)]
+        self.busy_i += 1
+        self.status.configure(text=f'{frame}  {self.busy_text}')
+        if not self.iids:
+            self.empty.configure(text=f'{frame}  {self.busy_text}')
+            self.empty.place(relx=0.5, rely=0.5, anchor='center')
+        self.busy_job = self.after(90, self.busy_tick)
+
+    def settle(self, text):
+        if self.busy_job is not None:
+            self.after_cancel(self.busy_job)
+            self.busy_job = None
+        self.status.configure(text=text)
+        self.show_empty()
+
+    def show_empty(self):
+        if self.busy_job is not None:
+            return
+        if self.iids:
+            self.empty.place_forget()
+        else:
+            self.empty.configure(text='No presets match' if self.query.get().strip() else 'No presets listed')
+            self.empty.place(relx=0.5, rely=0.5, anchor='center')
+
+    def load(self):
+        self.busy('Loading presets…')
+        self.app.background(lambda: run_cc('presets', 'bundles'), self.show_result_load)
+
+    def show_result_load(self, result):
+        ok, out = result
+        if not ok:
+            self.settle(out.splitlines()[-1] if out else 'Could not list presets.')
+            return
+        self.show(out)
+
+    def show(self, out):
+        self.current = parse_target(run_cc('route')[1], 'Route')
+        self.presets = []
+        if out.lstrip().startswith('['):
+            try:
+                self.presets = json.loads(out)
+                for preset in self.presets:
+                    preset['label'] = f'{preset["provider"]} · {preset["model"]}'
+            except (ValueError, KeyError, TypeError):
+                self.presets = []
+        else:
+            for line in out.splitlines():
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    provider, model, effort, label = parts[:4]
+                    self.presets.append({'provider': provider, 'model': model, 'effort': effort or None,
+                                         'label': label, 'custom': len(parts) >= 5 and parts[4].strip() == '1'})
+        self.render()
+        self.settle(f'{len(self.presets)} presets' if self.presets else 'No presets listed.')
+
+    def render(self):
+        picked = self.picked()
+        wanted = picked['provider'] if picked else None
+        needle = self.query.get().strip().lower()
+        self.hover.reset()
+        self.list.delete(*self.list.get_children())
+        self.shown = [p for p in self.presets if not needle or needle in
+                      ' '.join(str(p.get(k) or '') for k in ('label', 'provider', 'model', 'effort')).lower()]
+        self.iids = []
+        active = None
+        for index, preset in enumerate(self.shown):
+            color, _text = brand(preset['provider'])
+            logo = self.app.mark(PROVIDER_LOGOS.get(preset['provider']), color)
+            current = bool(self.current and self.current[:2] == [preset['provider'], preset['model']]
+                           and (self.current[2] if len(self.current) > 2 else 'default') == (preset['effort'] or 'default'))
+            tags = ('zebra',) if index % 2 else ()
+            if current:
+                tags += ('current',)
+            iid = self.list.insert('', 'end', text=' ' + preset['provider'], image=logo,
+                                   values=(preset['model'], preset['effort'] or 'default',
+                                           'Custom' if preset.get('custom') else 'Default',
+                                           'Current' if current else ''),
+                                   tags=tags)
+            self.iids.append((iid, preset))
+            if current:
+                active = iid
+        if self.iids:
+            iid = next((iid for iid, p in self.iids if p['provider'] == wanted), active or self.iids[0][0])
+            self.list.selection_set(iid)
+            self.list.focus(iid)
+            self.list.see(iid)
+        self.update_badge()
+        self.show_empty()
+
+    def picked(self):
+        selection = self.list.selection()
+        if not selection:
+            return None
+        return next((preset for iid, preset in self.iids if iid == selection[0]), None)
+
+    def update_badge(self):
+        preset = self.picked()
+        if preset is None:
+            self.badge.configure(text='', image='', bg=PANEL)
+            return
+        color, text = brand(preset['provider'])
+        image = self.app.logo(PROVIDER_LOGOS.get(preset['provider']))
+        if image is not None:
+            self.badge.configure(image=image, text='', bg=color)
+        else:
+            self.badge.configure(image='', text=text, bg=color, fg=brand_fg(color))
+
+    def edit(self):
+        preset = self.picked()
+        if preset is None:
+            self.status.configure(text='Pick a preset first.')
+            return
+        PresetEditor(self.app, preset, self.load)
+
+    def apply(self):
+        preset = self.picked()
+        if preset is None:
+            self.status.configure(text='Pick a preset first.')
+            return
+        settings = preset.get('settings')
+        if not settings:
+            args = ['route', preset['provider'], preset['model']]
+            if preset['effort']:
+                args.append(preset['effort'])
+            work = lambda: run_cc(*args)
+        else:
+            profiles = list(load_profiles())
+            def work():
+                for key, label in TABS[:-1]:
+                    target = settings[key]
+                    provider, model = target['provider'], target.get('model', '')
+                    effort = target.get('effort') or 'default'
+                    pair = ['off'] if provider == 'off' else [provider, model, *([] if effort == 'default' else [effort])]
+                    if key == 'subagent':
+                        commands = [['agents', 'set', name, '--provider', provider, '--model', model,
+                                     '--effort', effort] for name in profiles]
+                    else:
+                        command = (['route', *pair] if key == 'model' else ['fallback', *pair] if key == 'fallback'
+                                   else ['helper', key, *(['inherit'] if provider == 'off' else pair)])
+                        commands = [command]
+                    for command in commands:
+                        ok, out = run_cc(*command)
+                        if not ok:
+                            return False, f'{label}: {out}\nEarlier categories may already be applied. {label}: {out.splitlines()[-1] if out else "Failed."}'
+                return True, 'Applied all five preset categories.'
+        self.busy(f'Setting {preset["label"]}…')
+        self.app.background(work, self.show_result)
+
+    def mark_current(self):
+        """Move the Current mark in place: no reload, no lost selection."""
+        for iid, preset in self.iids:
+            current = bool(self.current and self.current[:2] == [preset['provider'], preset['model']]
+                           and (self.current[2] if len(self.current) > 2 else 'default') == (preset['effort'] or 'default'))
+            values = list(self.list.item(iid, 'values'))
+            values[3] = 'Current' if current else ''
+            tags = tuple(tag for tag in self.list.item(iid, 'tags') if tag != 'current')
+            if current:
+                tags += ('current',)
+            self.list.item(iid, values=values, tags=tags)
+
+    def show_result(self, result):
+        ok, out = result
+        self.settle(out.splitlines()[-1] if out else ('Applied.' if ok else 'Failed.'))
+        if ok:
+            self.current = parse_target(run_cc('route')[1], 'Route')
+            self.mark_current()
+
+
+class PresetEditor(tk.Toplevel):
+    """All five preset categories, saved together without changing active routes."""
+
+    def __init__(self, app, preset, saved):
+        super().__init__(app)
+        self.app = app
+        self.preset = preset
+        self.saved = saved
+        self.title(f'Edit preset · {preset["provider"]}')
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.protocol('WM_DELETE_WINDOW', self.close)
+        body = ttk.Frame(self)
+        body.pack(fill='both', expand=True, padx=20, pady=18)
+        head = ttk.Frame(body)
+        head.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 14))
+        color, monogram = brand(preset['provider'])
+        image = app.logo(PROVIDER_LOGOS.get(preset['provider']))
+        if image is not None:
+            tk.Label(head, image=image, bg=color, padx=4, pady=3).pack(side='left', padx=(0, 10))
+        else:
+            tk.Label(head, text=monogram, bg=color, fg=brand_fg(color),
+                     font=('Segoe UI Semibold', 10), padx=7, pady=3).pack(side='left', padx=(0, 10))
+        ttk.Label(head, text=preset['provider'], style='Title.TLabel').pack(side='left')
+        self.fields = {}
+        main = {'provider': preset['provider'], 'model': preset['model'], 'effort': preset.get('effort') or 'default'}
+        settings = preset.get('settings') or {key: dict(main) for key, _ in TABS[:-1]}
+        if not preset.get('settings'):
+            settings['fallback'] = {'provider': 'off'}
+        providers = [value for value, _ in tab_rows(run_cc('agents', 'providers')[1]) if value != 'off']
+        providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] != 'off']]))
+        fallback_providers = [value for value, _ in tab_rows(run_cc('fallback', 'routes')[1])]
+        helper_providers = [value for value, _ in tab_rows(run_cc('route', 'routes')[1])]
+        for column, title in enumerate(('Category', 'Provider', 'Model', 'Effort')):
+            ttk.Label(body, text=title, style='Dim.TLabel').grid(row=1, column=column, sticky='w', padx=(0, 10))
+        for row, (key, label) in enumerate(TABS[:-1], 2):
+            target = settings[key]
+            fields = {name: tk.StringVar(value=target.get(name) or ('default' if name == 'effort' else ''))
+                      for name in ('provider', 'model', 'effort')}
+            self.fields[key] = fields
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky='w', pady=6)
+            allowed = (fallback_providers if key == 'fallback' else helper_providers if key in ('auto', 'tools') else providers)
+            allowed = allowed + (['off'] if key in ('fallback', 'auto', 'tools') else [])
+            box = ttk.Combobox(body, textvariable=fields['provider'], values=allowed, state='readonly', width=19)
+            fields['provider_box'] = box
+            box.grid(row=row, column=1, padx=(0, 10))
+            if key == 'model':
+                box.configure(values=[preset['provider']])
+            box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_models(k))
+            model_box = ttk.Combobox(body, textvariable=fields['model'], width=38)
+            model_box.grid(row=row, column=2, padx=(0, 10))
+            model_box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_efforts(k))
+            model_box.bind('<FocusOut>', lambda _e, k=key: self.load_efforts(k))
+            effort_box = ttk.Combobox(body, textvariable=fields['effort'], state='readonly',
+                                      values=['default', *EFFORTS], width=10)
+            effort_box.grid(row=row, column=3)
+            spinner = ttk.Label(body, text='', style='Dim.TLabel', width=2)
+            spinner.grid(row=row, column=4, padx=(8, 0))
+            fields.update(model_box=model_box, effort_box=effort_box, spinner=spinner, loading=False, request=0)
+        self.spinner_job = None
+        self.spinner_frame = 0
+        self.model, self.effort = self.fields['model']['model'], self.fields['model']['effort']
+        self.model_box, self.effort_box = self.fields['model']['model_box'], self.fields['model']['effort_box']
+        self.status = ttk.Label(body, text='Loading models…', style='Faint.TLabel')
+        self.status.grid(row=7, column=0, columnspan=4, sticky='w', pady=(10, 0))
+        ttk.Label(body, text='Off = disable fallback / inherit helper. Subagent applies to every configured profile.',
+                  style='Faint.TLabel').grid(row=8, column=0, columnspan=4, sticky='w')
+        foot = ttk.Frame(body)
+        foot.grid(row=9, column=0, columnspan=4, sticky='we', pady=(16, 0))
+        ttk.Button(foot, text='Restore default', command=self.reset).pack(side='left')
+        ttk.Button(foot, text='Cancel', command=self.close).pack(side='right', padx=(8, 0))
+        ttk.Button(foot, text='Save', style='Accent.TButton', command=self.save).pack(side='right')
+        self.bind('<Escape>', lambda _e: self.close())
+        self.transient(app)
+        self.grab_set()
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_reqwidth()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_reqheight()) // 3
+        self.geometry(f'+{max(0, x)}+{max(0, y)}')
+        for key in ('subagent', 'fallback', 'auto', 'tools', 'model'):
+            self.load_models(key)
+        self.after(120, self.model_box.focus_set)
+
+    def spin_models(self):
+        self.spinner_job = None
+        for fields in self.fields.values():
+            fields['spinner'].configure(text=BUSY[self.spinner_frame % len(BUSY)] if fields['loading'] else '')
+        self.spinner_frame += 1
+        if any(fields['loading'] for fields in self.fields.values()):
+            self.spinner_job = self.after(90, self.spin_models)
+
+    def load_models(self, key='model'):
+        fields = self.fields[key]
+        fields['request'] += 1
+        request = fields['request']
+        provider = fields['provider'].get()
+        disabled = provider == 'off'
+        fields['loading'] = not disabled
+        fields['spinner'].configure(text=BUSY[0] if not disabled else '')
+        if self.spinner_job is None:
+            self.spin_models()
+        fields['model_box'].configure(state='disabled' if disabled else 'normal')
+        fields['effort_box'].configure(state='disabled' if disabled else 'readonly')
+        if not disabled:
+            self.app.background(lambda: run_cc('models', provider),
+                                lambda result: self.show_models(result, key)
+                                if self.winfo_exists() and provider == fields['provider'].get()
+                                and request == fields['request'] else None)
+
+    def show_models(self, result, key='model'):
+        if not self.winfo_exists():
+            return
+        fields = self.fields[key]
+        fields['loading'] = False
+        fields['spinner'].configure(text='')
+        ok, out = result
+        models = plain_rows(out) if ok else []
+        current = fields['model'].get().strip()
+        values = [current, *[m for m in models if m != current]] if current else models
+        fields['model_box'].configure(values=values)
+        self.status.configure(text=f'{len(models)} models; type any id' if models else 'Type a model id.')
+        self.load_efforts(key)
+
+    def load_efforts(self, key='model'):
+        fields = self.fields[key]
+        provider, model = fields['provider'].get(), fields['model'].get().strip()
+        if model and provider != 'off':
+            self.app.background(lambda: efforts_for(provider, model),
+                                lambda levels: self.show_efforts(levels, key)
+                                if self.winfo_exists() and model == fields['model'].get().strip()
+                                and provider == fields['provider'].get() else None)
+
+    def show_efforts(self, levels, key='model'):
+        if not self.winfo_exists():
+            return
+        fields = self.fields[key]
+        values = ['default', *(EFFORTS if levels is None else levels)]
+        fields['effort_box'].configure(values=values)
+        if fields['effort'].get() not in values:
+            fields['effort'].set('default')
+
+    def save(self):
+        settings = {}
+        for key, fields in self.fields.items():
+            provider, model = fields['provider'].get(), fields['model'].get().strip()
+            if provider == 'off':
+                settings[key] = {'provider': 'off'}
+                continue
+            if not model:
+                self.status.configure(text=f'{key.title()}: type a model id first.')
+                return
+            effort = fields['effort'].get()
+            settings[key] = {'provider': provider, 'model': model,
+                             **({'effort': effort} if effort not in ('', 'default') else {})}
+        args = ['presets', 'set-bundle', self.preset['provider'], json.dumps(settings)]
+        self.status.configure(text='Saving…')
+        self.app.background(lambda: run_cc(*args), self.done)
+
+    def reset(self):
+        self.status.configure(text='Restoring default…')
+        self.app.background(lambda: run_cc('presets', 'reset', self.preset['provider']), self.done)
+
+    def done(self, result):
+        if not self.winfo_exists():
+            return
+        ok, out = result
+        if not ok:
+            self.status.configure(text=out.splitlines()[-1] if out else 'Could not save.')
+            return
+        self.saved()
+        self.close()
+
+    def close(self):
+        if self.spinner_job is not None:
+            self.after_cancel(self.spinner_job)
+            self.spinner_job = None
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class App(tk.Tk):
+    def __init__(self, start='model'):
+        super().__init__()
+        self.title('cc model picker')
+        self.configure(bg=BG)
+        self.geometry('980x660')
+        self.minsize(760, 520)
+        self.option_add('*TCombobox*Listbox.background', FIELD)
+        self.option_add('*TCombobox*Listbox.foreground', FG)
+        self.option_add('*TCombobox*Listbox.selectBackground', ACCENT)
+        self.option_add('*TCombobox*Listbox.selectForeground', 'white')
+        self.style = ttk.Style(self)
+        self.style.theme_use('clam')
+        self.style.configure('.', background=BG, foreground=FG, fieldbackground=FIELD,
+                             bordercolor=FIELD, lightcolor=FIELD, darkcolor=FIELD, font=FONT)
+        self.style.configure('TFrame', background=BG)
+        self.style.configure('Tab.TFrame', background=BG)
+        self.style.configure('Card.TFrame', background=PANEL)
+        self.style.configure('TLabel', background=BG, foreground=FG)
+        self.style.configure('Title.TLabel', background=BG, foreground=FG,
+                             font=('Segoe UI Semibold', 17))
+        self.style.configure('Dim.TLabel', background=BG, foreground=DIM)
+        self.style.configure('Faint.TLabel', background=BG, foreground=FAINT)
+        self.style.configure('Empty.TLabel', background=PANEL, foreground=FAINT, font=FONT)
+        self.style.configure('TButton', background=FIELD, foreground=FG, borderwidth=0, focusthickness=0,
+                             padding=(14, 7))
+        self.style.map('TButton', background=[('active', HOVER), ('pressed', SELECTED)])
+        self.style.configure('Accent.TButton', background=ACCENT, foreground='white', padding=(18, 7))
+        self.style.map('Accent.TButton', background=[('active', '#7aa4ff'), ('pressed', '#4778e6')])
+        self.style.configure('TNotebook', background=BG, borderwidth=0, tabmargins=(14, 10, 14, 0),
+                             bordercolor=BG, lightcolor=BG, darkcolor=BG)
+        self.style.configure('TNotebook.Tab', background=BG, foreground=DIM, padding=(18, 9),
+                             borderwidth=0, font=FONT, bordercolor=BG, lightcolor=BG, darkcolor=BG)
+        self.style.map('TNotebook.Tab',
+                       background=[('selected', PANEL)],
+                       foreground=[('selected', ACCENT), ('active', FG)],
+                       bordercolor=[('selected', PANEL)],
+                       lightcolor=[('selected', PANEL)], darkcolor=[('selected', PANEL)])
+        # One flat layout for every tab: clam's selected-tab focus ring otherwise shrinks it.
+        self.style.layout('TNotebook.Tab', [
+            ('Notebook.tab', {'sticky': 'nswe', 'children': [
+                ('Notebook.padding', {'side': 'top', 'sticky': 'nswe', 'children': [
+                    ('Notebook.label', {'side': 'top', 'sticky': ''})]})]})])
+        self.style.configure('TEntry', fieldbackground=FIELD, foreground=FG, insertcolor=FG,
+                             bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=6)
+        self.style.configure('TCombobox', fieldbackground=FIELD, background=PANEL, foreground=FG,
+                             arrowcolor=DIM, bordercolor=BORDER, lightcolor=BORDER,
+                             darkcolor=BORDER, padding=6)
+        self.style.map('TCombobox', fieldbackground=[('readonly', FIELD)],
+                       foreground=[('readonly', FG)], bordercolor=[('focus', ACCENT)])
+        self.style.configure('TCheckbutton', background=BG, foreground=FG)
+        self.style.map('TCheckbutton', background=[('active', BG)])
+        self.style.configure('Picker.Treeview', background=FIELD, fieldbackground=FIELD, foreground=FG,
+                             borderwidth=0, bordercolor=BORDER, rowheight=36, font=MONO)
+        self.style.map('Picker.Treeview',
+                       background=[('selected', SELECTED)], foreground=[('selected', 'white')])
+        self.style.configure('Picker.Treeview.Heading', background=PANEL, foreground=DIM,
+                             borderwidth=0, relief='flat', font=('Segoe UI Semibold', 9),
+                             padding=(10, 7))
+
+        # A slim header naming the window and the session it edits, over an accent rule.
+        head = ttk.Frame(self)
+        head.pack(fill='x', padx=18, pady=(14, 10))
+        tk.Label(head, text='cc', bg=ACCENT, fg='white', font=('Segoe UI Semibold', 10),
+                 padx=7, pady=3).pack(side='left', padx=(0, 10))
+        ttk.Label(head, text='Model picker', style='Title.TLabel').pack(side='left')
+        self.session = ttk.Label(head, text=session_label(), style='Faint.TLabel')
+        self.session.pack(side='right')
+        rule = tk.Frame(self, bg=ACCENT, height=2)
+        rule.pack(fill='x', padx=18)
+
+        self.notebook = tk.Frame(self, bg=BG)
+        self.notebook.pack(fill='x', padx=18, pady=(8, 0))
+        self.container = tk.Frame(self, bg=BG)
+        self.container.pack(fill='both', expand=True, pady=(4, 0))
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
+        self.tabs = {}
+        self.tab_labels = {}
+        self.facts_cache = {}  # provider -> {model id: cc facts}
+        self.models_cache = {}  # (tab, target, provider) -> successful model listing
+        self.logo_cache = {}  # logo file stem -> PhotoImage
+        for key, label in TABS:
+            tab = PresetsTab(self, parent=self.container) if key == 'presets' else PickerTab(self, key, self.container)
+            tab.grid(row=0, column=0, sticky='nsew')
+            self.tabs[key] = tab
+            node = tk.Label(self.notebook, text=label, bg=BG, fg=DIM, font=FONT,
+                            padx=14, pady=8, cursor='hand2')
+            node.pack(side='left')
+            node.bind('<Button-1>', lambda _e, k=key: self.select(k))
+            node.bind('<Enter>', lambda _e, k=key: self.hover_tab(k, True))
+            node.bind('<Leave>', lambda _e, k=key: self.hover_tab(k, False))
+            self.tab_labels[key] = node
+        self.underline = tk.Frame(self.notebook, bg=ACCENT, height=2)
+        self.selected = start if start in self.tabs else 'model'
+        self.tabs[self.selected].tkraise()
+        self.paint_tabs()
+        self.notebook.bind('<Configure>', lambda _e: self.move_underline())
+        self.after(30, self.move_underline)
+        self.after(60, self.load_current)
+        self.bind('<Escape>', lambda _e: self.destroy())
+        ico = Path(__file__).with_name('cc.ico')
+        try:
+            self.iconbitmap(default=str(ico))
+        except tk.TclError:  # icon file missing or non-Windows Tk: plain accent square
+            self.icon = tk.PhotoImage(width=16, height=16)
+            self.icon.put(ACCENT, to=(0, 0, 16, 16))
+            self.iconphoto(True, self.icon)
+        self.center()
+        self.after(150, self.raise_self)
+
+    def raise_self(self):
+        """Ask Windows for the foreground: the launcher that spawned us cannot give it."""
+        if os.name != 'nt':
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetAncestor(self.winfo_id(), 2)  # GA_ROOT
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            # The classic raise: top-most once, then back, then foreground.
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)  # HWND_TOPMOST, no size/move
+            user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0001 | 0x0002)  # HWND_NOTOPMOST
+            user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+    def center(self):
+        self.update_idletasks()
+        width, height = 980, 660
+        x = max(0, (self.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.winfo_screenheight() - height) // 3)
+        self.geometry(f'{width}x{height}+{x}+{y}')
+
+    def background(self, work, done):
+        """Work off the UI thread; its result (or failure) lands on the UI thread."""
+        def run():
+            try:
+                result = work()
+            except Exception:
+                result = (False, traceback.format_exc(limit=2))
+            self.after(0, lambda: done(result))
+        threading.Thread(target=run, daemon=True).start()
+
+    def load_current(self):
+        self.tabs[self.current_key()].load()
+
+    def current_key(self):
+        return self.selected
+
+    def logo(self, key):
+        """A brand mark from ~/.config/cc/logos, or None when the file is missing."""
+        if not key:
+            return None
+        if key in self.logo_cache:
+            return self.logo_cache[key]
+        image = None
+        path = LOGO_DIR / f'{key}.svg'
+        if path.is_file():
+            try:
+                image = tk.PhotoImage(file=str(path))
+                if image.width() > 64:  # some sources ship a huge canvas
+                    image = image.subsample(max(1, round(image.width() / 24)))
+            except tk.TclError:
+                image = None
+        self.logo_cache[key] = image
+        return image
+
+    def placeholder(self, color):
+        """A colored dot for a service with no mark, so rows keep their text aligned."""
+        key = f'dot:{color}'
+        if key in self.logo_cache:
+            return self.logo_cache[key]
+        image = tk.PhotoImage(width=24, height=24)
+        for y in range(24):
+            for x in range(24):
+                if (x - 11.5) ** 2 + (y - 11.5) ** 2 <= 100:
+                    image.put(color, (x, y))
+        self.logo_cache[key] = image
+        return image
+
+    def mark(self, slug, color):
+        return self.logo(slug) or self.placeholder(color)
+
+    def select(self, key):
+        if key not in self.tabs or key == self.selected:
+            return
+        self.selected = key
+        self.tabs[key].tkraise()
+        self.paint_tabs()
+        self.after_idle(self.move_underline)
+        self.load_current()
+
+    def paint_tabs(self):
+        """The selected tab reads as a raised panel; the rest stay quiet until hovered."""
+        for name, node in self.tab_labels.items():
+            selected = name == self.selected
+            node.configure(bg=PANEL if selected else BG,
+                           fg=FG if selected else DIM,
+                           font=('Segoe UI Semibold', 10) if selected else FONT)
+
+    def hover_tab(self, key, inside):
+        if key != self.selected:
+            self.tab_labels[key].configure(bg=HOVER if inside else BG, fg=FG if inside else DIM)
+
+    def move_underline(self):
+        node = self.tab_labels.get(self.selected)
+        if node is None:
+            return
+        if node.winfo_width() <= 1:  # not mapped yet: ask again once the bar has a size
+            self.after(50, self.move_underline)
+            return
+        self.underline.place(x=node.winfo_x(), y=max(0, self.notebook.winfo_height() - 2),
+                             width=node.winfo_width(), height=2)
+
+
+def session_label():
+    """What this window would change: the launch, or the plain session."""
+    launch = os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+    provider = os.environ.get('CC_MAIN_PROVIDER')
+    if not launch:
+        return 'no cc launch'
+    label = f'{provider} · {launch}' if provider else launch
+    return label if len(label) <= 46 else label[:45] + '…'
+
+
+def efforts_for(provider, model):
+    """The model's effort ladder: None when unknown, empty when not adjustable."""
+    snippet = (
+        "import importlib.util, json, sys\n"
+        "spec = importlib.util.spec_from_file_location('cc_switch', sys.argv[1])\n"
+        "cc = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(cc)\n"
+        "print(json.dumps(cc.model_efforts(sys.argv[2], sys.argv[3])))\n")
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    try:
+        done = subprocess.run([sys.executable, '-B', '-c', snippet, str(CC), provider, model],
+                              capture_output=True, text=True, creationflags=flags, timeout=60)
+        levels = json.loads(done.stdout.strip().splitlines()[-1])
+        return [level for level in levels if isinstance(level, str)] if isinstance(levels, list) else None
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError, TypeError):
+        return None
+
+
+def pid_alive(pid):
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def lock_file():
+    """One window per session, not one per machine."""
+    key = os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
+    safe = ''.join(ch for ch in key if ch.isalnum() or ch in '-_')[:60] or 'default'
+    return Path.home() / '.config/cc' / f'gui-{safe}.pid'
+
+
+def raise_existing():
+    """Bring the already-open picker forward (Windows), best effort."""
+    if os.name != 'nt':
+        return False
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, 'cc model picker')
+        if not hwnd:
+            return False
+        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def claim_window():
+    """False when this session's window is already up (then it is raised)."""
+    lock = lock_file()
+    try:
+        pid = int(lock.read_text(encoding='utf-8').strip())
+        if pid != os.getpid() and pid_alive(pid):
+            raise_existing()
+            return False
+    except (OSError, ValueError):
+        pass
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(str(os.getpid()), encoding='utf-8')
+    except OSError:
+        pass
+    return True
+
+
+def release_window():
+    lock = lock_file()
+    try:
+        if lock.read_text(encoding='utf-8').strip() == str(os.getpid()):
+            lock.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    start = 'model'
+    if '--tab' in argv:
+        index = argv.index('--tab')
+        if index + 1 < len(argv):
+            start = argv[index + 1]
+    if '--help' in argv or '-h' in argv:
+        print('Usage: python cc-gui.py [--tab model|subagent|fallback|auto|tools|presets]')
+        return 0
+    if not claim_window():
+        return 0
+    if os.name == 'nt':  # own taskbar identity: shared pythonw.exe otherwise borrows another app's pinned icon
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('cc.ModelPicker')
+        except (AttributeError, OSError):
+            pass
+    try:
+        app = App(start)
+        app.mainloop()
+        return 0
+    finally:
+        release_window()
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log = Path.home() / '.config/cc/gui-error.log'
+        try:
+            log.write_text(traceback.format_exc(), encoding='utf-8')
+        except OSError:
+            pass
+        if sys.stderr:
+            print(f'cc-gui: {type(exc).__name__}: {exc}', file=sys.stderr)
+        raise SystemExit(1)

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('cc_resume_switch', ROOT / 'cc-switch.py')
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
+cc.load_presets = lambda: {}  # the person's saved presets must not steer menu defaults here
 SESSION = '00000000-0000-4000-8000-000000000001'
 # Keep real credentials out of mock failure output, and make runs inside Claude Code match plain runs.
 for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN|SECRET|PASSWORD', k.upper())]:

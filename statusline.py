@@ -35,15 +35,12 @@ def color(pct):
     return rgb(120 * (1 - min(max(pct, 0), 100) / 100))
 
 
-def bar(pct, width=8):
-    # Each cell takes the gradient color of its own position, so the bar shows how far into the red it reaches.
-    filled = round(min(max(pct, 0), 100) * width / 100)
+def bar(pct, width=10):
+    # One cell per full 10% used, each in the gradient color of its own position; the bar replaces the % number.
+    filled = int(min(max(pct, 0), 100) * width // 100)
     cells = "".join(f"{color((i + 0.5) * 100 / width)}▰" for i in range(filled))
-    return f"{cells}{DIM}{'▱' * (width - filled)}{RESET}"
-
-
-def pct_text(pct):
-    return f"{color(pct)}{BOLD if pct >= 90 else ''}{pct}%{RESET}"
+    # an empty bar draws its outlines dim green, so "unused" reads at a glance instead of a dim gap
+    return f"{cells}{DIM}{'' if filled else color(0)}{'▱' * (width - filled)}{RESET}"
 
 
 def span(seconds):
@@ -236,9 +233,11 @@ def api_billing(d, stored, creds):
 
 def plan_name(account):
     plan = (account.get("organizationType") or "").removeprefix("claude_").replace("_", " ").title()
-    # Tier looks like "default_claude_max_5x"; the multiplier is the only part the plan name lacks.
+    # Tier looks like "default_claude_max_5x"; Max 5x is now plain Max and Max 20x is Ultra.
     mult = re.search(r"_(\d+x)$", account.get("organizationRateLimitTier") or "")
-    if plan and mult:
+    if plan == "Max" and mult:
+        plan = "Ultra" if mult.group(1) == "20x" else plan
+    elif plan and mult:
         plan += " " + mult.group(1)
     if plan and account.get("hasExtraUsageEnabled"):
         plan += " +extra"
@@ -257,7 +256,7 @@ def quota_source():
         return "openai"
     if "opencode.ai/zen/go" in url or url.endswith("/opencode-go"):  # direct, or via the adapter
         return "opencode-go"
-    if "openrouter.ai" in url:
+    if "openrouter.ai" in url or url.endswith("/openrouter"):
         return "openrouter"
     if "charm.land" in url or url.endswith("/hyper"):
         return "hyper"
@@ -270,8 +269,27 @@ def fetch_json(url, headers):
         return json.load(r)
 
 
+def load_cc_switch():
+    """The cc-switch.py this status line belongs to: the checkout's sibling first, else the install."""
+    import importlib.util
+    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cc-switch.py")
+    source = sibling if os.path.isfile(sibling) else os.path.expanduser("~/.config/cc/cc-switch.py")
+    spec = importlib.util.spec_from_file_location("cc_switch", source)
+    cc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cc)
+    return cc
+
+
+def cc_key(provider):
+    """Use the launcher's credential precedence for providers picked after launch."""
+    try:
+        return load_cc_switch().auth_key(provider)
+    except (OSError, ImportError):
+        return ""
+
+
 def commandcode_quota():
-    key = os.environ.get("CMD_API_KEY")
+    key = os.environ.get("CMD_API_KEY") or cc_key("commandcode")
     if not key:
         with open(os.path.expanduser("~/.commandcode/auth.json"), encoding="utf-8-sig") as f:
             key = json.load(f)["apiKey"]
@@ -305,7 +323,7 @@ def openai_quota():
 def opencode_go_quota():
     # cc hands the Go key to Claude Code as ANTHROPIC_AUTH_TOKEN; a cc subagent on Go while the
     # session is elsewhere reads cc's own source instead. 403 without a Go subscription.
-    key = os.environ.get("OPENCODE_GO_API_KEY")
+    key = os.environ.get("OPENCODE_GO_API_KEY") or cc_key("opencode-go")
     if not key and quota_source() == "opencode-go":
         key = os.environ["ANTHROPIC_AUTH_TOKEN"]
     if not key:
@@ -338,7 +356,7 @@ def hyper_quota():
 
 
 def openrouter_quota():
-    key = os.environ.get("OPENROUTER_API_KEY")
+    key = os.environ.get("OPENROUTER_API_KEY") or cc_key("openrouter")
     if not key and quota_source() == "openrouter":
         key = os.environ["ANTHROPIC_AUTH_TOKEN"]
     if not key:
@@ -399,10 +417,7 @@ def cc_orphans(session_id):
     if not isinstance(session_id, str) or not session_id:
         return []
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
-        cc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cc)
+        cc = load_cc_switch()
         return [{**item, "tokens": cc._worker_tokens(cc._worker_path({"session_id": item["session"]})) if item["session"] else ""}
                 for item in cc.orphan_jobs(session_id)]
     except Exception:  # a status line never fails over an optional row
@@ -414,11 +429,7 @@ def cc_fallback_jobs(session_id):
     if not isinstance(session_id, str) or not session_id:
         return {}
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
-        cc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cc)
-        return cc.fallback_jobs(session_id)
+        return load_cc_switch().fallback_jobs(session_id)
     except Exception:  # a status line never fails over an optional row
         return {}
 
@@ -428,11 +439,7 @@ def cc_running_jobs(session_id):
     if not isinstance(session_id, str) or not session_id:
         return 0
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("cc_switch", os.path.expanduser("~/.config/cc/cc-switch.py"))
-        cc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cc)
-        return cc.running_jobs(session_id)
+        return load_cc_switch().running_jobs(session_id)
     except Exception:  # a status line never fails over an optional row
         return 0
 
@@ -451,7 +458,8 @@ def cc_main_provider(source):
     for provider in ("commandcode-cli", "commandcode", "nvidia", "minimax", "openrouter", "opencode-zen", "gpt4free", "gemini", "ollama-cloud", "lmstudio"):
         if provider in url:
             return provider
-    return {"anthropic": "official", "openai": "openai-oauth", "opencode-go": "opencode-go"}.get(source)
+    return {"anthropic": "official", "openai": "openai-oauth", "opencode-go": "opencode-go", "hyper": "hyper"}.get(
+        source if source is not None else quota_source())
 
 
 def provider_quota(source, now):
@@ -478,6 +486,12 @@ def fetch_quota(source, now):
     saved = load_json(name)
     try:
         q = {**QUOTA_FETCHERS[source](), "at": now}
+        resets = [w.get('resets_at') for w in (q.get('rate_limits') or {}).values()
+                  if isinstance(w, dict) and isinstance(w.get('resets_at'), (int, float))
+                  and isinstance(w.get('used_percentage'), (int, float)) and w['used_percentage'] >= 99
+                  and w['resets_at'] > now]
+        if resets:
+            q['last_reset_at'] = max(resets)
     except Exception as e:
         # Keep why it failed: an expired key otherwise just makes the bars vanish.
         body = e.read().decode("utf-8", "replace") if isinstance(e, urllib.error.HTTPError) else ""
@@ -500,6 +514,16 @@ def user_settings():
             return json.load(f)
     except (OSError, ValueError):
         return {}
+
+
+def compact_limit(model_id, size):
+    """Tokens at which this session autocompacts: the cc percentage override, else the settings window."""
+    pct = os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+    if pct.isdigit():
+        return size * int(pct) // 100
+    s = user_settings()
+    window = (s.get("modelSettings", {}).get(model_id) or {}).get("autoCompactWindow") or s.get("autoCompactWindow")
+    return min(window, size) if isinstance(window, int) else None
 
 
 def settings_effort(model_id):
@@ -552,11 +576,357 @@ def quota_parts(plan, extra, limits, cached_at, now):
         if cached_at and resets and resets < now:
             pct, resets = 0, None  # window rolled over since the cache was written
         # A window replayed from the cache is the last figure Claude Code sent, not a live one.
-        seg = f"{'~' if cached_at else ''}{label} {bar(pct, 6)} {pct_text(pct)}"
+        seg = f"{'~' if cached_at else ''}{label} {bar(pct)}"
         if resets:
-            seg += f" {DIM}↻ {span(resets - now)}{RESET}"
+            seg += f" {DIM}{span(resets - now)}{RESET}"
         parts.append(seg)
     return parts
+
+
+# Providers keep prompt caches warm for minutes after a reply without publishing an expiry.
+# The status line assumes their usual window, counted from the last transcript write.
+CACHE_WINDOWS = {'openai-oauth': 300, 'commandcode': 300, 'commandcode-cli': 300,
+                 'opencode-go': 300, 'opencode-zen': 300, 'openrouter': 300}
+
+
+def cache_state(d, provider, source, model_id, now):
+    """(used%, seconds left) for a warm prompt cache, else None.
+
+    Anthropic carries Claude Code's own expiry and ttl. Other routes publish none, so their
+    countdown starts at the last transcript write and runs for that provider's usual window;
+    an expired or unknown cache shows no figure rather than a wrong one."""
+    cache = d.get('prompt_cache') or {}
+    if source == 'anthropic' and not is_third_party(model_id):
+        expires = cache.get('expires_at')
+        if cache.get('warm') and isinstance(expires, (int, float)) and expires > now:
+            ttl = 300 if cache.get('ttl') == '5m' else 3600
+            return round(100 - (expires - now) * 100 / ttl), expires - now
+        return None
+    ttl = CACHE_WINDOWS.get(provider)
+    if not ttl:
+        return None
+    try:
+        last = os.path.getmtime(d.get('transcript_path'))
+    except (OSError, TypeError):
+        return None
+    left = ttl - (now - last)
+    if left <= 0:
+        return None
+    return max(0, min(99, round(100 - left * 100 / ttl))), left
+
+
+# Anthropic list prices per MTok: (model id prefix, input, output, cache read). Longest prefix first.
+# Cache writes bill 1.25x input (5m) or 2x (1h); fast mode doubles everything.
+PRICES = [("claude-fable-5-1", 10, 50, 0.25), ("claude-mythos-5-1", 10, 50, 0.25),
+          ("claude-fable-5", 10, 50, 1.0), ("claude-mythos-5", 10, 50, 1.0),
+          ("claude-opus-5-5", 4, 20, 0.2), ("claude-opus-5", 5, 25, 0.5), ("claude-opus-4-8", 5, 25, 0.5),
+          ("claude-opus-4-7", 5, 25, 0.5), ("claude-opus-4-6", 5, 25, 0.5), ("claude-opus-4-5", 5, 25, 0.5),
+          ("claude-sonnet-5", 2, 10, 0.2), ("claude-sonnet-4", 3, 15, 0.3),
+          ("claude-haiku-5-5", 0.1, 0.5, 0.01), ("claude-haiku-4-5", 1, 5, 0.1),
+          # OpenAI list prices (models.dev, 2026-11); cache writes bill 1.25x input there too.
+          ("gpt-6.1-sol", 2, 10, 0.1), ("gpt-6.1-terra", 1, 5, 0.05), ("gpt-6-astra", 10, 50, 1),
+          ("gpt-6-sol", 2, 10, 0.2), ("gpt-6-luna", 0.1, 0.5, 0.01), ("gpt-5.6-sol", 4, 20, 0.4),
+          ("gpt-5.6-terra", 2, 12, 0.2), ("gpt-5.6-luna", 0.2, 1.2, 0.02)]
+
+
+PRICES_VERSION = 4  # bump on any price change: saved transcript totals are recomputed
+
+
+_MODELS_DEV = None
+
+
+def models_dev_price(model_id):
+    """(id, input, output, cache read) from the models.dev copy opencode keeps fresh, for a Claude or GPT
+    model newer than PRICES; None when it is not listed there either."""
+    global _MODELS_DEV
+    vendor = "anthropic" if model_id.startswith("claude-") else "openai" if model_id.startswith("gpt-") else None
+    if not vendor:
+        return None
+    if _MODELS_DEV is None:
+        _MODELS_DEV = read_json(os.path.expanduser("~/.cache/opencode/models.json"))
+    cost = (((_MODELS_DEV.get(vendor) or {}).get("models") or {}).get(model_id) or {}).get("cost") or {}
+    if not isinstance(cost.get("input"), (int, float)) or not isinstance(cost.get("output"), (int, float)):
+        return None
+    return model_id, cost["input"], cost["output"], cost.get("cache_read", cost["input"] / 10)
+
+
+def usage_cost(model_id, usage):
+    """USD for one reply at list price, or None for a model without a known price."""
+    # A route may prefix the vendor (OpenRouter's `anthropic/claude-opus-5-5`); the model is still Anthropic's.
+    model_id = str(model_id or "").rsplit("/", 1)[-1]
+    price = next((p for p in PRICES if model_id.startswith(p[0])), None) or models_dev_price(model_id)
+    if not price:
+        return None
+    _, inp, out, read = price
+    prompt = sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    if price[0] == "claude-haiku-5-5" and prompt > 100_000:
+        # Haiku 5.5's long-prompt tier: past 100K the whole request bills $0.50 / $2.50, not just the excess.
+        # The cache read keeps its 0.1x of input there (derived: the tier publishes no cache price of its own).
+        inp, out, read = 0.5, 2.5, 0.05
+    if price[0].startswith("gpt-") and prompt > 272_000:
+        # OpenAI's long-context tier: past 272K the whole request bills 2x input/cache, 1.5x output.
+        inp, out, read = inp * 2, out * 1.5, read * 2
+    split = usage.get("cache_creation") or {}
+    long = split.get("ephemeral_1h_input_tokens") or 0
+    short = (usage.get("cache_creation_input_tokens") or 0) - long
+    usd = ((usage.get("input_tokens") or 0) * inp + short * inp * 1.25 + long * inp * 2
+           + (usage.get("cache_read_input_tokens") or 0) * read + (usage.get("output_tokens") or 0) * out) / 1e6
+    return usd * 2 if usage.get("speed") == "fast" else usd
+
+
+def transcript_cost(path):
+    """{usd, sent, read, priced} for one transcript, scanned incrementally (transcripts reach 70 MB)."""
+    total = {"usd": 0.0, "sent": 0, "read": 0, "priced": False}
+    try:
+        size = os.path.getsize(path)
+    except (OSError, TypeError):
+        return total
+    name = f"cost-{zlib.crc32(os.path.abspath(path).encode()):08x}.json"
+    saved = load_json(name)
+    if saved.get("path") != path or saved.get("offset", 0) > size or saved.get("prices") != PRICES_VERSION:
+        saved = {}  # new or rewritten transcript, or totals made with older prices
+    total.update(saved.get("total") or {})
+    offset, last = saved.get("offset", 0), saved.get("last")
+    if offset == size:
+        return total
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:
+        return total
+    chunk = chunk[:chunk.rfind(b"\n") + 1]  # a line still being written waits for the next render
+    for line in chunk.splitlines():
+        if b'"usage"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+            message = entry.get("message") or {}
+        except (ValueError, AttributeError):
+            continue
+        usage = message.get("usage")
+        # one reply spans several consecutive lines carrying the same usage; sidechains live in their own files
+        if not isinstance(usage, dict) or message.get("id") == last or entry.get("isSidechain") and "subagents" not in path:
+            continue
+        last = message.get("id")
+        total["ctx"] = sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        total["sent"] += sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        total["read"] += usage.get("cache_read_input_tokens") or 0
+        usd = usage_cost(message.get("model"), usage)
+        if usd is not None:
+            total["usd"] += usd
+            total["priced"] = True
+    save_json(name, {"path": path, "offset": offset + len(chunk), "last": last, "total": total, "prices": PRICES_VERSION})
+    return total
+
+
+def subagent_costs(transcript_path):
+    """{agent name: cost totals} for this session's subagents (Claude Code's <session>/subagents/ files);
+    `ctx` is the newest transcript's last context size."""
+    found = {}
+    base = os.path.splitext(transcript_path or "")[0]
+    if not base or not os.path.isdir(base):
+        return found
+    for root, _, files in os.walk(base):
+        for file in files:
+            if not (file.startswith("agent-") and file.endswith(".jsonl")):
+                continue
+            path = os.path.join(root, file)
+            kind = read_json(path[:-len(".jsonl")] + ".meta.json").get("agentType") or "subagent"
+            name = re.sub(r"-live$", "", re.sub(r"^cc-", "", kind))  # cc-sub-live is profile "sub"
+            cost = transcript_cost(path)
+            into = found.setdefault(name, {"usd": 0.0, "sent": 0, "read": 0, "priced": False, "ctx": 0, "at": 0})
+            for key in ("usd", "sent", "read"):
+                into[key] += cost[key]
+            into["priced"] |= cost["priced"]
+            at = os.path.getmtime(path)
+            if cost.get("ctx") and at >= into["at"]:
+                into["ctx"], into["at"] = cost["ctx"], at
+    return found
+
+
+def cost_text(cost, tint=None):
+    """`$1.23 (87% cached)`, or '' when nothing was priced."""
+    if not cost or not cost.get("priced"):
+        return ""
+    usd = cost["usd"]
+    hit = f" {DIM}({cost['read'] * 100 // cost['sent']}% cached){RESET}" if cost.get("sent") else ""
+    # green at $0 through yellow to red at $100 and above, like the mode row's total
+    tint = tint or rgb(120 * (1 - min(max(usd, 0), 100) / 100))
+    return f"{tint}{f'${usd:,.2f}' if usd >= 1 else f'${usd:.3f}'}{RESET}{hit}"
+
+
+def cached_text(cost):
+    """` 49% cached` (dim), the share of sent input tokens read from cache; '' before any reply."""
+    return f" {DIM}{cost['read'] * 100 // cost['sent']}% cached{RESET}" if cost and cost.get("sent") else ""
+
+
+SPEND_KEEP = 8 * 86400  # replies older than the longest quota window plus a day are dropped
+SPEND_BUCKET = 300  # spend.json sums each source's API-price spend per 5 minutes
+WINDOW_SECONDS = {"five_hour": 18000, "seven_day": 604800}
+# Quota per plan relative to the base plan (Anthropic: Pro; OpenAI: Plus), from the published 5x/20x tiers.
+PLAN_MULTS = {"anthropic": {"Pro": 1, "Max": 5, "Ultra": 20}, "openai": {"Plus": 1, "Pro Lite": 5, "Pro": 20}}
+
+
+def reply_source(model_id):
+    """Which subscription quota a reply drew on, judged by its model id."""
+    mid = str(model_id or "")
+    return "anthropic" if mid.startswith("claude-") else "openai" if mid.startswith("gpt-") else None
+
+
+def index_spend(now):
+    """Background job: API-price spend of every Claude Code reply in the last 8 days, deduplicated by
+    message id (a resumed or forked session repeats its parent's replies), saved as 5-minute buckets."""
+    import glob
+    index = load_json("spend-index.json")
+    if index.get("v") != 2:
+        index = {}  # rows before v2 carry no token counts: rebuild once
+    files, replies = index.get("files") or {}, index.get("replies") or {}
+    root = os.path.expanduser("~/.claude/projects")
+    for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+        try:
+            size, mtime = os.path.getsize(path), os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime < now - SPEND_KEEP:
+            continue
+        offset = (files.get(path) or {}).get("offset", 0)
+        if offset > size:
+            offset = 0  # rewritten transcript
+        if offset == size:
+            continue
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            continue
+        chunk = chunk[:chunk.rfind(b"\n") + 1]
+        for line in chunk.splitlines():
+            if b'"usage"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+                message = entry.get("message") or {}
+                at = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).timestamp()
+            except (ValueError, AttributeError, KeyError, TypeError):
+                continue
+            usage, source = message.get("usage"), reply_source(message.get("model"))
+            if not isinstance(usage, dict) or not source or not message.get("id") or at < now - SPEND_KEEP:
+                continue
+            usd = usage_cost(message.get("model"), usage)
+            if usd is not None:
+                sent = sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                # the last line of a reply carries its final usage
+                replies[message["id"]] = [at, source, usd, sent, usage.get("cache_read_input_tokens") or 0]
+        files[path] = {"offset": offset + len(chunk)}
+    replies = {mid: r for mid, r in replies.items() if r[0] >= now - SPEND_KEEP}
+    buckets = {}
+    for at, source, *row in replies.values():  # bucket: [usd, sent input tokens, cache-read tokens]
+        slot = buckets.setdefault(source, {})
+        key = str(int(at // SPEND_BUCKET * SPEND_BUCKET))
+        slot[key] = [a + b for a, b in zip(slot.get(key, [0, 0, 0]), row)]
+    save_json("spend-index.json", {"v": 2, "files": {p: v for p, v in files.items() if os.path.exists(p)}, "replies": replies})
+    save_json("spend.json", {"at": now, "buckets": buckets})
+
+
+def spend_buckets(now):
+    """{source: {bucket start: [usd, sent, read]}}, refreshed by a background `--spend` run at most once a minute."""
+    saved = load_json("spend.json")
+    if now - saved.get("at", 0) >= 60 and now - saved.get("claimed", 0) >= 300:
+        save_json("spend.json", {**saved, "claimed": now})  # the first scan reads a week of transcripts
+        try:
+            subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "--spend"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError:
+            pass
+    return saved.get("buckets") or {}
+
+
+def money(usd):
+    """`$0.54`, `$62`, `$1.5k`."""
+    return f"${usd / 1000:.1f}k" if usd >= 1000 else f"${usd:.0f}" if usd >= 10 else f"${usd:.2f}"
+
+
+def weekly_value(source, limits, buckets, now):
+    """(this 7-day window's Claude Code spend at API list price, what a full window is worth, share of sent
+    input tokens read from cache), or None.
+
+    The full window is the spend divided by the window's used share.
+    shortcut: usage outside Claude Code (claude.ai chat, Codex CLI, other PCs) also fills the quota, so the
+    full value reads low when there is any; per-machine token logs would be the upgrade."""
+    lim = (limits or {}).get("seven_day")
+    if not isinstance(lim, dict) or not isinstance(lim.get("resets_at"), (int, float)) or lim["resets_at"] < now:
+        return None
+    start = lim["resets_at"] - WINDOW_SECONDS["seven_day"]
+    rows = [row if isinstance(row, list) else [row, 0, 0]  # a spend.json from before token counts
+            for at, row in (buckets.get(source) or {}).items() if float(at) + SPEND_BUCKET > start]
+    spent, sent, read = (sum(col) for col in zip(*rows)) if rows else (0, 0, 0)
+    pct = lim.get("used_percentage") or 0
+    # below 2% the integer share is mostly rounding
+    return spent, (spent * 100 / pct if spent and pct >= 2 else None), (read * 100 // sent if sent else None)
+
+
+def provider_week(source, now):
+    """(plan label, week text): Claude's and ChatGPT's `7d $1,523/$13.6k 98% cached │ Ultra` (spend / estimated
+    full-week value), else the quota the provider reports itself (`CmdC $4.05 left`, `Go 7d 23% used`)."""
+    if source in ("anthropic", "openai"):
+        if source == "anthropic":
+            account = claude_json().get("oauthAccount") or {}
+            saved = load_json("quota.json")
+            if not account.get("accountUuid") or saved.get("account") != account["accountUuid"]:
+                return "Claude", ""
+            plan = plan_name(account) or "Claude"
+        else:
+            saved, _ = provider_quota("openai", now)  # refreshes itself in the background like the status line's
+            plan = re.sub(r"^ChatGPT ", "", saved.get("plan") or "ChatGPT").replace("Prolite", "Pro Lite")
+        limits = saved.get("rate_limits") or {}
+        week = weekly_value(source, limits, spend_buckets(now), now)
+        if week is None:
+            return plan, ""
+        spent, full, cached = week
+        pct = (limits.get("seven_day") or {}).get("used_percentage")
+        week = f"${spent:,.0f}" if spent >= 100 else f"${spent:.2f}"
+        week = f"7d {week} {pct}%" if full is None else f"7d {week}/{money(full)}"
+        return plan, week + (f" {cached}% cached" if cached is not None else "") + f" │ {plan}"
+    q, _ = provider_quota(source, now)
+    label = {"commandcode": "CmdC", "opencode-go": "Go", "openrouter": "OpenRouter", "hyper": "Hyper"}.get(source, source)
+    if q.get("extra"):
+        return label, f"{label} {q['extra']}"
+    for key in ("seven_day", "month", "five_hour"):
+        pct = ((q.get("rate_limits") or {}).get(key) or {}).get("used_percentage")
+        if pct is not None:
+            return label, f"{label} {WINDOW_LABELS[key]} {pct}% used"
+    return label, ""
+
+
+def mode_row(session_id, now):
+    """`≈ $2.03 (7d $1,523/$13.5k │ Ultra) · ≈ $0.54 (CmdC $4.05 left)`: per provider
+    this session ran on (main and its cc subagents), the session's API-price cost, then the week's; '' before any reply."""
+    import glob
+    if not re.fullmatch(r"[0-9a-f-]{36}", str(session_id or "")):
+        return ""
+    paths = glob.glob(os.path.join(os.path.expanduser("~/.claude/projects"), "*", session_id + ".jsonl"))
+    if not paths:
+        return ""
+    launch = os.environ.get("CC_LAUNCH_ID")
+    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch) or {}
+    main = route.get("provider") if route.get("model") else cc_main_provider(quota_source())
+    profiles = cc_profiles(session_id)
+    spent = {}  # quota source (or bare provider) -> usd, main first
+    runs = [(main, transcript_cost(paths[0]))]
+    # a native subagent (Explore, general-purpose) runs on the main route; a cc profile on its own
+    runs += [((profiles.get(name) or {}).get("provider", main) if name in profiles else main, cost)
+             for name, cost in subagent_costs(paths[0]).items()]
+    for provider, cost in runs:
+        if cost.get("sent") or cost.get("priced"):
+            key = CC_QUOTA_SOURCES.get(provider) or ("hyper" if provider == "hyper" else provider or "?")
+            spent[key] = spent.get(key, 0.0) + cost.get("usd", 0.0)
+    parts = []
+    for key, usd in spent.items():
+        label, week = provider_week(key, now) if key in QUOTA_FETCHERS or key == "anthropic" else (key, "")
+        parts.append(f"≈ ${usd:,.2f} ({week or label})")
+    return " · ".join(parts)
 
 
 def render(d):
@@ -573,16 +943,26 @@ def render(d):
     # /model's Model tab switched this cc session (cc route): Claude Code still reports the launch model.
     launch = os.environ.get("CC_LAUNCH_ID")
     route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
+    helper_picks = (route or {}).get("helpers") or {}
+    route = route if route and route.get("model") else None
     if route:
         model = {"id": route["model"], "display_name": route["model"].rsplit("/", 1)[-1]}
         effort = route.get("effort") or effort
+    source = quota_source()
+    main_provider = route["provider"] if route else cc_main_provider(source)
+    if route:
+        source = CC_QUOTA_SOURCES.get(main_provider)
     mid = model.get("id") or ""
     # Claude keeps Anthropic's clay; other vendors get a stable hue from their name.
     hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split("/")[0].encode()) % 360
-    head = f"{rgb(hue, 0.45)}{BOLD}{model.get('display_name') or mid or '?'}{RESET}"
+    label = model.get('display_name') or mid or '?'
+    if main_provider == "official":
+        label = re.sub(r'^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?$',
+                       lambda m: m[1].title() + ' ' + m[2] + ('.' + m[3] if m[3] else ''), label)
+    head = f"{rgb(hue, 0.45)}{BOLD}{label}{RESET}"
     if effort:
         # One circle per step up the model's own reasoning ladder, cool for low, hot for its top.
-        head += " " + effort_indicator(effort, label=False, levels=effort_levels(cc_main_provider(None), mid))
+        head += " " + effort_indicator(effort, label=False, levels=effort_levels(main_provider, mid))
     if ultra:
         # Rainbow letters; the start hue drifts with the clock so each refresh shimmers.
         word, start = "ULTRACODE", time.time() * 40
@@ -593,14 +973,17 @@ def render(d):
     usage = cw.get("current_usage") or last_usage(d.get("transcript_path"))
     ctx = sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
     size = cw.get("context_window_size") or 200_000
+    limit = compact_limit(model.get("id"), size)
     if ctx:
         pct = cw.get("used_percentage")
         pct = ctx * 100 // size if pct is None else pct
-        parts.append(f"ctx {bar(pct)} {pct_text(pct)} {DIM}{k(ctx)}/{k(size)}{RESET}")
+        parts.append(f"{bar(pct)} {DIM}{k(ctx)}/{k(size)}{RESET}"
+                     + (f" {DIM}ac {k(limit)}{RESET}" if limit else "")
+                     + cached_text(transcript_cost(d.get("transcript_path"))))
 
     now = time.time()
     stored, creds = claude_json(), credentials()
-    source, extra, on_api = quota_source(), None, api_billing(d, stored, creds)
+    extra, on_api = None, source == "anthropic" and api_billing(d, stored, creds)
     if source == "anthropic":
         # Claude's quota arrives with the first reply; replay the cache until then. An API key
         # bills the session per token, so neither the payload nor a cached copy describes it.
@@ -622,33 +1005,59 @@ def render(d):
         limits, plan, extra = q.get("rate_limits") or {}, q.get("plan"), q.get("extra")
     else:
         # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on the last reply.
-        q = load_json(f"ratelimit-{cc_main_provider(None)}.json")
+        q = load_json(f"ratelimit-{main_provider}.json")
         limits, cached_at, plan = q.get("rate_limits") or {}, q.get("at"), None
     shown = quota_parts(plan, extra, limits, cached_at, now)
-    parts += shown or ([f"{YELLOW}{q['error']}{RESET}"] if source and source != "anthropic" and q.get("error") else [])
+    if source and source != 'anthropic' and q.get('error'):
+        reset = q.get('last_reset_at')
+        suffix = f" · reset in {span(reset - now)} (last known)" if isinstance(reset, (int, float)) and reset > now else ''
+        parts += shown or [f"{YELLOW}{q['error']}{suffix}{RESET}"]
+    else:
+        parts += shown
     # The session's fallback route (cc fallback); yellow while it served within the last 5 minutes.
     fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
     if fallback:
         served = load_json(f"fallback-{launch}.json").get("at") or 0
         label = f"fallback {fallback['provider']}/{fallback['model']}"
         parts.append(f"{YELLOW}↪ {label} active{RESET}" if now - served < 300 else f"{DIM}↪ {label}{RESET}")
-    # The Model tab's provider, beside the model it put in the head.
-    if route:
-        parts.append(f"{CYAN}via {route['provider']}{RESET}")
+    # Provider labels are omitted; the picker owns route selection.
 
     # Configured targets are visible even on official Claude and even on the same provider.
     # Live worker rows separately identify native workers and the real cc relay/worker route.
     sub_lines = []
+    if launch:
+        helper_rows = []
+        for kind in ("auto", "tools"):
+            pick = helper_picks.get(kind)
+            default = (load_json(os.path.expanduser("~/.config/cc/helper-defaults.json")).get(kind) or {}).get(main_provider)
+            target = pick or default
+            provider = target.get("provider", main_provider) if target else main_provider
+            helper_model = target.get("model") if target else model.get("id") or "provider default"
+            helper_effort = target.get("effort") if target else None
+            if kind == "tools" and not helper_effort:
+                levels = effort_levels(provider, helper_model)
+                helper_effort = "low" if provider == "official" or levels is not None and "low" in levels else effort
+            if kind == "auto" and not target and provider == "openai-oauth":
+                levels = effort_levels(provider, "gpt-6-luna")
+                if levels and "low" in levels:
+                    helper_model, helper_effort = "gpt-6-luna", "low"
+            if provider == "official":
+                helper_model = (re.sub(r'^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?$',
+                    lambda m: m[1].title() + ' ' + m[2] + ('.' + m[3] if m[3] else ''), helper_model)
+                    if target or kind == "tools" else "Claude helper default")
+            dots = " " + effort_indicator(helper_effort, label=False, levels=effort_levels(provider, helper_model)) if helper_effort else ""
+            helper_rows.append(f"{kind.title()}: {helper_model}{dots}{'' if pick else ' · inherit'}")
+        sub_lines.append(f"{DIM}↳{RESET} " + SEP.join(helper_rows))
     child = os.environ.get("CC_AGENT_CHILD") == "1"
     configured = not child and cc_routing_enabled()
     if configured:
-        main_provider = cc_main_provider(source)
         # a continued session keeps writing the transcript its workers name as their parent, under a new session id
         moved = {**cc_fallback_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]),
                  **cc_fallback_jobs(d.get("session_id"))}
         # shortcut: jobs don't record their agent name, so any running worker lights every configured row
         active = bool(cc_running_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0])
                       or cc_running_jobs(d.get("session_id")))
+        sub_costs = subagent_costs(d.get("transcript_path"))
         for name, profile in cc_profiles(d.get("session_id")).items():
             # a worker that cc reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
@@ -660,14 +1069,22 @@ def render(d):
                       'commandcode': 'CmdC', 'commandcode-cli': 'CmdC CLI', 'minimax': 'MiniMax',
                       'opencode-go': 'Go', 'opencode-zen': 'Zen', 'openrouter': 'OpenRouter', 'gpt4free': 'g4f',
                       'gemini': 'Gemini', 'ollama-cloud': 'Ollama', 'lmstudio': 'LM Studio'}
-            route = 'same provider' if provider == main_provider else labels.get(provider, provider)
+            route = '' if provider == main_provider else ' · ' + labels.get(provider, provider)  # same provider: no label
             effort = profile.get('effort') or default_effort(provider, profile.get('model'))
             dots = (effort_indicator(effort, dim=not active, label=False, levels=effort_levels(provider, mid))
                     if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
             head = f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}"
-            seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots} · {route}"
+            own = profile.get('autocompact')
+            # A profile without its own limit inherits the main session's (cc-switch parent_compact).
+            ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own
+                  else f" {DIM}ac {k(limit)}{RESET}" if limit else '')
+            used = sub_costs.get(name) or {}
+            seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots}{'' if used.get('ctx') else ac}{route}"
                    + (f" {YELLOW}↪ fallback active{RESET}" if name in moved else "")]
+            if used.get("ctx"):
+                # shortcut: the window is the main session's; a subagent model with another window misreads it
+                seg.append(f"{DIM}{k(used['ctx'])}/{k(size)}{RESET}{ac}{cached_text(used)}")
             sub_source = CC_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:
                 if sub_source == 'anthropic':
@@ -708,28 +1125,23 @@ def render(d):
         tokens = f" · {DIM}{item['tokens']}{RESET}" if item.get("tokens") else ""
         sub_lines.append(f"{DIM}↳ worker {item['job'][:8]}:{RESET} {state} · {item.get('task') or ''}{tokens}")
 
+    # The session's API-price total sits on Claude Code's mode row (subagent-picker pins `--cost`);
+    # here only an API-key session without a transcript yet shows Claude Code's own figure.
     cost = d.get("cost") or {}
-    if is_third_party(model.get("id")):
-        pass  # Claude Code prices unknown models at Opus rates, so its cost is fiction here.
-    elif on_api or ("rate_limits" not in d and not subscription_login(creds) and cost.get("total_cost_usd")):
-        # Session spend on an API key, at list price; cents until it passes a dollar. A keyed
-        # session shows it from the first render, so an untouched session reads $0.000.
-        spent = cost.get("total_cost_usd") or 0
-        money = f"${spent:,.2f}" if spent >= 1 else f"${spent:.3f}"
-        parts.append(f"api {YELLOW}{money}{RESET}")
+    if is_third_party(model.get("id")) or d.get("transcript_path"):
+        pass  # Claude Code prices unknown models at Opus rates, so its cost is fiction there.
+    elif source == "anthropic" and (on_api or ("rate_limits" not in d and not subscription_login(creds) and cost.get("total_cost_usd"))):
+        spent = cost.get("total_cost_usd") or 0  # an untouched keyed session reads $0.000
+        parts.append(f"api {YELLOW}{f'${spent:,.2f}' if spent >= 1 else f'${spent:.3f}'}{RESET}")
+    # Subagent spend shows only in the mode row's `api … (main … · sub …)` total, not per subagent row.
 
-    cache = d.get("prompt_cache") or {}
-    # Warm: reply within the countdown to reuse cached context (fast, cheap).
-    # Cold: next reply re-processes the whole context. settings.json refreshInterval keeps it ticking.
-    expires = cache.get("expires_at")
-    if is_third_party(mid):
-        pass  # no cache countdown from other providers; keep the line short like Claude's
-    elif cache.get("warm") and isinstance(expires, (int, float)) and expires > now:
-        left = expires - now
-        ttl = 300 if cache.get("ttl") == "5m" else 3600
-        used = round(100 - left * 100 / ttl)
+    state = cache_state(d, main_provider, source, model.get("id") or "", now)
+    # Warm: reply within the countdown to reuse cached context (fast, cheap). Cold: next reply
+    # re-processes the whole context. settings.json refreshInterval keeps the countdown ticking.
+    if state:
+        used, left = state
         parts.append(f"cache {color(used)}{BOLD if used >= 90 else ''}{span(left)}{RESET}")
-    elif cache.get("warm") is not None:
+    elif source == "anthropic" and not is_third_party(model.get("id")) and (d.get("prompt_cache") or {}).get("warm") is not None:
         parts.append(f"cache {color(100)}off{RESET}")
     return "\n".join([SEP.join(parts), *sub_lines])
 
@@ -737,6 +1149,13 @@ def render(d):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--quota"]:
         fetch_quota(sys.argv[2], time.time())
+        sys.exit()
+    if sys.argv[1:2] == ["--spend"]:
+        index_spend(time.time())
+        sys.exit()
+    if sys.argv[1:2] == ["--cost"]:
+        sys.stdout.reconfigure(encoding="utf-8")
+        print(mode_row(sys.argv[2] if len(sys.argv) > 2 else "", time.time()))
         sys.exit()
     sys.stdout.reconfigure(encoding="utf-8")
     try:

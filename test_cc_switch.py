@@ -186,6 +186,7 @@ function claude {
         autoModeServer = $env:CLAUDE_CODE_AUTO_MODE_SERVER
         gateway = $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
         context = $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS
+        firstParty = $env:_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL
         launchArgs = @($args)
     } | ConvertTo-Json -Compress
 }
@@ -198,6 +199,7 @@ function codex { $script:codexLaunched = $true; claude @args }
         data = json.loads(result.stdout.splitlines()[-1])
         assert data['opusCapabilities'] == 'thinking,adaptive_thinking,interleaved_thinking,effort,xhigh_effort,max_effort' if provider == 'commandcode' else not data['opusCapabilities']
         assert data['headers'] == 'x-cc-launch: ' + data['launch'] and len(data['launch']) == 32 if provider in (*cc.FALLBACK_ROUTES, 'official') else not data['headers'], 'Adapter routes (and official, passed through) name their launch for /fallback and /model'
+        assert data['firstParty'] == ('1' if provider == 'official' else None), 'Only official runs as first party; other routes clear it'
         assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else not data['toolSearch']
         assert data['autoModeServer'] == '0' if provider != 'official' else not data['autoModeServer']
         assert data['gateway'] == '1' if provider not in ('official', 'commandcode') else not data['gateway'], 'The /model picker sees the gateway list'
@@ -250,6 +252,11 @@ function codex { $script:codexLaunched = $true; claude @args }
         assert cc.load_state()['effort'] == 'xhigh'
         cc.apply('official')
         assert "Set-Item 'Env:CLAUDE_CODE_ALWAYS_ENABLE_EFFORT'" not in Path(cc.APPLY_FILE).read_text()
+assert cc.parse_pct('100k') == '100k' and cc.parse_pct('80%') == 80 and cc.parse_pct('inherit') == ''
+assert cc.compact_tokens('1.5m') == 1_500_000 and cc.compact_text('100k') == '100k' and cc.compact_text(None) == 'inherit'
+_env, _args = {'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE': '90'}, []
+cc.compact_launch(_env, _args, '100k')
+assert _args == ['--settings', '{"autoCompactWindow": 100000}'] and _env == {'CC_AUTOCOMPACT': '100k'}, 'A token window replaces an inherited percentage'
 print('PASS: context limits and reset, OAuth metadata, credential isolation, model filtering, offline fallback, PowerShell routing/quoting/cleanup, OAuth and NVIDIA Claude launch, official reset, invalid input, NoRun.')
 
 with tempfile.TemporaryDirectory(prefix='cc-entry-check-') as directory:
@@ -268,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
     parent = {'ANTHROPIC_BASE_URL': 'https://parent', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE': '90', 'CLAUDECODE': '', 'KEEP': 'yes'}
     for agent, autocompact, command in [
             ('cheap', '60', ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model', '--effort', 'low', '--permission-mode', 'auto']),
-            ('plain', None, ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES])]:
+            ('plain', '90', ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES])]:
         with patch.dict(os.environ, parent), patch.object(cc.subprocess, 'run') as launch, patch.object(cc, 'get_models', return_value=[{'id': 'test/model', 'context': 131072}]), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy'):
             launch.return_value.returncode = 3
             try:
@@ -278,7 +285,7 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
             sent = launch.call_args
         assert sent.args[0] == command and sent.kwargs['input'] == 'täsk'.encode('utf-8')
         child = sent.kwargs['env']
-        assert child.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') == autocompact, 'The subagent threshold replaces the parent one'
+        assert child.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') == autocompact, 'A subagent threshold replaces the parent one; none inherits it'
         assert 'CLAUDECODE' not in child and child['KEEP'] == 'yes'
         assert child.get('ANTHROPIC_BASE_URL') == (f'http://127.0.0.1:{cc.ADAPTER_PORT}/nvidia' if agent == 'cheap' else None)
         assert agent == 'plain' or child['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] == '131072'
@@ -321,7 +328,7 @@ with tempfile.TemporaryDirectory(prefix='cc-agents-check-') as directory:
     # A model that publishes no reasoning efforts is run without --effort (MiMo rejects it).
     for efforts, expected in (([], ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model']),
                               (['low'], ['claude', '-p', '--strict-mcp-config', '--mcp-config', cc.worker_mcp(), '--disallowedTools', cc.WORKER_UNUSED_TOOLS, '--append-system-prompt', cc.WORKER_RULES, '--model', 'test/model', '--effort', 'low'])):
-        with patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'model_efforts', return_value=efforts), \
+        with patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'model_efforts', return_value=efforts), patch.object(cc, 'parent_compact', return_value=None), \
              patch.object(cc.subprocess, 'run') as launch, contextlib.redirect_stderr(io.StringIO()):
             launch.return_value.returncode = 0
             with patch.object(cc.sys, 'argv', ['cc', 'agent', 'cheap', 'fix']):
@@ -385,3 +392,223 @@ with patch.object(cc.catalog, '_models_dev', return_value=dev), patch.object(cc,
     assert direct['ANTHROPIC_BASE_URL'] == 'https://opencode.ai/zen/go' and 'x-opencode-session' in direct['ANTHROPIC_CUSTOM_HEADERS']
     assert cc.go_messages('qwen3.9-unlisted') and not cc.go_messages('glm-9-unlisted')
 print('opencode-go protocol split ok')
+
+# The /model picker's presets: curated helper defaults first, the model this account picked last
+# next, then the provider's first mirrored model. Each row carries provider, model and effort.
+with tempfile.TemporaryDirectory() as tmp:
+    Path(tmp, 'helper-defaults.json').write_text(json.dumps({'auto': {
+        'openai-oauth': {'model': 'gpt-6.1-terra', 'effort': 'low'},
+        'nvidia': {'model': 'deepseek-ai/deepseek-v4.1-flash', 'effort': 'high'}}}), encoding='utf-8')
+    with patch.object(cc, 'CFG_DIR', tmp), \
+            patch.object(cc, 'load_state', return_value={'recent': {'official': ['claude-opus-5-5'], 'minimax': ['MiniMax-M2.7']}}), \
+            patch.object(cc, 'route_providers', return_value=['openai-oauth', 'nvidia', 'minimax', 'gemini']), \
+            patch.object(cc, 'on_adapter', return_value=False):
+        rows = {r['provider']: r for r in cc.preset_targets()}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cc.presets_command([])
+    assert rows['official'] == {'provider': 'official', 'model': 'claude-opus-5-5', 'effort': None}
+    assert rows['openai-oauth'] == {'provider': 'openai-oauth', 'model': 'gpt-6.1-terra', 'effort': 'low'}
+    assert rows['nvidia']['effort'] == 'high'
+    assert rows['minimax'] == {'provider': 'minimax', 'model': 'MiniMax-M2.7', 'effort': None}
+    assert 'gemini' not in rows  # no default, no recent pick, no mirror to offer
+    assert all(len(line.split('\t')) == 5 for line in out.getvalue().splitlines())
+    assert out.getvalue().splitlines()[0].startswith('official\tclaude-opus-5-5\t')
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            cc.presets_command(['extra'])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError('presets rejects extra words')
+print('presets ok')
+
+# A preset the person edits wins over the curated default, and resets back to it.
+with tempfile.TemporaryDirectory() as tmp:
+    Path(tmp, 'helper-defaults.json').write_text(json.dumps({'auto': {
+        'nvidia': {'model': 'deepseek-ai/old', 'effort': 'low'}}}), encoding='utf-8')
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc, 'load_state', return_value={'recent': {}}), \
+            patch.object(cc, 'route_providers', return_value=['nvidia']), \
+            patch.object(cc, 'on_adapter', return_value=True), contextlib.redirect_stdout(io.StringIO()):
+        cc.presets_command(['set', 'nvidia', 'deepseek-ai/new', 'high'])
+        assert json.loads(Path(tmp, 'presets.json').read_text(encoding='utf-8'))['nvidia'] == {
+            'model': 'deepseek-ai/new', 'effort': 'high'}
+        rows = cc.preset_targets()
+        assert rows == [{'provider': 'nvidia', 'model': 'deepseek-ai/new', 'effort': 'high', 'custom': True}]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cc.presets_command([])
+        assert out.getvalue().splitlines()[0].split('\t')[4].strip() == '1'
+        # invalid provider, model or effort are refused and write nothing
+        for args in (['set', 'nope', 'm'], ['set', 'nvidia', 'bad model'], ['set', 'nvidia', 'm', 'ultra']):
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    cc.presets_command(args)
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(args)
+        assert json.loads(Path(tmp, 'presets.json').read_text(encoding='utf-8'))['nvidia']['model'] == 'deepseek-ai/new'
+        cc.presets_command(['reset', 'nvidia'])
+        assert 'nvidia' not in json.loads(Path(tmp, 'presets.json').read_text(encoding='utf-8'))
+        assert cc.preset_targets() == [{'provider': 'nvidia', 'model': 'deepseek-ai/old', 'effort': 'low'}]
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cc.presets_command(['reset', 'nvidia'])
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('reset without a custom preset accepted')
+print('preset edits ok')
+
+# Bundles keep all five categories, preserve legacy main presets, and validate before writing.
+with tempfile.TemporaryDirectory() as tmp:
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc, 'load_state', return_value={}), \
+            patch.object(cc, 'route_providers', return_value=['nvidia']), \
+            patch.object(cc, 'on_adapter', return_value=True):
+        cc.presets_command(['set', 'nvidia', 'deepseek-ai/main', 'high'])
+        bundle = cc.preset_bundle(cc.preset_targets()[0])
+        assert set(bundle) == {'model', 'subagent', 'fallback', 'auto', 'tools'}
+        assert bundle['model']['model'] == 'deepseek-ai/main'
+        assert bundle['subagent'] == bundle['model']
+        assert bundle['fallback'] == {'provider': 'off'}
+        bundle['auto'] = {'provider': 'nvidia', 'model': 'helper-model', 'effort': 'low'}
+        cc.presets_command(['set-bundle', 'nvidia', json.dumps(bundle)])
+        assert cc.preset_bundle(cc.preset_targets()[0]) == bundle
+        before = Path(tmp, 'presets.json').read_bytes()
+        invalid = {**bundle, 'tools': {'provider': 'nope', 'model': 'm'}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cc.presets_command(['set-bundle', 'nvidia', json.dumps(invalid)])
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('invalid bundle accepted')
+        assert Path(tmp, 'presets.json').read_bytes() == before
+        cc.presets_command(['set', 'nvidia', 'deepseek-ai/new'])
+        assert cc.preset_bundle(cc.preset_targets()[0])['auto'] == bundle['auto']
+print('preset bundles ok')
+
+with tempfile.TemporaryDirectory() as tmp:
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc, 'model_efforts', return_value=['low', 'high']), \
+            patch.object(cc, 'route_providers', return_value=['nvidia']), contextlib.redirect_stdout(io.StringIO()):
+        bundle = {key: {'provider': 'nvidia', 'model': 'model', 'effort': 'low'} for key in cc.PRESET_CATEGORIES}
+        for key, target in [('fallback', {'provider': 'official', 'model': 'model'}),
+                            ('auto', {'provider': 'official', 'model': 'model'}),
+                            ('tools', {'provider': 'nvidia', 'model': 'model', 'effort': 'max'})]:
+            invalid = {**bundle, key: target}
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    cc.presets_command(['set-bundle', 'nvidia', json.dumps(invalid)])
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(f'incompatible {key} accepted')
+        assert not Path(tmp, 'presets.json').exists()
+    with patch.dict(os.environ, {'CC_LAUNCH_ID': 'test-official', 'CC_MAIN_PROVIDER': 'official'}), \
+            patch.object(cc, 'on_adapter', return_value=True), patch.object(cc, 'set_fallback') as clear, \
+            patch.object(cc, 'load_fallbacks', return_value={}), contextlib.redirect_stdout(io.StringIO()):
+        cc.fallback_command(['off'])
+        clear.assert_called_once_with('test-official')
+print('preset compatibility ok')
+
+# Concurrent launches recheck under a startup lock, rather than killing each other's listener.
+with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'CFG_DIR', tmp):
+    import threading
+    entered, released, order = threading.Event(), threading.Event(), []
+    def first():
+        with cc.adapter_start_lock():
+            order.append('first')
+            entered.set()
+            released.wait(3)
+    def second():
+        entered.wait(3)
+        with cc.adapter_start_lock():
+            order.append('second')
+    a, b = threading.Thread(target=first), threading.Thread(target=second)
+    a.start()
+    b.start()
+    assert entered.wait(3)
+    assert order == ['first']
+    released.set()
+    a.join(4)
+    b.join(4)
+    assert order == ['first', 'second'] and not a.is_alive() and not b.is_alive()
+print('adapter startup serialization ok')
+
+# cc facts carries the launch menu's facts for the picker's sorts.
+with patch.object(cc, 'ensure_key'), patch.object(cc, 'get_models', return_value=[
+        {'id': 'priced', 'context': 1000}, {'id': 'bare'}]), \
+        patch.object(cc.catalog, '_models_dev', return_value={}), \
+        patch.object(cc.catalog, '_artificial_analysis', return_value=True), \
+        patch.object(cc.catalog, '_model_facts', side_effect=lambda _p, mid: {
+            'priced': {'limit': {'context': 1000}, 'cost': {'input': 1, 'output': 2}, 'intelligence': 50},
+            'bare': {}}[mid]), contextlib.redirect_stdout(io.StringIO()):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cc.model_facts_command(['nvidia'])
+facts = [json.loads(line) for line in out.getvalue().splitlines()]
+assert facts[0]['id'] == 'priced' and facts[0]['ctx'] == 1000 and facts[0]['in'] == 1 and facts[0]['out'] == 2
+assert facts[0]['aa'] == 50 and facts[0]['missing'] == 0 and facts[0]['score'] > 0
+assert facts[1] == {'id': 'bare', 'ctx': None, 'in': None, 'out': None, 'aa': None, 'score': 0.0, 'missing': 3}
+print('facts ok')
+
+# A child Popen already waited on is dead, even on Windows, where the handle can outlive it.
+finished = subprocess.Popen([cc.sys.executable, '-c', 'pass'],
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+finished.wait()
+assert not cc.process_alive(finished.pid), 'a reaped child still reads as alive'
+
+# cc gui opens the Tkinter picker detached, on the requested tab, and refuses an unknown tab.
+# It reports success only once the window registers itself, so a picker that cannot start falls
+# back to the in-terminal grid instead of pretending it opened.
+with tempfile.TemporaryDirectory() as tmp:
+    Path(tmp, 'cc-gui.py').write_text('', encoding='utf-8')
+    lock = str(Path(tmp, 'gui.pid'))
+    Path(lock).write_text(str(os.getpid()), encoding='utf-8')
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc.subprocess, 'Popen') as popen, \
+            patch.object(cc, 'gui_lock_path', return_value=lock), \
+            patch.object(cc, 'process_alive', return_value=True), \
+            contextlib.redirect_stdout(io.StringIO()):
+        popen.return_value.poll.return_value = None
+        cc.gui_command([])
+        args = popen.call_args.args[0]
+        assert args[1:3] == ['-B', os.path.join(tmp, 'cc-gui.py')], args
+        assert args[-2:] == ['--tab', 'model'], args
+        assert popen.call_args.kwargs['close_fds'] is True
+        cc.gui_command(['fallbacks'])
+        assert popen.call_args.args[0][-2:] == ['--tab', 'fallback']
+        assert popen.call_count == 2
+    # A picker that dies at once, or never registers, is a failure the mod can fall back on.
+    Path(tmp, 'gui-error.log').write_text('TclError: stale failure from an old run', encoding='utf-8')
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc.subprocess, 'Popen') as popen, \
+            patch.object(cc, 'gui_lock_path', return_value=str(Path(tmp, 'no-such.pid'))), \
+            contextlib.redirect_stderr(io.StringIO()) as stderr:
+        popen.return_value.poll.return_value = 1
+        popen.return_value.returncode = 1
+        try:
+            cc.gui_command([])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError('a picker that exited was reported as opened')
+    assert 'stale failure' not in stderr.getvalue() and 'exited 1' in stderr.getvalue(), stderr.getvalue()
+    with patch.object(cc, 'CFG_DIR', tmp), patch.object(cc.subprocess, 'Popen') as popen:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cc.gui_command(['nope'])
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('unknown gui tab accepted')
+        assert not popen.called
+    with patch.object(cc, 'CFG_DIR', tempfile.mkdtemp()), patch.object(cc.subprocess, 'Popen') as popen:
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cc.gui_command([])
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('missing picker script accepted')
+        assert not popen.called
+print('gui launcher ok')

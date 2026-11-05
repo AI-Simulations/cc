@@ -8,7 +8,8 @@ import shutil
 ROOT = Path(__file__).resolve().parent
 FILES = ('cc-switch.py', 'cc-switch.ps1', 'cc-anthropic-proxy.py',
          'test_cc_switch.py', 'test_cc_resume.py', 'test_cc_proxy.py',
-         'statusline.py', 'test_statusline.py', 'critic_mock_check.py', 'install-resume.py', 'README.md')
+         'statusline.py', 'test_statusline.py', 'critic_mock_check.py', 'install-resume.py', 'README.md',
+         'cc-gui.py', 'test_cc_gui.py', 'cc.ico')
 # Claude Code slash commands shipped with cc.
 COMMAND_FILES = ('fallback.md',)
 FUNCTION = b'''\r\n# Claude Code custom-provider launcher.\r\nfunction cc {\r\n    & "$env:USERPROFILE\\.config\\cc\\cc-switch.ps1" @args\r\n}\r\n'''

@@ -89,6 +89,15 @@ provider menu opens. `-r` and `-c` also work. Native flags follow the provider a
 optional model and are forwarded literally, including session names with spaces.
 `-NoRun` configures only, so it cannot be combined with launch flags.
 
+Official launches (`cc official`, plain `claude`) pass through the local adapter, which hands
+them to Anthropic untouched until `/model` or a fallback reroutes the launch. They also set
+`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, so Claude Code keeps its first-party behaviour
+behind the adapter, such as the cheap Haiku-written background-agent summaries. On a reroute
+to a third-party Anthropic-format provider the adapter drops what only Anthropic accepts (the
+`diagnostics` field and first-party betas). `CC_OFFICIAL_DIRECT=1` connects directly instead.
+In a direct session, `/model` switches Claude models in place; another provider copies a
+`cc … --resume <session-id>` command that continues this conversation there after you exit.
+
 The switch is local to this terminal. After `-NoRun`, launch `claude` in the same
 terminal. A new terminal does not inherit the selection. The ordinary `claude`
 command retains its normal behavior until a provider is selected in that shell.
@@ -124,7 +133,10 @@ as `Bash`/`PowerShell`, `Read`, `Write`, `Edit`, `Grep`, `Glob`, `WebFetch` and
 `WebSearch`, and names any other tool in the reply instead of failing. Every custom route
 sets `API_TIMEOUT_MS=1800000`, the adapter's own 30-minute limit for one CLI run. Images are dropped. Each request
 also carries cmdc's own system prompt (about 20k input tokens) against the plan's
-usage limits. The CLI's error text, such as a weekly limit notice, reaches Claude.
+usage limits. A turn that answers with only punctuation (a lone `.`) is retried once
+before Claude Code sees it: the degenerate reply is transient, so the retry keeps the
+request moving instead of ending it. The CLI's error text, such as a weekly limit
+notice, also reaches Claude.
 Any Anthropic-format client, not only Claude Code, can use the route: set its base
 URL to the route and any nonempty API key.
 
@@ -222,19 +234,53 @@ A key out of quota can also rotate: put spare keys, comma-separated, in `<KEY>_A
 
 ### In-session model route
 
-`/model` (no arguments) opens the subagent-picker mod's picker, which holds the keyboard as the
-built-in one does: Main model, Subagent and Fallbacks tabs, each with provider, model and effort
-columns (Tab switches tabs, ←/→ columns, ↑/↓ rows, Enter sets, Esc closes). On a cc adapter
-session the Main model tab switches provider and model live (`cc route <provider> <model> [effort]`
-from the shell); on Claude Code's own model it switches Claude models through `/model` and
-`/effort`, and another provider copies its `cc` relaunch command. `/fallback` opens it on the
-Fallbacks tab. `/model <name>` with arguments is Claude Code's own. The adapter applies it per launch id, so other sessions
-and workers keep their own route. Only adapter routes are listed (`python cc-switch.py route
-routes`); a session that connects directly (official, Command Code, MiniMax, OpenCode,
-OpenRouter) must be relaunched to change provider.
-The model picker's default sort is the aggregate score, and rows missing a displayed fact
-(`ctx ?`, `$?`, `AA ?`) are always listed last. If a provider has no key, `cc` asks for one
-once and stores it in `~/.config/cc/keys.json` (gitignored, user-only permissions).
+`/model` (no arguments) opens the picker as its own dark window (`cc gui`, Tkinter, no
+dependencies): Model, Subagent, Fallbacks, Auto, Tools and Presets tabs, each with a search field.
+A session with no cc launch (plain `claude`) keeps the in-terminal grid instead: only that grid can
+run Claude Code's own `/model` and `/effort`, which its Model tab switches, and the window would
+refuse its Apply.
+Model lists carry cc's facts in separate Context, Price, AA and Score columns and a Sort menu:
+Intelligence (the default), Score, Context, Price, Family, or the provider's own Listed order,
+with rows missing a fact last — the launch model menu's rules. The list stripes alternate rows and
+highlights the row and tab under the pointer without changing the keyboard selection. Each tab remembers its target, provider, one pick per
+provider, sort, search and effort per session, and each provider's model list is kept for the rest
+of the window, so reopening or switching back lands where you left it without listing again.
+Nothing is applied until Enter: the remembered view never changes a route. The Subagent and Fallbacks tabs carry the
+Target picker because each profile has its own route: it chooses the subagent profile (or `session`
+for this conversation's own fallback) the tab's provider, model, effort and compact columns edit.
+Apply moves the green Current mark in place, without reloading the list or losing the selection.
+The window applies through the same cc commands as the
+terminal (`cc route`, `cc fallback`, `cc agents set`, `cc helper`), so the session route, profiles
+and status line stay one source of truth. On a cc adapter session the Model tab switches provider
+and model live (`cc route <provider> <model> [effort]` from the shell); a session on Claude Code's
+own model switches Claude models through `/model` and `/effort`, and another provider copies its
+`cc` relaunch command. `/fallback` opens the window on the Fallbacks tab. `/model <name>` with
+arguments is Claude Code's own. The adapter applies it per launch id, so other sessions and workers
+keep their own route. Only adapter routes are listed (`python cc-switch.py route routes`); a
+session that connects directly (official with `CC_OFFICIAL_DIRECT=1`, Command Code, MiniMax, OpenCode, OpenRouter)
+must be relaunched to change provider; `/model` copies that relaunch with `--resume`.
+
+The Presets tab is one Enter away from each provider's default: the curated auto-helper default,
+else the model last picked there, else the first of its list (`python cc-switch.py presets`).
+Each GUI preset includes Model, Subagent, Fallbacks, Auto and Tools settings. Double-click a row
+or press Edit to change all five provider/model/effort settings in one editor. Each model dropdown
+shows an animated spinner while its list loads; Save writes
+`~/.config/cc/presets.json` without changing active routes. Use applies the complete preset to this
+session and every configured subagent profile. Fallback defaults to off; Auto uses the provider's
+curated helper default, and Tools uses its helper default or the main model at low effort when
+supported. Restore default removes the override. Existing main-model presets remain compatible;
+`cc presets set <provider> <model> [effort]` edits only the main setting, `cc presets reset <provider>`
+restores the full default, and `cc presets bundles` lists all five settings as JSON. `cc gui [tab]` opens the window directly, one per session, raising the open one instead of
+stacking another.
+
+Brand marks are local SVGs in `~/.config/cc/logos` (Simple Icons, CC0; each mark remains its
+owner's trademark): a provider or model family without one shows a colored dot. Drop another
+24×24 SVG there under the provider's key to use it. If no window can open (no Tk, a missing file),
+the subagent-picker mod falls back to its in-terminal grid: Tab switches tabs, ←/→ columns, ↑/↓
+rows, Space picks, Enter sets, Esc closes, `s` toggles the family order and `f` moves the ring to
+the find field. The launch model menu's default sort is the aggregate score, and rows missing a
+displayed fact (`ctx ?`, `$?`, `AA ?`) are always listed last. If a provider has no key, `cc` asks
+for one once and stores it in `~/.config/cc/keys.json` (gitignored, user-only permissions).
 
 When OpenCode rejects the Go/Zen key stored in opencode's `auth.json` (for example
 `api_key_expired`), `cc` creates a new personal API key in the OpenCode console and stores
@@ -247,6 +293,25 @@ Keys from `OPENCODE_GO_API_KEY` or `keys.json` are never replaced.
 OpenCode Go answers Anthropic `/messages` only for some models (MiniMax, Qwen, Claude;
 per models.dev). `cc opencode-go` sends the rest (MiMo, GLM, Kimi, DeepSeek, ...) through
 the local adapter's `/chat/completions`, like Command Code's non-Claude models.
+
+## Usage-limit resets
+
+The Messages adapter distinguishes exhausted provider usage from temporary request throttling.
+When a provider returns a real reset time (or the status line has a fresh, exhausted account
+window), it returns Claude Code's native usage-limit headers. Interactive sessions can then use
+`/rate-limit-options` and Claude's existing automatic-continue preference; no extra restart loop
+or invented reset schedule is installed. Missing reset metadata is reported explicitly.
+Payment/authentication errors and transient 429s do not arm a quota-reset timer.
+
+The local OAuth bridge needs `python patch-oauth-quota.py` after reinstalling its patched npm
+build; this preserves upstream quota status/reset metadata before streaming starts. The script
+keeps the other local OAuth patches. Restart the OAuth bridge and adapter after deployment,
+only between requests: restarting a shared listener interrupts active calls. Adapter launchers
+serialize replacement so simultaneous sessions do not race to restart the same process.
+
+Codex controls its server-side cache lifetime. No exact one-hour OAuth retention option is
+documented; the status line's five-minute countdown is an estimate, not a TTL sent to OpenAI.
+Do not change that display to claim a guaranteed hour. Session cache keys remain stable.
 
 ## Subagents on other providers
 
@@ -347,7 +412,10 @@ circles in the hottest colour while `high` on a full ladder stays at three fifth
 no adjustable effort renders `default`. The worker row reuses the main model's mapping at lower
 brightness, for example `↳ sub: 6.1 sol ●●●● · OAuth`. A failed quota fetch names its cause
 (`key expired`, `auth failed`) instead of dropping the bars; adapter routes show the rate-limit
-windows the adapter last saw. Agent rows show only the model doing the work (the recorded or
+windows the adapter last saw. A prompt-cache countdown follows Anthropic's own expiry. OpenAI,
+Command Code, OpenCode and OpenRouter publish no expiry, so their countdown assumes the provider's
+usual five-minute warm window from the last transcript write and disappears once it is cold,
+instead of claiming the cache is off. Agent rows show only the model doing the work (the recorded or
 configured worker route, never the native relay model), the worker's token use and the task;
 running rows are drawn bright. Existing native rows
 keep their actual native model; changing a profile does not relabel those agents. Worker
@@ -363,11 +431,13 @@ python -B test_cc_proxy.py
 python -B test_cc_relay.py
 python -B test_statusline.py
 python -B test_cc_session.py
+python -B test_cc_gui.py
 python -B critic_mock_check.py
 ```
 
-Run these commands from the checkout. The first six checks run offline with
-fake credentials and fake Claude and Codex commands. The optional last check
+Run these commands from the checkout. The first six checks run offline with fake credentials and
+fake Claude and Codex commands; the seventh, `test_cc_gui.py`, needs Tk and uses hidden widgets
+with stubbed cc commands, so it changes no real settings. The optional last check
 requires Claude Code at `~/.local/bin/claude.exe` and uses local mock providers.
 It tests credential isolation, model filtering, environment switching, shell
 quoting, cleanup, invalid input, returning to official Claude, OAuth/NVIDIA Claude

@@ -1,6 +1,6 @@
 {
  "name": "subagent-picker",
  "version": "0.1.0",
- "description": "/model and /fallback with no arguments ask in Claude Code's question dialog (Main model, Subagent and Fallback tabs; then provider, model and effort). Main model and Subagent tabs also set the auto-compact threshold",
+ "description": "/model and /fallback with no arguments open the cc picker window (Model, Subagent, Fallbacks, Auto, Tools and Presets tabs, searchable, dark by default) and fall back to an in-terminal grid when a window cannot open. Main model and Subagent tabs also set the auto-compact threshold",
  "types": "./types/index.d.ts"
 }

@@ -14,3 +14,6 @@ fallbacks.json
 session-agents.json
 routes.json
 keys.json
+
+.claude/
+*.bak-*
