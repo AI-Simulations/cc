@@ -1,9 +1,11 @@
-"""Install cc's small OAuth error-metadata patch without replacing the local OAuth build."""
+"""Install ccx's small OAuth error-metadata patch without replacing the local OAuth build."""
 from pathlib import Path
 
 
 def patch_source(source):
-    marker = "import { oauthErrorResponse } from './cc-oauth-errors.mjs';\n"
+    marker = "import { oauthErrorResponse } from './ccx-oauth-errors.mjs';\n"
+    # Builds patched before the ccx rename import the helper under its old name.
+    source = source.replace("from './cc-oauth-errors.mjs';", "from './ccx-oauth-errors.mjs';")
     if marker not in source:
         source = marker + source
     old = '''      return toErrorResponse(
@@ -40,7 +42,7 @@ def patch_source(source):
 
 def main():
     import os
-    root = Path.home() / '.config/cc/openai-oauth-patched/node_modules/openai-oauth/dist'
+    root = Path.home() / '.config/ccx/openai-oauth-patched/node_modules/openai-oauth/dist'
     matches = [p for p in root.glob('chunk-*.js') if 'var createOpenAIOAuthRuntime =' in p.read_text(encoding='utf-8')]
     if len(matches) != 1:
         raise SystemExit('Expected one installed OAuth server bundle.')
@@ -48,7 +50,7 @@ def main():
     before = target.read_text(encoding='utf-8')
     after = patch_source(before)
     helper = Path(__file__).with_name('oauth-errors.mjs').read_bytes()
-    destination = root / 'cc-oauth-errors.mjs'
+    destination = root / 'ccx-oauth-errors.mjs'
     destination.write_bytes(helper)
     if after != before:
         backup = target.with_suffix('.js.before-quota-patch')

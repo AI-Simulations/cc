@@ -3,9 +3,9 @@ import type { EngineInterface, Register, UiOpenResult } from 'claude-code'
 
 import type { Col, Grid, GridTab, Row } from '../types'
 
-// cc's install folder; python expands ~ since hooks have no process or fs access
-const CC = '~/.config/cc/cc-switch.py'
-const COST = '~/.config/cc/statusline.py'
+// ccx's install folder; python expands ~ since hooks have no process or fs access
+const CCX = '~/.config/ccx/ccx-switch.py'
+const COST = '~/.config/ccx/statusline.py'
 // runs a script path that starts with ~, as `python <script> <args>` would
 const RUN = "import os, runpy, sys; p = os.path.expanduser(sys.argv[1]); sys.argv = [p] + sys.argv[2:]; sys.path.insert(0, os.path.dirname(p)); runpy.run_path(p, run_name='__main__')"
 // Claude Code's ladder, for models whose provider publishes none of its own
@@ -39,7 +39,7 @@ const cachedModels = new Map<string, Promise<string[]>>()
 const UNPLACED = 'menu not drawn: '
 const placed = (r: UiOpenResult) => (r.isPlaced ? undefined : UNPLACED + r.reason)
 
-// The host process lacks the variables a Bash child gets, so cc-switch.py would edit the global
+// The host process lacks the variables a Bash child gets, so ccx-switch.py would edit the global
 // agents.json instead of this session's profiles: hand it the session as its Bash tool would.
 async function sessionEnv($: EngineInterface) {
   return { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: await $.session.id() }
@@ -62,17 +62,17 @@ async function py($: EngineInterface, args: string[], init: { timeoutMs?: number
   throw new Error('No python or python3 on PATH; ccx needs Python 3.10+.')
 }
 
-async function cc($: EngineInterface, args: string[]) {
-  const r = await py($, ['-B', '-c', RUN, CC, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
+async function ccx($: EngineInterface, args: string[]) {
+  const r = await py($, ['-B', '-c', RUN, CCX, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
   return { ok: r.exitCode === 0, out: `${r.stdout}\n${r.stderr}`.trim() }
 }
 
 const PROFILES = `import json,os
-agents = json.load(open(os.path.expanduser('~/.config/cc/agents.json')))
-launch = os.environ.get('CC_LAUNCH_ID', '') or 'claude-' + os.environ['CLAUDE_CODE_SESSION_ID']
+agents = json.load(open(os.path.expanduser('~/.config/ccx/agents.json')))
+launch = os.environ.get('CCX_LAUNCH_ID', '') or 'claude-' + os.environ['CLAUDE_CODE_SESSION_ID']
 if launch:
     try:
-        agents = json.load(open(os.path.expanduser('~/.config/cc/session-agents.json'))).get(launch, {}).get('agents', agents)
+        agents = json.load(open(os.path.expanduser('~/.config/ccx/session-agents.json'))).get(launch, {}).get('agents', agents)
     except Exception:
         pass
 print(json.dumps(agents))`
@@ -91,7 +91,7 @@ function tabRows(out: string): Row[] {
 }
 
 async function loadProviders($: EngineInterface) {
-  cachedProviders = tabRows((await cc($, ['agents', 'providers'])).out)
+  cachedProviders = tabRows((await ccx($, ['agents', 'providers'])).out)
   return cachedProviders
 }
 
@@ -121,11 +121,11 @@ function listed($: EngineInterface, key: string, fetch: () => Promise<string[]>)
 
 const lines = (out: string) => out.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('('))
 const models = ($: EngineInterface, agent: string, provider: string) =>
-  listed($, provider, () => cc($, ['agents', 'models', agent, provider]).then(({ ok, out }) => (ok ? parseModels(out) : Promise.reject(new Error(out)))))
+  listed($, provider, () => ccx($, ['agents', 'models', agent, provider]).then(({ ok, out }) => (ok ? parseModels(out) : Promise.reject(new Error(out)))))
 const routeModels = ($: EngineInterface, provider: string) =>
-  listed($, `route:${provider}`, () => cc($, ['route', 'models', provider]).then(({ ok, out }) => (ok ? lines(out) : Promise.reject(new Error(out)))))
+  listed($, `route:${provider}`, () => ccx($, ['route', 'models', provider]).then(({ ok, out }) => (ok ? lines(out) : Promise.reject(new Error(out)))))
 const fallbackModels = ($: EngineInterface, provider: string) =>
-  listed($, `fallback:${provider}`, () => cc($, ['fallback', 'models', provider]).then(({ ok, out }) => (ok ? lines(out) : Promise.reject(new Error(out)))))
+  listed($, `fallback:${provider}`, () => ccx($, ['fallback', 'models', provider]).then(({ ok, out }) => (ok ? lines(out) : Promise.reject(new Error(out)))))
 
 // Every provider's lists, fetched in the background (three at a time) so no column waits on one later.
 let warming: Promise<void> | undefined
@@ -250,16 +250,16 @@ export function effortBar(level: string, levels: readonly string[] = EFFORTS) {
   return '●'.repeat(i + 1) + '○'.repeat(steps.length - i - 1)
 }
 
-// The model's ladder (cc's model_efforts: null when the provider publishes none, [] for no
+// The model's ladder (ccx's model_efforts: null when the provider publishes none, [] for no
 // adjustable effort) and the level it runs at with no effort set: cmdc's per-model or global
 // `~/.commandcode/config.json` effort, Codex's `default_reasoning_level`, or Claude Code's own
 // `modelSettings` / `effortLevel` for official workers; null when unknown.
 const EFFORT_INFO = `import importlib.util, json, os, sys
-spec = importlib.util.spec_from_file_location('cc_switch', os.path.expanduser(sys.argv[1]))
-cc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cc)
+spec = importlib.util.spec_from_file_location('ccx_switch', os.path.expanduser(sys.argv[1]))
+ccx = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ccx)
 provider, model = sys.argv[2], sys.argv[3]
-levels = cc.model_efforts(provider, model) if model != 'default' else None
+levels = ccx.model_efforts(provider, model) if model != 'default' else None
 default = None
 try:
     if provider in ('commandcode', 'commandcode-cli'):
@@ -268,7 +268,7 @@ try:
     elif provider == 'openai-oauth':
         home = os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
         rows = json.load(open(os.path.join(home, 'models_cache.json'), encoding='utf-8')).get('models') or []
-        default = cc.default_effort(provider, model) or next((r.get('default_reasoning_level') for r in rows if str(r.get('slug', '')).lower() == model.lower()), None)
+        default = ccx.default_effort(provider, model) or next((r.get('default_reasoning_level') for r in rows if str(r.get('slug', '')).lower() == model.lower()), None)
     elif provider == 'official':
         cfg = json.load(open(os.path.expanduser('~/.claude/settings.json'), encoding='utf-8-sig'))
         default = ((cfg.get('modelSettings') or {}).get(model) or {}).get('effortLevel') or cfg.get('effortLevel')
@@ -282,7 +282,7 @@ function effortInfo($: EngineInterface, provider: string, model: string) {
   const key = `${provider}/${model}`
   let info = cachedEfforts.get(key)
   if (!info) {
-    info = py($, ['-B', '-c', EFFORT_INFO, CC, provider, model], { timeoutMs: 60000 }).then(r => {
+    info = py($, ['-B', '-c', EFFORT_INFO, CCX, provider, model], { timeoutMs: 60000 }).then(r => {
       try {
         return JSON.parse(r.stdout.trim().split(/\r?\n/).pop() ?? '') as { levels: string[] | null; default: string | null }
       } catch {
@@ -357,7 +357,7 @@ async function providerRows($: EngineInterface, t: GridTab, who: string | undefi
   if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return []
   // the session's fallback list leaves out its own provider; shortcut: a subagent's `official` fallback
   // (a rerun on Claude) is set with `ccx fallback subagent`, not listed here
-  const routes = tabRows((await cc($, t.name === 'Fallback' && who === 'session' ? ['fallback', 'routes'] : ['route', 'routes'])).out)
+  const routes = tabRows((await ccx($, t.name === 'Fallback' && who === 'session' ? ['fallback', 'routes'] : ['route', 'routes'])).out)
   return [{ value: 'off', label: helperTab(t) ? 'inherit session' : t.name === 'Model' ? 'off (launch)' : 'off' }, ...routes.map(r => ({ value: r.value }))]
 }
 
@@ -528,8 +528,8 @@ async function refill($: EngineInterface, ti: number, changed: number) {
 
 async function buildGrid($: EngineInterface, start: GridTab['name'], who?: string): Promise<Grid> {
   const [route, fallback, profiles, auto, tools, preset] = await Promise.all([
-    cc($, ['route']), cc($, ['fallback']), loadProfiles($), cc($, ['helper', 'auto']), cc($, ['helper', 'tools']),
-    cc($, ['presets']),
+    ccx($, ['route']), ccx($, ['fallback']), loadProfiles($), ccx($, ['helper', 'auto']), ccx($, ['helper', 'tools']),
+    ccx($, ['presets']),
   ])
   autoTarget = auto.ok ? parseTarget(auto.out, 'Helper') : undefined
   toolsTarget = tools.ok ? parseTarget(tools.out, 'Helper') : undefined
@@ -681,7 +681,7 @@ async function onGridKey($: EngineInterface, key: string, shift: boolean) {
 
 // The ccx command that resumes this conversation on another route.
 export function relaunchCommand(provider: string, model: string, effort: string, session: string) {
-  return `cc ${provider} ${model}${EFFORTS.includes(effort) ? ` --effort ${effort}` : ''} --resume ${session}`
+  return `ccx ${provider} ${model}${EFFORTS.includes(effort) ? ` --effort ${effort}` : ''} --resume ${session}`
 }
 
 // A session on Claude Code's own model: the built-in /model, then /effort when one was picked.
@@ -711,7 +711,7 @@ async function applyGrid($: EngineInterface, g: Grid) {
     const target = presetTarget(selected(t.cols[colIndex(t, 'Preset')]))
     if (!target) return
     if (nativeModel) return applyNative($, g, target.provider, target.model, target.effort ?? 'default')
-    const { ok, out } = await cc($, ['route', target.provider, target.model, ...(target.effort ? [target.effort] : [])])
+    const { ok, out } = await ccx($, ['route', target.provider, target.model, ...(target.effort ? [target.effort] : [])])
     if (!ok) return update($, grid, x => (x ? { ...x, status: out.split(/\r?\n/).pop() ?? out } : x))
     const said = `${target.provider}/${target.model}${target.effort ? `, effort ${target.effort}` : ''}`
     const fresh = await buildGrid($, 'Presets')
@@ -739,7 +739,7 @@ async function applyGrid($: EngineInterface, g: Grid) {
     : t.name === 'Model' ? ['route', ...pair]
     : t.name === 'Subagent' ? ['agents', 'set', who!, '--provider', provider, '--model', model!, '--effort', effort, ...(compact ? ['--autocompact', compact] : [])]
     : who === 'session' ? ['fallback', ...pair] : ['fallback', 'subagent', who!, ...pair]
-  const { ok, out } = await cc($, args)
+  const { ok, out } = await ccx($, args)
   const said = (t.name === 'Subagent' ? `${who}: ${provider}/${model}, effort ${effort}` : out.split(/\r?\n/).filter(Boolean).join(', '))
     + (compact && t.name !== 'Fallback' ? `, compact ${compact === 'default' ? 'default' : compactLabel(compact)}` : '')
   if (!ok) return update($, grid, x => (x ? { ...x, status: out.split(/\r?\n/).pop() ?? out } : x))
@@ -1015,7 +1015,7 @@ export const register: Register = on => {
 
   // command.run is the person's own command, so its pane is placed at any terminal width (an
   // expansion hook's open counts as unasked and waits below 144 columns). Answering here runs no
-  // command; next(e) runs the built-in /model, or expands the others for cc-switch.py's settings hook.
+  // command; next(e) runs the built-in /model, or expands the others for ccx-switch.py's settings hook.
   // /model and /fallback with no arguments draw a grid in their own chat row instead of a pane.
   // The main session's Compact pick: compact once the context reaches that share of the window.
   let compacting = false
@@ -1036,7 +1036,7 @@ export const register: Register = on => {
     const command = e.command
     const words = e.args.split(/\s+/).filter(Boolean)
     const head = words[0]?.toLowerCase()
-    // `/model <name>` stays Claude Code's; a complete /fallback call stays with cc-switch.py.
+    // `/model <name>` stays Claude Code's; a complete /fallback call stays with ccx-switch.py.
     const dialog = command === 'model' ? !words.length : !words.length || (head === 'subagent' && words.length <= 2)
     if (!dialog) return next(e)
     // The picker is its own window (ccx gui) on a ccx adapter session; the in-terminal grid stays as
@@ -1044,13 +1044,13 @@ export const register: Register = on => {
     // session keeps the grid: only it can run Claude Code's own /model and /effort, which its Model
     // tab switches; the window would refuse its Apply.
     let window: { ok: boolean; out: string } | undefined
-    if ((await cc($, ['route'])).ok) {
-      window = await cc($, ['gui', command === 'model' ? 'model' : 'fallback'])
+    if ((await ccx($, ['route'])).ok) {
+      window = await ccx($, ['gui', command === 'model' ? 'model' : 'fallback'])
       if (window.ok) return { text: window.out.split(/\r?\n/).pop() || `/${command}: opened the picker window.` }
     }
     const failed = await openGrid($, command === 'model' ? 'Model' : 'Fallback', words[1])
     if (failed) {
-      // the built-in /model, or cc-switch.py's settings hook, answers instead
+      // the built-in /model, or ccx-switch.py's settings hook, answers instead
       void $.ui.close({ id: GRID_PANE })
       return next(e)
     }

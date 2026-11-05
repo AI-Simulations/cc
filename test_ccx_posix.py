@@ -1,5 +1,5 @@
 """macOS/Linux launcher checks: apply.sh through a real shell, quoting, and the arrow-key reader.
-Offline; skipped on Windows (test_cc_switch.py covers PowerShell there)."""
+Offline; skipped on Windows (test_ccx_switch.py covers PowerShell there)."""
 import importlib.util
 import os
 import shutil
@@ -12,9 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('cc_switch', ROOT / 'cc-switch.py')
-cc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cc)
+spec = importlib.util.spec_from_file_location('ccx_switch', ROOT / 'ccx-switch.py')
+ccx = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ccx)
 
 
 @unittest.skipIf(os.name == 'nt', 'POSIX shells only')
@@ -23,8 +23,8 @@ class PosixApplyTests(unittest.TestCase):
         """Write apply.sh, source it in sh with a fake `claude`, and return what the shell saw."""
         with tempfile.TemporaryDirectory() as tmp:
             apply = Path(tmp) / 'apply.sh'
-            with patch.object(cc, 'APPLY_FILE', str(apply)):
-                cc.write_apply(env, delete, run_claude, claude_args, model)
+            with patch.object(ccx, 'APPLY_FILE', str(apply)):
+                ccx.write_apply(env, delete, run_claude, claude_args, model)
             script = (f'claude() {{ printf "claude:%s|" "$@"; printf "base:%s\\n" "$ANTHROPIC_BASE_URL"; }}\n'
                       f'. "{apply}"\nprintf "after:%s|stale:%s\\n" "$ANTHROPIC_BASE_URL" "${{STALE-unset}}"\n')
             result = subprocess.run(['sh', '-c', script], capture_output=True, text=True, check=True,
@@ -56,16 +56,16 @@ class PosixApplyTests(unittest.TestCase):
         bash = shutil.which('bash')
         if not bash:
             self.skipTest('no bash')
-        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as home:
-            cfg = Path(home) / '.config' / 'cc'
+            cfg = Path(home) / '.config' / 'ccx'
             cfg.mkdir(parents=True)
-            # A stand-in launcher: writes apply.sh the way cc-switch.py does, then exits 0.
-            (cfg / 'cc-switch.py').write_text(
-                'import os\nopen(os.path.expanduser("~/.config/cc/apply.sh"), "w").write("export PICKED=yes\\n")\n')
-            script = installer.SH_FUNCTION + 'ccx official\nprintf "%s|" "$PICKED"; [ -f ~/.config/cc/apply.sh ] || echo gone\n'
+            # A stand-in launcher: writes apply.sh the way ccx-switch.py does, then exits 0.
+            (cfg / 'ccx-switch.py').write_text(
+                'import os\nopen(os.path.expanduser("~/.config/ccx/apply.sh"), "w").write("export PICKED=yes\\n")\n')
+            script = installer.SH_FUNCTION + 'ccx official\nprintf "%s|" "$PICKED"; [ -f ~/.config/ccx/apply.sh ] || echo gone\n'
             out = subprocess.run([bash, '-c', script], capture_output=True, text=True,
                                  env=dict(os.environ, HOME=home)).stdout
         self.assertEqual(out.strip(), 'yes|gone')

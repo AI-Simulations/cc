@@ -1,4 +1,4 @@
-"""Install ccx into ~/.config/cc and register its shell function, with backups.
+"""Install ccx into ~/.config/ccx and register its shell function, with backups.
 
 Windows: PowerShell 5 and 7 profiles. macOS/Linux: ~/.bashrc and ~/.zshrc.
 """
@@ -11,33 +11,29 @@ import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parent
-FILES = ('cc-switch.py', 'cc-switch.ps1', 'cc-anthropic-proxy.py', 'opencode_key.py', 'patch-oauth-quota.py',
-         'oauth-errors.mjs', 'test_cc_switch.py', 'test_cc_resume.py', 'test_cc_proxy.py',
+FILES = ('ccx-switch.py', 'ccx-switch.ps1', 'ccx-anthropic-proxy.py', 'opencode_key.py', 'patch-oauth-quota.py',
+         'oauth-errors.mjs', 'test_ccx_switch.py', 'test_ccx_resume.py', 'test_ccx_proxy.py',
          'statusline.py', 'test_statusline.py', 'critic_mock_check.py', 'install-resume.py', 'README.md',
-         'cc-gui.py', 'test_cc_gui.py', 'cc.ico')
-# Claude Code slash commands shipped with cc.
+         'ccx-gui.py', 'test_ccx_gui.py', 'ccx.ico')
+# Claude Code slash commands shipped with ccx.
 COMMAND_FILES = ('fallback.md',)
 # The /model picker mod, loaded through CLAUDE_CODE_PLUGIN_DIRS.
 PLUGIN = 'subagent-picker'
 PYTHON = 'python' if os.name == 'nt' else 'python3'
-FUNCTION = b'''\r\n# Claude Code custom-provider launcher.\r\nfunction ccx {\r\n    & "$env:USERPROFILE\\.config\\cc\\cc-switch.ps1" @args\r\n}\r\n'''
+FUNCTION = b'''\r\n# Claude Code custom-provider launcher.\r\nfunction ccx {\r\n    & "$env:USERPROFILE\\.config\\ccx\\ccx-switch.ps1" @args\r\n}\r\n'''
 SH_FUNCTION = '''
 # Claude Code custom-provider launcher.
 ccx() {
-    python3 "$HOME/.config/cc/cc-switch.py" "$@" || return
-    if [ -f "$HOME/.config/cc/apply.sh" ]; then
-        . "$HOME/.config/cc/apply.sh"
-        rm -f "$HOME/.config/cc/apply.sh"
+    python3 "$HOME/.config/ccx/ccx-switch.py" "$@" || return
+    if [ -f "$HOME/.config/ccx/apply.sh" ]; then
+        . "$HOME/.config/ccx/apply.sh"
+        rm -f "$HOME/.config/ccx/apply.sh"
     fi
 }
 '''
 
-ALIAS_GUARD = '''
-# Keep the custom-provider launcher ahead of a legacy cc -> claude alias.
-if ((Test-Path Alias:cc) -and (Get-Alias cc).Definition -eq 'claude') {
-    Remove-Item Alias:cc -Force
-}
-'''
+# The launcher's function before the ccx rename, named cc and pointing at ~/.config/cc.
+LEGACY_FUNCTION = re.compile(r'(?im)^(?:# Claude Code custom-provider launcher\.\r?\n)?[ \t]*function[ \t]+cc[ \t]*\{')
 
 
 def copy_tree(source, target, backup):
@@ -93,18 +89,18 @@ def install(target, profiles, commands=None, claude=None):
             if (claude / name).exists():
                 shutil.copy2(claude / name, saved / name)
         shutil.copy2(ROOT / 'statusline.py', claude / 'statusline.py')
-        command = PYTHON + ' -B "' + (target / 'cc-switch.py').as_posix() + '" '
+        command = PYTHON + ' -B "' + (target / 'ccx-switch.py').as_posix() + '" '
         hooks = settings.setdefault('hooks', {})
         for event, matcher, entry in [('PreToolUse', 'Agent|Task', 'hook-agent'),
                                       ('SessionStart', None, 'hook-context'),
                                       ('UserPromptSubmit', None, 'hook-context'),
-                                      ('SubagentStop', '^cc-.*', 'hook-subagent-stop'),
+                                      ('SubagentStop', '^ccx-.*', 'hook-subagent-stop'),
                                       ('UserPromptExpansion', 'fallback', 'hook-command')]:
             groups = hooks.setdefault(event, [])
             # Replace only our own entries; preserve every unrelated hook and matcher.
             for group in groups:
                 group['hooks'] = [h for h in group.get('hooks', []) if not (
-                    'cc-switch.py' in h.get('command', '') and h.get('command', '').rstrip().endswith(entry))]
+                    re.search(r'ccx?-switch\.py', h.get('command', '')) and h.get('command', '').rstrip().endswith(entry))]
             groups[:] = [group for group in groups if group.get('hooks')]
             group = {'hooks': [{'type': 'command', 'command': command + entry, 'timeout': 20}]}
             if matcher:
@@ -116,9 +112,10 @@ def install(target, profiles, commands=None, claude=None):
         if (ROOT / PLUGIN).is_dir():
             env = settings.setdefault('env', {})
             plugin = (target / PLUGIN).as_posix()
-            dirs = [d for d in str(env.get('CLAUDE_CODE_PLUGIN_DIRS') or '').split(os.pathsep) if d]
-            if plugin not in dirs:
-                env['CLAUDE_CODE_PLUGIN_DIRS'] = os.pathsep.join([*dirs, plugin])
+            # Drops the pre-rename ~/.config/cc copy of the mod.
+            dirs = [d for d in str(env.get('CLAUDE_CODE_PLUGIN_DIRS') or '').split(os.pathsep)
+                    if d and not d.replace('\\', '/').endswith('/.config/cc/' + PLUGIN)]
+            env['CLAUDE_CODE_PLUGIN_DIRS'] = os.pathsep.join(dirs + [plugin] * (plugin not in dirs))
         temporary = settings_path.with_suffix('.json.tmp')
         temporary.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
         temporary.replace(settings_path)
@@ -136,21 +133,41 @@ def register(profile, backup):
         encoding = ('utf-16-le' if original.startswith(b'\xff\xfe') else
                     'utf-16-be' if original.startswith(b'\xfe\xff') else
                     'utf-8' if original.startswith(b'\xef\xbb\xbf') else 'latin-1')
+        bom = next((b for b in (b'\xff\xfe', b'\xfe\xff', b'\xef\xbb\xbf') if original.startswith(b)), b'')
         text = original.decode(encoding).lstrip('﻿')
         addition = '' if re.search(r'(?im)^\s*function\s+ccx\s*\{', text) else FUNCTION.decode('ascii')
-        if (addition or re.search(r'(?im)^\s*(?:Set-Alias|New-Alias|sal|nal)\b[^\r\n]*\bcc\b', text)) and ALIAS_GUARD.strip() not in text:
-            addition += ALIAS_GUARD
+        cleaned = drop_legacy(text)
+        if cleaned != text:
+            original = bom + cleaned.encode(encoding)
     else:
         encoding = 'utf-8'
         text = original.decode(encoding, errors='replace')
         addition = '' if re.search(r'(?m)^\s*ccx\s*\(\)', text) else SH_FUNCTION
-    if not addition:
+    if not addition and (not profile.exists() or original == profile.read_bytes()):
         return
     profile.parent.mkdir(parents=True, exist_ok=True)
     if profile.exists():
         shutil.copy2(profile, backup / (profile.parent.name + '-' + profile.name))
     profile.write_bytes(original + addition.encode(encoding))
     print('Registered ccx:', profile)
+
+
+def drop_legacy(text):
+    """Text without the pre-rename `function cc` block, when it ran ~/.config/cc."""
+    match = LEGACY_FUNCTION.search(text)
+    if not match:
+        return text
+    depth = 0
+    for end in range(match.end() - 1, len(text)):
+        depth += {'{': 1, '}': -1}.get(text[end], 0)
+        if depth == 0:
+            break
+    else:
+        return text
+    if '.config\\cc\\' not in text[match.start():end]:
+        return text
+    rest = text[end + 1:]
+    return text[:match.start()] + rest[2 if rest.startswith('\r\n') else 1 if rest.startswith('\n') else 0:]
 
 
 def shell_profiles(home):
@@ -169,7 +186,15 @@ def main():
     home = Path.home()
     commands = home / '.claude' / 'commands'
     commands.mkdir(parents=True, exist_ok=True)
-    install(home / '.config/cc', shell_profiles(home), commands, home / '.claude')
+    legacy, target = home / '.config/cc', home / '.config/ccx'
+    if legacy.is_dir() and not target.exists():
+        # Keys, saved picks, profiles and the OAuth build from before the ccx rename. The old folder stays.
+        try:
+            shutil.copytree(legacy, target, ignore=shutil.ignore_patterns('backup*', '__pycache__', 'apply.*'))
+        except shutil.Error as exc:
+            print(f'Could not copy {len(exc.args[0])} files from {legacy}; copy them by hand if needed.')
+        print('Copied settings from', legacy, 'to', target)
+    install(target, shell_profiles(home), commands, home / '.claude')
 
 
 if __name__ == '__main__':

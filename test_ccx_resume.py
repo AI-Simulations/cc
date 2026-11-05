@@ -14,10 +14,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('cc_resume_switch', ROOT / 'cc-switch.py')
-cc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cc)
-cc.load_presets = lambda: {}  # the person's saved presets must not steer menu defaults here
+spec = importlib.util.spec_from_file_location('ccx_resume_switch', ROOT / 'ccx-switch.py')
+ccx = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ccx)
+ccx.load_presets = lambda: {}  # the person's saved presets must not steer menu defaults here
 SESSION = '00000000-0000-4000-8000-000000000001'
 # Keep real credentials out of mock failure output, and make runs inside Claude Code match plain runs.
 for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN|SECRET|PASSWORD', k.upper())]:
@@ -25,7 +25,7 @@ for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN
 
 
 def runpy_upstreams():
-    spec = importlib.util.spec_from_file_location('cc_proxy', ROOT / 'cc-anthropic-proxy.py')
+    spec = importlib.util.spec_from_file_location('ccx_proxy', ROOT / 'ccx-anthropic-proxy.py')
     proxy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(proxy)
     return proxy.UPSTREAMS
@@ -33,7 +33,7 @@ def runpy_upstreams():
 
 def proxy_identity():
     """The adapter's own /health answer, so a version bump cannot leave this suite behind."""
-    spec = importlib.util.spec_from_file_location('cc_proxy_identity', ROOT / 'cc-anthropic-proxy.py')
+    spec = importlib.util.spec_from_file_location('ccx_proxy_identity', ROOT / 'ccx-anthropic-proxy.py')
     proxy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(proxy)
     return dict(proxy.IDENTITY)
@@ -42,29 +42,29 @@ def proxy_identity():
 class ResumeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_adapter_launch_has_no_console(self):
-        with patch.object(cc, 'fetch', side_effect=[OSError(), proxy_identity()]), patch.object(cc.subprocess, 'Popen') as launch:
-            cc.ensure_anthropic_proxy()
+        with patch.object(ccx, 'fetch', side_effect=[OSError(), proxy_identity()]), patch.object(ccx.subprocess, 'Popen') as launch:
+            ccx.ensure_anthropic_proxy()
         flags = launch.call_args.kwargs['creationflags']
         self.assertTrue(flags & subprocess.CREATE_NO_WINDOW, 'no console window for the adapter')
         self.assertTrue(flags & getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0), 'the adapter never starves the desktop')
 
     def test_outdated_adapter_is_replaced_and_other_services_are_left_alone(self):
         current = proxy_identity()
-        with patch.object(cc, 'fetch', side_effect=[{**current, 'version': 1}, current]), patch.object(cc, 'stop_port_owner') as stop, patch.object(cc.subprocess, 'Popen') as launch:
-            cc.ensure_anthropic_proxy()
-        stop.assert_called_once_with(cc.ADAPTER_PORT)
+        with patch.object(ccx, 'fetch', side_effect=[{**current, 'version': 1}, current]), patch.object(ccx, 'stop_port_owner') as stop, patch.object(ccx.subprocess, 'Popen') as launch:
+            ccx.ensure_anthropic_proxy()
+        stop.assert_called_once_with(ccx.ADAPTER_PORT)
         launch.assert_called_once()
-        with patch.object(cc, 'fetch', return_value={'service': 'something-else'}), patch.object(cc, 'stop_port_owner') as stop, patch.object(cc.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            cc.ensure_anthropic_proxy()
+        with patch.object(ccx, 'fetch', return_value={'service': 'something-else'}), patch.object(ccx, 'stop_port_owner') as stop, patch.object(ccx.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            ccx.ensure_anthropic_proxy()
         stop.assert_not_called()
         launch.assert_not_called()
 
     def test_install_preserves_utf16_profiles(self):
-        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)/'cc'
+            target = Path(tmp)/'ccx'
             for encoding in ('utf-16-le', 'utf-16-be'):
                 with self.subTest(encoding=encoding):
                     profile = Path(tmp)/encoding/'profile.ps1'
@@ -80,11 +80,11 @@ class ResumeTests(unittest.TestCase):
                     self.assertEqual(profile.read_bytes(), first)
 
     def test_install_registers_missing_profiles_and_preserves_existing(self):
-        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp)/'cc'
+            target = Path(tmp)/'ccx'
             existing = Path(tmp)/'WindowsPowerShell'/'profile.ps1'
             missing = Path(tmp)/'PowerShell'/'profile.ps1'
             existing.parent.mkdir()
@@ -99,57 +99,63 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(existing.read_bytes(), original)
             self.assertEqual(missing.read_bytes(), first)
             self.assertIn(b'function ccx {', first)
-            self.assertIn(b'cc-switch.ps1" @args', first)
+            self.assertIn(b'ccx-switch.ps1" @args', first)
             for name in installer.COMMAND_FILES:
                 self.assertEqual((commands/name).read_bytes(), (ROOT/'commands'/name).read_bytes(),
-                                 f'{name} ships with cc')
+                                 f'{name} ships with ccx')
             self.assertTrue(list(target.glob('backup-resume-*/commands/fallback.md')),
                             'Reinstalling backs up the shipped commands')
             for name in installer.FILES:
                 self.assertEqual((target/name).read_bytes(), (ROOT/name).read_bytes())
-            self.assertTrue((target/'cc-anthropic-proxy.py').is_file(),
+            self.assertTrue((target/'ccx-anthropic-proxy.py').is_file(),
                             'Fresh installs need the OpenAI-format adapter')
             self.assertTrue((target/'ai_suite/service.py').is_file(),
                             'Fresh installs need the shared AI-suite transport')
-            code = "import sys, runpy; sys.path.insert(0, sys.argv[1]); runpy.run_path(sys.argv[1] + '/cc-anthropic-proxy.py'); import ai_suite.service as s; assert s.__file__.startswith(sys.argv[1])"
+            code = "import sys, runpy; sys.path.insert(0, sys.argv[1]); runpy.run_path(sys.argv[1] + '/ccx-anthropic-proxy.py'); import ai_suite.service as s; assert s.__file__.startswith(sys.argv[1])"
             subprocess.run([sys.executable, '-I', '-S', '-c', code, str(target)],
-                           check=True, capture_output=True, **cc.background_process_options())
+                           check=True, capture_output=True, **ccx.background_process_options())
 
     @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
-    def test_install_clears_claude_alias_that_shadows_provider_launcher(self):
-        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+    def test_install_replaces_pre_rename_cc_function(self):
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
+        legacy = ('# Claude Code custom-provider launcher.\nfunction cc {\n'
+                  '    python "$env:USERPROFILE\\.config\\cc\\cc-switch.py" @args\n'
+                  '    if ($LASTEXITCODE -eq 0) { . "$env:USERPROFILE\\.config\\cc\\apply.ps1" }\n}\n')
+        keep = 'Set-Alias -Name keepme -Value Get-Date\nfunction mine { "cc" }\n'
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / 'cc'
+            target = Path(tmp) / 'ccx'
             for encoding in ('utf-8', 'utf-16-le', 'utf-16-be'):
-                for existing_function in (False, True):
-                    with self.subTest(encoding=encoding, existing_function=existing_function):
-                        profile = Path(tmp) / (encoding + str(existing_function)) / 'profile.ps1'
-                        profile.parent.mkdir()
-                        text = ('function ccx { "custom provider menu" }\n' if existing_function else '')
-                        text += 'Set-Alias -Name cc -Value claude\nSet-Alias -Name keepme -Value Get-Date\n'
-                        original = (('\ufeff' if encoding.startswith('utf-16') else '') + text).encode(encoding)
-                        profile.write_bytes(original)
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            installer.install(target, [profile])
-                            first = profile.read_bytes()
-                            installer.install(target, [profile])
-                        self.assertTrue(first.startswith(original), 'Preserve unrelated profile bytes')
-                        self.assertEqual(profile.read_bytes(), first, 'Installation must be idempotent')
-                        check = Path(tmp) / 'check.ps1'
-                        check.write_text('. $env:CC_TEST_PROFILE\nGet-Command ccx | ForEach-Object { $_.CommandType.ToString() }\n(Get-Alias keepme).Definition\n', encoding='utf-8')
-                        result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)],
-                            env=dict(os.environ, CC_TEST_PROFILE=str(profile)), capture_output=True,
-                            text=True, check=True, **cc.background_process_options())
-                        self.assertEqual(result.stdout.splitlines(), ['Function', 'Get-Date'])
+                with self.subTest(encoding=encoding):
+                    profile = Path(tmp) / encoding / 'profile.ps1'
+                    profile.parent.mkdir()
+                    bom = '\ufeff' if encoding.startswith('utf-16') else ''
+                    profile.write_bytes((bom + keep + legacy).encode(encoding))
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        installer.install(target, [profile])
+                        first = profile.read_bytes()
+                        installer.install(target, [profile])
+                    self.assertEqual(profile.read_bytes(), first, 'Installation must be idempotent')
+                    text = first.decode(encoding).lstrip('\ufeff')
+                    self.assertTrue(first.startswith((bom + keep).encode(encoding)), 'Preserve unrelated profile bytes')
+                    self.assertNotIn('function cc ', text)
+                    self.assertIn('function ccx {', text)
+                    check = Path(tmp) / 'check.ps1'
+                    check.write_text('. $env:CCX_TEST_PROFILE\nGet-Command ccx | ForEach-Object { $_.CommandType.ToString() }\n'
+                                     '(Get-Alias keepme).Definition\n[bool](Get-Command cc -CommandType Function -ErrorAction Ignore)\n',
+                                     encoding='utf-8')
+                    result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)],
+                        env=dict(os.environ, CCX_TEST_PROFILE=str(profile)), capture_output=True,
+                        text=True, check=True, **ccx.background_process_options())
+                    self.assertEqual(result.stdout.splitlines(), ['Function', 'Get-Date', 'False'])
 
     def test_install_registers_posix_shell_function_once(self):
-        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as tmp:
-            target, rc = Path(tmp) / 'cc', Path(tmp) / '.zshrc'
+            target, rc = Path(tmp) / 'ccx', Path(tmp) / '.zshrc'
             rc.write_bytes(b'export KEEP=1\n')
             with contextlib.redirect_stdout(io.StringIO()):
                 installer.install(target, [rc])
@@ -157,10 +163,10 @@ class ResumeTests(unittest.TestCase):
                 installer.install(target, [rc])
             self.assertTrue(first.startswith(b'export KEEP=1\n'))
             self.assertIn(b'ccx() {', first)
-            self.assertIn(b'. "$HOME/.config/cc/apply.sh"', first)
+            self.assertIn(b'. "$HOME/.config/ccx/apply.sh"', first)
             self.assertEqual(rc.read_bytes(), first, 'Installation must be idempotent')
             self.assertTrue((target / 'subagent-picker' / 'hooks' / 'register.tsx').is_file(), 'The /model mod ships too')
-            self.assertTrue((target / 'opencode_key.py').is_file(), 'cc-switch imports opencode_key')
+            self.assertTrue((target / 'opencode_key.py').is_file(), 'ccx-switch imports opencode_key')
 
     def test_resume_cli_always_asks_provider_and_model(self):
         cases = [
@@ -173,8 +179,8 @@ class ResumeTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             for argv, forwarded in cases:
-                with self.subTest(argv=argv), patch.object(cc, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(cc, 'load_state', return_value={'provider': 'nvidia', 'model': 'test/model'}), patch.object(cc, 'apply') as apply, patch.object(cc, 'provider_menu', return_value='official') as menu, patch.object(cc, 'model_menu', return_value='claude-opus-5-5') as models, patch.object(cc, 'effort_menu', return_value='high'), patch.object(cc, 'autocompact_menu', return_value=70), patch.object(cc, 'startup_subagent') as subagents, patch.object(sys, 'argv', ['cc', *argv]):
-                    cc.main()
+                with self.subTest(argv=argv), patch.object(ccx, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(ccx, 'load_state', return_value={'provider': 'nvidia', 'model': 'test/model'}), patch.object(ccx, 'apply') as apply, patch.object(ccx, 'provider_menu', return_value='official') as menu, patch.object(ccx, 'model_menu', return_value='claude-opus-5-5') as models, patch.object(ccx, 'effort_menu', return_value='high'), patch.object(ccx, 'autocompact_menu', return_value=70), patch.object(ccx, 'startup_subagent') as subagents, patch.object(sys, 'argv', ['ccx', *argv]):
+                    ccx.main()
                     menu.assert_called_once()
                     models.assert_called_once_with('official')
                     subagents.assert_called_once()
@@ -187,13 +193,13 @@ class ResumeTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             for argv, provider, model in cases:
-                with self.subTest(argv=argv), patch.object(cc, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(cc, 'apply') as apply, patch.object(cc, 'provider_menu', side_effect=AssertionError('Unexpected menu')), patch.object(cc, 'model_menu', side_effect=AssertionError('Unexpected model menu')), patch.object(cc, 'startup_subagent', side_effect=AssertionError('Unexpected subagent menu')), patch.object(sys, 'argv', ['cc', *argv]):
-                    cc.main()
+                with self.subTest(argv=argv), patch.object(ccx, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(ccx, 'apply') as apply, patch.object(ccx, 'provider_menu', side_effect=AssertionError('Unexpected menu')), patch.object(ccx, 'model_menu', side_effect=AssertionError('Unexpected model menu')), patch.object(ccx, 'startup_subagent', side_effect=AssertionError('Unexpected subagent menu')), patch.object(sys, 'argv', ['ccx', *argv]):
+                    ccx.main()
                     apply.assert_called_once_with(provider, model, False, claude_args=['--resume', SESSION], effort=None, autocompact=None, fallback=None)
 
     def test_provider_only_still_asks_model(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(cc, 'provider_menu', side_effect=AssertionError('Unexpected menu')), patch.object(cc, 'model_menu', return_value='test/model') as models, patch.object(cc, 'effort_menu', return_value='') as efforts, patch.object(cc, 'autocompact_menu', return_value=''), patch.object(cc, 'fallback_menu', return_value=None), patch.object(cc, 'startup_subagent'), patch.object(cc, 'apply') as apply, patch.object(sys, 'argv', ['cc', 'nvidia', '--resume', SESSION]):
-            cc.main()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ccx, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(ccx, 'provider_menu', side_effect=AssertionError('Unexpected menu')), patch.object(ccx, 'model_menu', return_value='test/model') as models, patch.object(ccx, 'effort_menu', return_value='') as efforts, patch.object(ccx, 'autocompact_menu', return_value=''), patch.object(ccx, 'fallback_menu', return_value=None), patch.object(ccx, 'startup_subagent'), patch.object(ccx, 'apply') as apply, patch.object(sys, 'argv', ['ccx', 'nvidia', '--resume', SESSION]):
+            ccx.main()
             models.assert_called_once_with('nvidia')
             efforts.assert_called_once()
             apply.assert_called_once_with('nvidia', 'test/model', False, claude_args=['--resume', SESSION], effort='', autocompact='', fallback=None)
@@ -202,20 +208,20 @@ class ResumeTests(unittest.TestCase):
     def test_launch_env_is_restored_so_plain_claude_stays_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp)/'apply.ps1'
-            with patch.object(cc, 'APPLY_FILE', str(script)):
-                cc.write_apply({'ANTHROPIC_BASE_URL': 'http://gateway', 'ANTHROPIC_MODEL': 'test/model'}, ['ANTHROPIC_API_KEY'], True, [], 'test/model')
+            with patch.object(ccx, 'APPLY_FILE', str(script)):
+                ccx.write_apply({'ANTHROPIC_BASE_URL': 'http://gateway', 'ANTHROPIC_MODEL': 'test/model'}, ['ANTHROPIC_API_KEY'], True, [], 'test/model')
             check = Path(tmp)/'check.ps1'
-            check.write_text("$env:ANTHROPIC_API_KEY = 'original'\nfunction claude { \"during=$env:ANTHROPIC_BASE_URL|$env:ANTHROPIC_API_KEY\" }\n. $env:CC_TEST_APPLY\n\"after=$env:ANTHROPIC_BASE_URL|$env:ANTHROPIC_MODEL|$env:ANTHROPIC_API_KEY\"\n", encoding='utf-8')
+            check.write_text("$env:ANTHROPIC_API_KEY = 'original'\nfunction claude { \"during=$env:ANTHROPIC_BASE_URL|$env:ANTHROPIC_API_KEY\" }\n. $env:CCX_TEST_APPLY\n\"after=$env:ANTHROPIC_BASE_URL|$env:ANTHROPIC_MODEL|$env:ANTHROPIC_API_KEY\"\n", encoding='utf-8')
             env = {k: v for k, v in os.environ.items() if not k.startswith('ANTHROPIC_')}
-            result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)], env=dict(env, CC_TEST_APPLY=str(script)), capture_output=True, text=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)], env=dict(env, CCX_TEST_APPLY=str(script)), capture_output=True, text=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             self.assertEqual(result.stdout.split()[-2:], ['during=http://gateway|', 'after=||original'])
 
     def test_commandcode_non_claude_routes_through_adapter(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(cc, 'STATE_FILE', str(Path(tmp)/'state.json')), patch.object(cc, 'auth_key', return_value='test'), patch.object(cc, 'ensure_anthropic_proxy') as proxy, patch.object(cc, 'get_models', return_value=[]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            cc.apply('commandcode', 'deepseek/deepseek-v4.1-flash', no_run=True)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ccx, 'APPLY_FILE', str(Path(tmp)/'apply.ps1')), patch.object(ccx, 'STATE_FILE', str(Path(tmp)/'state.json')), patch.object(ccx, 'auth_key', return_value='test'), patch.object(ccx, 'ensure_anthropic_proxy') as proxy, patch.object(ccx, 'get_models', return_value=[]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            ccx.apply('commandcode', 'deepseek/deepseek-v4.1-flash', no_run=True)
             text = (Path(tmp)/'apply.ps1').read_text()
         proxy.assert_called_once()
-        self.assertIn(f"'http://127.0.0.1:{cc.ADAPTER_PORT}/commandcode'", text)
+        self.assertIn(f"'http://127.0.0.1:{ccx.ADAPTER_PORT}/commandcode'", text)
         self.assertIn('commandcode', runpy_upstreams())
 
     @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
@@ -223,11 +229,11 @@ class ResumeTests(unittest.TestCase):
         tricky = "session'$(throw 'must not execute'); with spaces"
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp)/'apply.ps1'
-            with patch.object(cc, 'APPLY_FILE', str(script)):
-                cc.write_apply({'ANTHROPIC_MODEL': 'test/model'}, [], True, ['--resume', tricky], 'test/model')
+            with patch.object(ccx, 'APPLY_FILE', str(script)):
+                ccx.write_apply({'ANTHROPIC_MODEL': 'test/model'}, [], True, ['--resume', tricky], 'test/model')
             check = Path(tmp)/'check.ps1'
-            check.write_text("function claude { ConvertTo-Json -InputObject @($args) -Compress }\n. $env:CC_TEST_APPLY\n", encoding='utf-8')
-            result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)], env=dict(os.environ, CC_TEST_APPLY=str(script)), capture_output=True, text=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            check.write_text("function claude { ConvertTo-Json -InputObject @($args) -Compress }\n. $env:CCX_TEST_APPLY\n", encoding='utf-8')
+            result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)], env=dict(os.environ, CCX_TEST_APPLY=str(script)), capture_output=True, text=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             self.assertEqual(json.loads(result.stdout.splitlines()[-1]), ['--model', 'test/model', '--resume', tricky])
             self.assertFalse(script.exists())
 
@@ -235,9 +241,9 @@ class ResumeTests(unittest.TestCase):
     def test_compatibility_entry_forwards_native_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            shutil.copyfile(ROOT/'cc-switch.ps1', root/'cc-switch.ps1')
-            (root/'cc-switch.py').write_text("import json, sys\nfrom pathlib import Path\nPath(__file__).with_name('args.json').write_text(json.dumps(sys.argv[1:]))\n", encoding='utf-8')
-            result = subprocess.run(['powershell', '-NoProfile', '-File', str(root/'cc-switch.ps1'), '--resume', SESSION, '--continue'], capture_output=True, text=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            shutil.copyfile(ROOT/'ccx-switch.ps1', root/'ccx-switch.ps1')
+            (root/'ccx-switch.py').write_text("import json, sys\nfrom pathlib import Path\nPath(__file__).with_name('args.json').write_text(json.dumps(sys.argv[1:]))\n", encoding='utf-8')
+            result = subprocess.run(['powershell', '-NoProfile', '-File', str(root/'ccx-switch.ps1'), '--resume', SESSION, '--continue'], capture_output=True, text=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((root/'args.json').read_text()), ['--resume', SESSION, '--continue'])
 
@@ -246,28 +252,33 @@ class AgentRoutingTests(unittest.TestCase):
     PROFILES = {'sub': {'provider': 'openai-oauth', 'model': 'gpt-test', 'effort': 'xhigh'}}
 
     def setUp(self):
-        # The relay path: a session running through the adapter would send cc-* in-process instead.
+        # The relay path: a session running through the adapter would send ccx-* in-process instead.
         direct = patch.dict(os.environ, {'ANTHROPIC_BASE_URL': ''})
         direct.start()
         self.addCleanup(direct.stop)
 
     def test_install_preserves_settings_and_registers_live_routing_once(self):
-        spec = importlib.util.spec_from_file_location('cc_install_routing', ROOT / 'install-resume.py')
+        spec = importlib.util.spec_from_file_location('ccx_install_routing', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             claude = root / 'claude'
             claude.mkdir()
+            # The pre-rename install: hooks on ~/.config/cc/cc-switch.py and the mod loaded from there.
+            old = 'python -B "C:/Users/u/.config/cc/cc-switch.py" '
             existing = {'permissions': {'deny': ['Agent(Explore)'], 'defaultMode': 'auto'},
-                        'hooks': {'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'rtk hook claude'}]}]},
+                        'hooks': {'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'rtk hook claude'}]},
+                                                 {'matcher': 'Agent|Task', 'hooks': [{'type': 'command', 'command': old + 'hook-agent'}]}],
+                                  'SubagentStop': [{'matcher': '^cc-.*', 'hooks': [{'type': 'command', 'command': old + 'hook-subagent-stop'}]}]},
+                        'env': {'CLAUDE_CODE_PLUGIN_DIRS': os.pathsep.join(['/mods/keep', '/home/u/.config/cc/subagent-picker'])},
                         'statusLine': {'type': 'command', 'command': 'old', 'refreshInterval': 60}}
             settings = claude / 'settings.json'
             settings.write_text(json.dumps(existing), encoding='utf-8')
             with contextlib.redirect_stdout(io.StringIO()):
-                installer.install(root / 'cc', [], claude=claude)
+                installer.install(root / 'ccx', [], claude=claude)
                 first = json.loads(settings.read_text(encoding='utf-8'))
-                installer.install(root / 'cc', [], claude=claude)
+                installer.install(root / 'ccx', [], claude=claude)
             self.assertEqual(json.loads(settings.read_text(encoding='utf-8')), first)
             self.assertEqual(first['permissions'], existing['permissions'])
             self.assertEqual(first['hooks']['PreToolUse'][0], existing['hooks']['PreToolUse'][0])
@@ -275,10 +286,14 @@ class AgentRoutingTests(unittest.TestCase):
                 hooks = [h for item in first['hooks'][event] for h in item['hooks'] if command in h.get('command', '')]
                 self.assertEqual(len(hooks), 1)
                 self.assertNotIn('allow', hooks[0])
+            self.assertNotIn('cc-switch.py', json.dumps(first['hooks']))
+            self.assertEqual([g['matcher'] for g in first['hooks']['SubagentStop']], ['^ccx-.*'])
+            self.assertEqual(first['env']['CLAUDE_CODE_PLUGIN_DIRS'].split(os.pathsep),
+                             ['/mods/keep', (root / 'ccx' / 'subagent-picker').resolve().as_posix()])
             self.assertIn('agent-statusline', first['subagentStatusLine']['command'])
             self.assertEqual(first['statusLine']['refreshInterval'], 60)
             self.assertEqual((claude / 'statusline.py').read_bytes(), (ROOT / 'statusline.py').read_bytes())
-            self.assertTrue(list((root / 'cc').glob('backup-resume-*/claude/settings.json')))
+            self.assertTrue(list((root / 'ccx').glob('backup-resume-*/claude/settings.json')))
 
     def test_broken_fork_cutoff_never_launches_a_fresh_worker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,7 +305,7 @@ class AgentRoutingTests(unittest.TestCase):
             child.write_text(json.dumps({'type': 'fork-context-ref', 'parentSessionId': SESSION,
                                          'parentLastUuid': 'missing', 'contextLength': 1}) + '\n', encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'cutoff'):
-                with cc._restorable_context(str(child)):
+                with ccx._restorable_context(str(child)):
                     self.fail('Unverified history must never reach launch')
 
     def test_resuming_relay_uses_latest_worker_context_and_directory(self):
@@ -304,43 +319,43 @@ class AgentRoutingTests(unittest.TestCase):
                 token = f'00000000-0000-4000-8000-{number:012d}'
                 record = {'profile': 'sub', 'session_id': token, 'cwd': str(root)}
                 (contexts / (token + '.json')).write_text(json.dumps(record), encoding='utf-8')
-                entries.append({'type': 'user', 'message': {'content': cc.CONTEXT_PREFIX + json.dumps({'token': token}) + '\ntask'}})
+                entries.append({'type': 'user', 'message': {'content': ccx.CONTEXT_PREFIX + json.dumps({'token': token}) + '\ntask'}})
             transcript.write_text('\n'.join(json.dumps(e) for e in entries) + '\n', encoding='utf-8')
-            with patch.object(cc, 'CFG_DIR', str(root)):
-                self.assertEqual(cc._recorded_context(transcript)['session_id'], token,
+            with patch.object(ccx, 'CFG_DIR', str(root)):
+                self.assertEqual(ccx._recorded_context(transcript)['session_id'], token,
                                  'Resuming the first worker loses work from later continuations')
                 (contexts / '00000000-0000-4000-8000-000000000001.json').unlink()
-                self.assertEqual(cc._recorded_context(transcript)['session_id'], token,
+                self.assertEqual(ccx._recorded_context(transcript)['session_id'], token,
                                  'An expired older record must not hide the valid latest worker')
 
     def test_relay_refuses_dropped_context_instead_of_starting_fresh(self):
-        with patch.object(cc, 'load_agents', return_value=self.PROFILES), \
-             patch.object(cc.subprocess, 'run') as launch, self.assertRaises(SystemExit):
-            cc.run_agent('sub', 'task without required context', require_context=True)
+        with patch.object(ccx, 'load_agents', return_value=self.PROFILES), \
+             patch.object(ccx.subprocess, 'run') as launch, self.assertRaises(SystemExit):
+            ccx.run_agent('sub', 'task without required context', require_context=True)
         launch.assert_not_called()
-        with patch.dict(os.environ, {'CLAUDECODE': '1', 'CC_AGENT_CHILD': ''}), \
-             patch.object(cc, 'route_env') as route, \
-             patch.object(cc, 'load_agents', return_value=self.PROFILES), \
-             patch.object(cc.subprocess, 'run') as launch, self.assertRaises(SystemExit):
-            cc.run_agent('sub', 'legacy relay omitted its context')
+        with patch.dict(os.environ, {'CLAUDECODE': '1', 'CCX_AGENT_CHILD': ''}), \
+             patch.object(ccx, 'route_env') as route, \
+             patch.object(ccx, 'load_agents', return_value=self.PROFILES), \
+             patch.object(ccx.subprocess, 'run') as launch, self.assertRaises(SystemExit):
+            ccx.run_agent('sub', 'legacy relay omitted its context')
         route.assert_not_called()
         launch.assert_not_called()
 
     def test_read_only_worker_stays_read_only_after_relay_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / 'agent-old'
-            base.with_suffix('.meta.json').write_text('{"agentType":"cc-sub"}', encoding='utf-8')
+            base.with_suffix('.meta.json').write_text('{"agentType":"ccx-sub"}', encoding='utf-8')
             base.with_suffix('.jsonl').write_text('{"type":"user","message":{"content":"old"}}\n', encoding='utf-8')
             saved = {'profile': 'sub', 'session_id': SESSION, 'read_only': True}
             payload = {'tool_name': 'Agent', 'permission_mode': 'auto', 'transcript_path': str(base),
-                       'tool_input': {'subagent_type': 'cc-sub', 'resume': 'old', 'prompt': 'continue'}}
-            with patch.object(cc, 'load_agents', return_value=self.PROFILES), \
-                 patch.object(cc, '_agent_files', return_value=base), \
-                 patch.object(cc, '_recorded_context', return_value=saved):
-                output = cc.agent_hook(payload)['hookSpecificOutput']
+                       'tool_input': {'subagent_type': 'ccx-sub', 'resume': 'old', 'prompt': 'continue'}}
+            with patch.object(ccx, 'load_agents', return_value=self.PROFILES), \
+                 patch.object(ccx, '_agent_files', return_value=base), \
+                 patch.object(ccx, '_recorded_context', return_value=saved):
+                output = ccx.agent_hook(payload)['hookSpecificOutput']
             header = output['updatedInput']['prompt'].partition('\n')[0]
             self.assertNotIn('\\', header, 'the relay model collapses JSON backslash escapes')
-            context = json.loads(header[len(cc.CONTEXT_PREFIX):])
+            context = json.loads(header[len(ccx.CONTEXT_PREFIX):])
             self.assertIs(context.get('read_only'), True)
 
     def test_context_workers_reject_profile_privilege_and_read_only_loader_overrides(self):
@@ -354,42 +369,42 @@ class AgentRoutingTests(unittest.TestCase):
                 with self.subTest(flag=flag):
                     context = {'token': SESSION, 'source': str(source), 'permission_mode': 'default', 'read_only': read_only}
                     profile = {**self.PROFILES['sub'], 'args': [flag]}
-                    with patch.object(cc, 'load_agents', return_value={'sub': profile}), \
-                         patch.object(cc, 'route_env', return_value={}), patch.object(cc, 'model_efforts', return_value=None), \
-                         patch.object(cc.subprocess, 'run') as launch, \
+                    with patch.object(ccx, 'load_agents', return_value={'sub': profile}), \
+                         patch.object(ccx, 'route_env', return_value={}), patch.object(ccx, 'model_efforts', return_value=None), \
+                         patch.object(ccx.subprocess, 'run') as launch, \
                          contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                        cc.run_agent('sub', cc.CONTEXT_PREFIX + json.dumps(context) + '\ntask')
+                        ccx.run_agent('sub', ccx.CONTEXT_PREFIX + json.dumps(context) + '\ntask')
                     launch.assert_not_called()
 
     def test_slash_commands_run_without_a_model_turn(self):
-        with patch.object(cc, 'load_agents', return_value=self.PROFILES), patch.object(cc.subprocess, 'run') as run:
+        with patch.object(ccx, 'load_agents', return_value=self.PROFILES), patch.object(ccx.subprocess, 'run') as run:
             run.return_value = Mock(stdout='changed', stderr='')
-            out = cc.hook_command({'command_name': 'fallback', 'command_args': 'nvidia a/b'})
+            out = ccx.hook_command({'command_name': 'fallback', 'command_args': 'nvidia a/b'})
             self.assertEqual(out['decision'], 'block')
             self.assertIn('changed', out['reason'])
             self.assertEqual(run.call_args.args[0][-3:], ['fallback', 'nvidia', 'a/b'])
             run.reset_mock()
             # /subagent-autocompact is /model's Compact column now; Claude Code's own commands pass
             for name in ('subagent-autocompact', 'subagent-model', 'review'):
-                self.assertEqual(cc.hook_command({'command_name': name, 'command_args': 'sub 70'}), {})
+                self.assertEqual(ccx.hook_command({'command_name': name, 'command_args': 'sub 70'}), {})
             run.assert_not_called()
 
     def test_adapter_workers_tag_requests_for_live_effort(self):
-        route = {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{cc.ADAPTER_PORT}/openai-oauth'}
-        with patch.object(cc, 'load_agents', return_value=self.PROFILES),              patch.object(cc, 'route_env', return_value=route), patch.object(cc, 'model_efforts', return_value=None),              patch.object(cc.subprocess, 'run') as launch,              patch.dict(os.environ, {'CC_AGENT_CHILD': '1'}), self.assertRaises(SystemExit):
+        route = {'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{ccx.ADAPTER_PORT}/openai-oauth'}
+        with patch.object(ccx, 'load_agents', return_value=self.PROFILES),              patch.object(ccx, 'route_env', return_value=route), patch.object(ccx, 'model_efforts', return_value=None),              patch.object(ccx.subprocess, 'run') as launch,              patch.dict(os.environ, {'CCX_AGENT_CHILD': '1'}), self.assertRaises(SystemExit):
             launch.return_value.returncode = 0
-            cc.run_agent('sub', 'task')
+            ccx.run_agent('sub', 'task')
         headers = launch.call_args.kwargs['env']['ANTHROPIC_CUSTOM_HEADERS']
-        self.assertIn('x-cc-worker-profile: sub', headers, 'the adapter retags live effort per request')
-        self.assertIn('x-cc-launch: agent-sub', headers, "the adapter resolves this worker's fallback by launch id")
+        self.assertIn('x-ccx-worker-profile: sub', headers, 'the adapter retags live effort per request')
+        self.assertIn('x-ccx-launch: agent-sub', headers, "the adapter resolves this worker's fallback by launch id")
 
     def test_removed_profile_does_not_hide_running_worker_snapshot(self):
         payload = {'transcript_path': str(ROOT / 'session.jsonl'), 'tasks': [
-            {'id': 'old', 'agentType': 'cc-sub', 'model': 'native-relay', 'status': 'running'}]}
+            {'id': 'old', 'agentType': 'ccx-sub', 'model': 'native-relay', 'status': 'running'}]}
         saved = {**self.PROFILES['sub'], 'profile': 'sub', 'session_id': SESSION}
-        with patch.object(cc, 'load_agents', return_value={}), \
-             patch.object(cc, '_recorded_context', return_value=saved):
-            row = list(cc.agent_statusline(payload))[0]['content']
+        with patch.object(ccx, 'load_agents', return_value={}), \
+             patch.object(ccx, '_recorded_context', return_value=saved):
+            row = list(ccx.agent_statusline(payload))[0]['content']
         self.assertIn('gpt-test', row)
         self.assertNotIn('relay', row)
         self.assertTrue(row.startswith('\x1b[1;97m'), 'a running row is highlighted')
@@ -407,15 +422,15 @@ class AgentRoutingTests(unittest.TestCase):
                 metadata.parent.mkdir(parents=True)
                 metadata.write_text(json.dumps({'agentType': resume_type}), encoding='utf-8')
                 metadata.with_name('agent-old.jsonl').write_text('{"type":"user","message":{"content":"old context"}}\n', encoding='utf-8')
-            with patch.object(cc, 'AGENTS_FILE', str(profiles_file)), \
-                 patch.object(cc, 'APPLY_FILE', str(pending)), \
-                 patch.object(cc.sys, 'argv', ['cc', command]), \
-                 patch.object(cc.sys, 'stdin', io.StringIO(json.dumps(payload))), \
-                 patch.dict(os.environ, {'CC_AGENT_CHILD': '1' if child else ''}), \
-                 patch.object(cc, 'apply', side_effect=AssertionError('Hook must not launch a client')), \
+            with patch.object(ccx, 'AGENTS_FILE', str(profiles_file)), \
+                 patch.object(ccx, 'APPLY_FILE', str(pending)), \
+                 patch.object(ccx.sys, 'argv', ['ccx', command]), \
+                 patch.object(ccx.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                 patch.dict(os.environ, {'CCX_AGENT_CHILD': '1' if child else ''}), \
+                 patch.object(ccx, 'apply', side_effect=AssertionError('Hook must not launch a client')), \
                  contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
                 try:
-                    cc.main()
+                    ccx.main()
                 except SystemExit as exc:
                     self.fail(f'Routing command must handle the hook before launch cleanup: exit {exc.code}')
             self.assertEqual(pending.read_text(encoding='utf-8'), 'pending launch')
@@ -428,12 +443,12 @@ class AgentRoutingTests(unittest.TestCase):
                            'tool_input': {'subagent_type': kind, 'prompt': 'task', 'description': 'work'}}
                 result = json.loads(self.hook('hook-agent', payload))['hookSpecificOutput']
                 self.assertEqual(result['permissionDecision'], 'deny')
-                self.assertIn('cc-sub', result['permissionDecisionReason'])
+                self.assertIn('ccx-sub', result['permissionDecisionReason'])
                 self.assertNotIn('updatedInput', result, 'Do not silently discard native role/tool restrictions')
 
     def test_configured_relay_keeps_normal_permissions_and_input(self):
         payload = {'tool_name': 'Agent', 'permission_mode': 'auto', 'tool_input': {
-            'subagent_type': 'cc-sub', 'prompt': 'complete task', 'description': 'work',
+            'subagent_type': 'ccx-sub', 'prompt': 'complete task', 'description': 'work',
             'isolation': 'worktree', 'run_in_background': True}}
         result = json.loads(self.hook('hook-agent', payload))['hookSpecificOutput']
         self.assertNotIn('permissionDecision', result, 'Context handoff must not auto-approve the tool')
@@ -444,12 +459,12 @@ class AgentRoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(self.hook('hook-agent', payload, child=True)), {})
         payload['permission_mode'] = 'plan'
         result = json.loads(self.hook('hook-agent', payload))['hookSpecificOutput']
-        context = json.loads(result['updatedInput']['prompt'].split('\n', 1)[0][len(cc.CONTEXT_PREFIX):])
+        context = json.loads(result['updatedInput']['prompt'].split('\n', 1)[0][len(ccx.CONTEXT_PREFIX):])
         self.assertTrue(context['read_only'])
         self.assertEqual(context['permission_mode'], 'plan')
 
     def test_old_native_resumes_cannot_masquerade_as_configured_workers(self):
-        payload = {'tool_name': 'Agent', 'tool_input': {'subagent_type': 'cc-sub', 'resume': 'old', 'prompt': 'continue'}}
+        payload = {'tool_name': 'Agent', 'tool_input': {'subagent_type': 'ccx-sub', 'resume': 'old', 'prompt': 'continue'}}
         for prior in ('fork', 'general-purpose'):
             with self.subTest(prior=prior):
                 result = json.loads(self.hook('hook-agent', payload, resume_type=prior))['hookSpecificOutput']
@@ -459,7 +474,7 @@ class AgentRoutingTests(unittest.TestCase):
         result = json.loads(self.hook('hook-agent', payload))['hookSpecificOutput']
         self.assertEqual(result['permissionDecision'], 'deny')
         self.assertIn('self-contained', result['permissionDecisionReason'])
-        result = json.loads(self.hook('hook-agent', payload, resume_type='cc-sub'))['hookSpecificOutput']
+        result = json.loads(self.hook('hook-agent', payload, resume_type='ccx-sub'))['hookSpecificOutput']
         self.assertEqual(result['updatedInput']['resume'], 'old')
 
     def test_missing_profiles_block_delegation_and_context_names_current_route(self):
@@ -469,13 +484,13 @@ class AgentRoutingTests(unittest.TestCase):
         for event in ('SessionStart', 'UserPromptSubmit'):
             result = json.loads(self.hook('hook-context', {'hook_event_name': event}))['hookSpecificOutput']
             self.assertEqual(result['hookEventName'], event)
-            self.assertIn('cc-sub', result['additionalContext'])
+            self.assertIn('ccx-sub', result['additionalContext'])
             self.assertIn('openai-oauth/gpt-test', result['additionalContext'])
 
     def test_native_rows_are_not_relabelled_after_profiles_change(self):
         payload = {'columns': 160, 'tasks': [
             {'id': 'old', 'agentType': 'fork', 'model': 'claude-opus-5-5', 'description': 'old work', 'status': 'running'},
-            {'id': 'cc', 'agentType': 'cc-sub', 'model': 'claude-haiku-test', 'description': 'new work', 'status': 'running'}]}
+            {'id': 'ccx', 'agentType': 'ccx-sub', 'model': 'claude-haiku-test', 'description': 'new work', 'status': 'running'}]}
         rows = [json.loads(line) for line in self.hook('agent-statusline', payload).splitlines()]
         self.assertIn('claude-opus-5-5', rows[0]['content'])
         self.assertNotIn('gpt-test', rows[0]['content'])
@@ -483,15 +498,15 @@ class AgentRoutingTests(unittest.TestCase):
         self.assertNotIn('claude-haiku-test', rows[1]['content'], 'the relay model is not the worker')
 
     def test_worker_marks_child_to_prevent_recursive_routing(self):
-        with patch.object(cc, 'load_agents', return_value=self.PROFILES), \
-             patch.object(cc, 'route_env', return_value={}), \
-             patch.object(cc, 'model_efforts', return_value=None), \
-             patch.object(cc.subprocess, 'run') as launch, \
-             patch.dict(os.environ, {'CC_AGENT_CHILD': '', 'CC_MAIN_PROVIDER': 'official'}):
+        with patch.object(ccx, 'load_agents', return_value=self.PROFILES), \
+             patch.object(ccx, 'route_env', return_value={}), \
+             patch.object(ccx, 'model_efforts', return_value=None), \
+             patch.object(ccx.subprocess, 'run') as launch, \
+             patch.dict(os.environ, {'CCX_AGENT_CHILD': '', 'CCX_MAIN_PROVIDER': 'official'}):
             launch.return_value.returncode = 0
             with self.assertRaises(SystemExit):
-                cc.run_agent('sub', 'task')
-        self.assertEqual(launch.call_args.kwargs['env'].get('CC_AGENT_CHILD'), '1')
+                ccx.run_agent('sub', 'task')
+        self.assertEqual(launch.call_args.kwargs['env'].get('CCX_AGENT_CHILD'), '1')
 
     def test_worker_restores_parent_and_old_fork_messages_as_normal_history(self):
         parent_id = '00000000-0000-4000-8000-000000000001'
@@ -525,17 +540,17 @@ class AgentRoutingTests(unittest.TestCase):
                 self.assertEqual(efforts[-1], 'xhigh', 'Profile args must not override the configured effort')
                 self.assertEqual(command[-2:], ['--permission-mode', 'plan'])
                 self.assertNotIn('CLAUDECODE', kwargs['env'])
-                saved = json.loads((root / 'cc/contexts' / (context['token'] + '.json')).read_text(encoding='utf-8'))
+                saved = json.loads((root / 'ccx/contexts' / (context['token'] + '.json')).read_text(encoding='utf-8'))
                 self.assertIs(saved.get('read_only'), True)
                 return Mock(returncode=0)
 
-            with patch.object(cc, 'CFG_DIR', str(root / 'cc')), \
-                 patch.dict(os.environ, {'CLAUDECODE': '1', 'CC_AGENT_CHILD': ''}), \
-                 patch.object(cc, 'load_agents', return_value={'sub': {**self.PROFILES['sub'], 'args': ['--effort', 'low']}}), \
-                 patch.object(cc, 'route_env', return_value={}), \
-                 patch.object(cc, 'model_efforts', return_value=None), \
-                 patch.object(cc.subprocess, 'run', side_effect=launched), self.assertRaises(SystemExit):
-                cc.run_agent('sub', cc.CONTEXT_PREFIX + json.dumps(context) + '\nContinue the task')
+            with patch.object(ccx, 'CFG_DIR', str(root / 'ccx')), \
+                 patch.dict(os.environ, {'CLAUDECODE': '1', 'CCX_AGENT_CHILD': ''}), \
+                 patch.object(ccx, 'load_agents', return_value={'sub': {**self.PROFILES['sub'], 'args': ['--effort', 'low']}}), \
+                 patch.object(ccx, 'route_env', return_value={}), \
+                 patch.object(ccx, 'model_efforts', return_value=None), \
+                 patch.object(ccx.subprocess, 'run', side_effect=launched), self.assertRaises(SystemExit):
+                ccx.run_agent('sub', ccx.CONTEXT_PREFIX + json.dumps(context) + '\nContinue the task')
             self.assertEqual(parent.read_bytes(), original_parent)
             self.assertEqual(child.read_bytes(), original_child)
 
@@ -550,7 +565,7 @@ class NavigationTests(unittest.TestCase):
         stream = iter(keys)
         screen = io.StringIO()
         screen.isatty = lambda: True
-        arrow_menu = cc.catalog._arrow_menu
+        arrow_menu = ccx.catalog._arrow_menu
 
         def getch():
             try:
@@ -564,28 +579,28 @@ class NavigationTests(unittest.TestCase):
             return arrow_menu(title, rows, default, *args, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
-            stack.enter_context(patch.object(cc, 'APPLY_FILE', str(Path(tmp) / 'apply.ps1')))
-            stack.enter_context(patch.object(cc, 'load_state', return_value={}))
-            stack.enter_context(patch.object(cc, 'load_agents', return_value=agents or {}))
-            stack.enter_context(patch.object(cc, '_latest_session_agents', return_value=None))
-            save = stack.enter_context(patch.object(cc, 'save_agents'))
-            stack.enter_context(patch.object(cc, 'sync_agents'))
-            stack.enter_context(patch.object(cc, 'quit_on_ctrl_c'))
-            apply = stack.enter_context(patch.object(cc, 'apply'))
-            stack.enter_context(patch.object(cc, 'ensure_key'))
-            stack.enter_context(patch.object(cc, 'get_models', side_effect=lambda p: [{'id': p + '/test'}]))
-            stack.enter_context(patch.object(cc.catalog, '_loading', return_value=contextlib.nullcontext()))
-            stack.enter_context(patch.object(cc.catalog, '_models_dev', return_value={}))
-            stack.enter_context(patch.object(cc.catalog, '_artificial_analysis', return_value=[]))
-            stack.enter_context(patch.object(cc.catalog, '_model_facts', return_value={}))
-            stack.enter_context(patch.object(cc.catalog, '_refresh_missing_intelligence'))
-            stack.enter_context(patch.object(cc.catalog, '_enable_ansi'))
-            stack.enter_context(patch.object(cc.catalog, '_arrow_menu', side_effect=menu))
-            stack.enter_context(patch.object(cc.catalog, '_key_reader', return_value=getch))
+            stack.enter_context(patch.object(ccx, 'APPLY_FILE', str(Path(tmp) / 'apply.ps1')))
+            stack.enter_context(patch.object(ccx, 'load_state', return_value={}))
+            stack.enter_context(patch.object(ccx, 'load_agents', return_value=agents or {}))
+            stack.enter_context(patch.object(ccx, '_latest_session_agents', return_value=None))
+            save = stack.enter_context(patch.object(ccx, 'save_agents'))
+            stack.enter_context(patch.object(ccx, 'sync_agents'))
+            stack.enter_context(patch.object(ccx, 'quit_on_ctrl_c'))
+            apply = stack.enter_context(patch.object(ccx, 'apply'))
+            stack.enter_context(patch.object(ccx, 'ensure_key'))
+            stack.enter_context(patch.object(ccx, 'get_models', side_effect=lambda p: [{'id': p + '/test'}]))
+            stack.enter_context(patch.object(ccx.catalog, '_loading', return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(ccx.catalog, '_models_dev', return_value={}))
+            stack.enter_context(patch.object(ccx.catalog, '_artificial_analysis', return_value=[]))
+            stack.enter_context(patch.object(ccx.catalog, '_model_facts', return_value={}))
+            stack.enter_context(patch.object(ccx.catalog, '_refresh_missing_intelligence'))
+            stack.enter_context(patch.object(ccx.catalog, '_enable_ansi'))
+            stack.enter_context(patch.object(ccx.catalog, '_arrow_menu', side_effect=menu))
+            stack.enter_context(patch.object(ccx.catalog, '_key_reader', return_value=getch))
             stack.enter_context(patch.object(sys, 'stdin', Mock(isatty=lambda: True)))
             stack.enter_context(patch.object(sys, 'stdout', screen))
-            stack.enter_context(patch.object(sys, 'argv', ['cc', *argv]))
-            cc.main()
+            stack.enter_context(patch.object(sys, 'argv', ['ccx', *argv]))
+            ccx.main()
         return seen, apply, save, screen.getvalue()
 
     def test_escape_returns_to_each_previous_main_and_subagent_prompt(self):
@@ -689,44 +704,44 @@ class NavigationTests(unittest.TestCase):
 
 class FallbackTests(unittest.TestCase):
     def test_fallback_is_off_until_set_and_per_launch(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'FALLBACKS_FILE', os.path.join(tmp, 'f.json')), \
-                patch.dict(os.environ, {'CC_LAUNCH_ID': 'one', 'CC_MAIN_PROVIDER': 'gemini'}), contextlib.redirect_stdout(io.StringIO()) as out:
-            cc.fallback_command([])
-            cc.fallback_command(['NVIDIA', 'deepseek-ai/deepseek-v4-pro'])
-            os.environ['CC_LAUNCH_ID'] = 'two'
-            cc.fallback_command([])
-            os.environ['CC_LAUNCH_ID'] = 'one'
-            cc.fallback_command(['off'])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ccx, 'FALLBACKS_FILE', os.path.join(tmp, 'f.json')), \
+                patch.dict(os.environ, {'CCX_LAUNCH_ID': 'one', 'CCX_MAIN_PROVIDER': 'gemini'}), contextlib.redirect_stdout(io.StringIO()) as out:
+            ccx.fallback_command([])
+            ccx.fallback_command(['NVIDIA', 'deepseek-ai/deepseek-v4-pro'])
+            os.environ['CCX_LAUNCH_ID'] = 'two'
+            ccx.fallback_command([])
+            os.environ['CCX_LAUNCH_ID'] = 'one'
+            ccx.fallback_command(['off'])
             self.assertEqual(out.getvalue().splitlines(), ['Fallback: off', 'Fallback: nvidia/deepseek-ai/deepseek-v4-pro', 'Fallback: off', 'Fallback: off'])
             with self.assertRaises(SystemExit):
-                cc.fallback_command(['official', 'claude-opus-5-5'])  # not an adapter route
+                ccx.fallback_command(['official', 'claude-opus-5-5'])  # not an adapter route
 
     def test_fallback_and_route_keep_an_effort(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(cc, 'FALLBACKS_FILE', os.path.join(tmp, 'f.json')),                 patch.object(cc, 'ROUTES_FILE', os.path.join(tmp, 'r.json')),                 patch.dict(os.environ, {'CC_LAUNCH_ID': 'one', 'CC_MAIN_PROVIDER': 'gemini'}), contextlib.redirect_stdout(io.StringIO()) as out:
-            cc.fallback_command(['nvidia', 'x/y', 'high'])
-            cc.route_command(['nvidia', 'x/y', 'default'])
-            cc.route_command(['nvidia', 'x/y', 'low'])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ccx, 'FALLBACKS_FILE', os.path.join(tmp, 'f.json')),                 patch.object(ccx, 'ROUTES_FILE', os.path.join(tmp, 'r.json')),                 patch.dict(os.environ, {'CCX_LAUNCH_ID': 'one', 'CCX_MAIN_PROVIDER': 'gemini'}), contextlib.redirect_stdout(io.StringIO()) as out:
+            ccx.fallback_command(['nvidia', 'x/y', 'high'])
+            ccx.route_command(['nvidia', 'x/y', 'default'])
+            ccx.route_command(['nvidia', 'x/y', 'low'])
             self.assertEqual(out.getvalue().splitlines(), ['Fallback: nvidia/x/y', 'Effort: high', 'Route: nvidia/x/y',
                                                            'Route: nvidia/x/y', 'Effort: low'])
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-                cc.route_command(['nvidia', 'x/y', 'lo w;'])
+                ccx.route_command(['nvidia', 'x/y', 'lo w;'])
 
     def test_picker_lists_routes_without_the_session_own(self):
-        with patch.dict(os.environ, {'CC_MAIN_PROVIDER': 'nvidia', 'CC_LAUNCH_ID': ''}), contextlib.redirect_stdout(io.StringIO()) as out:
-            cc.fallback_command(['routes'])
+        with patch.dict(os.environ, {'CCX_MAIN_PROVIDER': 'nvidia', 'CCX_LAUNCH_ID': ''}), contextlib.redirect_stdout(io.StringIO()) as out:
+            ccx.fallback_command(['routes'])
         names = [line.split('\t')[0] for line in out.getvalue().splitlines()]
-        self.assertEqual(names, [n for n in cc.FALLBACK_ROUTES if n != 'nvidia'])
-        with patch.object(cc, 'get_models', return_value=[{'id': 'a'}, {'id': 'b'}]), contextlib.redirect_stdout(io.StringIO()) as out:
-            cc.fallback_command(['models', 'gemini'])
+        self.assertEqual(names, [n for n in ccx.FALLBACK_ROUTES if n != 'nvidia'])
+        with patch.object(ccx, 'get_models', return_value=[{'id': 'a'}, {'id': 'b'}]), contextlib.redirect_stdout(io.StringIO()) as out:
+            ccx.fallback_command(['models', 'gemini'])
         self.assertEqual(out.getvalue().split(), ['a', 'b'])
 
-    def test_fallback_needs_a_cc_launch(self):
-        with patch.dict(os.environ, {'CC_LAUNCH_ID': ''}), self.assertRaises(SystemExit):
-            cc.fallback_command([])
+    def test_fallback_needs_a_ccx_launch(self):
+        with patch.dict(os.environ, {'CCX_LAUNCH_ID': ''}), self.assertRaises(SystemExit):
+            ccx.fallback_command([])
 
     def test_slash_fallback_is_answered_without_a_model_turn(self):
-        with patch.object(cc.subprocess, 'run', return_value=Mock(stdout='Fallback: off', stderr='')) as run:
-            out = cc.hook_command({'command_name': 'fallback', 'command_args': 'off'})
+        with patch.object(ccx.subprocess, 'run', return_value=Mock(stdout='Fallback: off', stderr='')) as run:
+            out = ccx.hook_command({'command_name': 'fallback', 'command_args': 'off'})
         self.assertEqual(run.call_args.args[0][-2:], ['fallback', 'off'])
         self.assertEqual(out['decision'], 'block')
         self.assertIn('Fallback: off', out['reason'])

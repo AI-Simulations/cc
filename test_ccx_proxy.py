@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-spec = importlib.util.spec_from_file_location("proxy", Path(__file__).with_name("cc-anthropic-proxy.py"))
+spec = importlib.util.spec_from_file_location("proxy", Path(__file__).with_name("ccx-anthropic-proxy.py"))
 proxy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proxy)
 
@@ -40,12 +40,12 @@ from unittest.mock import patch
 from types import SimpleNamespace
 for lowest, inherited, expected in [('low', 'high', 'low'), (None, 'high', 'high'), (None, None, None)]:
     fake = SimpleNamespace(load_routes=lambda: {}, lowest_effort=lambda *args: lowest, helper_default=lambda *args: None)
-    with patch.object(proxy, '_load_cc_switch', return_value=fake):
+    with patch.object(proxy, '_load_ccx_switch', return_value=fake):
         target = proxy.helper_target('L', 'tools', {'provider': 'openai-oauth', 'model': 'main-model', 'effort': inherited})
     assert target['model'] == 'main-model' and target['effort'] == expected
 fake = SimpleNamespace(load_routes=lambda: {'L': {'helpers': {'tools': {'provider': 'openai-oauth', 'model': 'picked', 'effort': 'medium'}}}},
                        lowest_effort=lambda *args: 'low')
-with patch.object(proxy, '_load_cc_switch', return_value=fake), patch.object(proxy, 'provider_target', side_effect=lambda p, m, e: {'model': m, 'effort': e}):
+with patch.object(proxy, '_load_ccx_switch', return_value=fake), patch.object(proxy, 'provider_target', side_effect=lambda p, m, e: {'model': m, 'effort': e}):
     assert proxy.helper_target('L', 'tools', {'effort': 'high'}) == {'model': 'picked', 'effort': 'medium'}
 
 # Safety defaults follow the effective provider; explicit launch selections win.
@@ -58,7 +58,7 @@ expected_auto = {
     'nvidia': ('deepseek-ai/deepseek-v4.1-flash', 'high'),
     'official': ('claude-haiku-5-5', 'low'),
 }
-switch = proxy._load_cc_switch()
+switch = proxy._load_ccx_switch()
 with tempfile.TemporaryDirectory() as tmp:
     Path(tmp, 'helper-defaults.json').write_text(json.dumps({'auto': {
         p: {'model': m, 'effort': e} for p, (m, e) in expected_auto.items()}}), encoding='utf-8')
@@ -71,22 +71,22 @@ with tempfile.TemporaryDirectory() as tmp:
         explicit = {'L': {'helpers': {'auto': {'provider': 'openai-oauth', 'model': 'custom', 'effort': 'high'}}}}
         with patch.object(switch, 'load_routes', return_value=explicit):
             assert proxy.helper_target('L', 'auto', {'provider': 'nvidia'})['model'] == 'custom'
-proxy._cc_switch = None
+proxy._ccx_switch = None
 
-# The CLI route's discovery list comes from cc-switch.py beside the adapter.
+# The CLI route's discovery list comes from ccx-switch.py beside the adapter.
 with tempfile.TemporaryDirectory() as tmp:
-    Path(tmp, "cc-switch.py").write_text("def get_models(provider):\n    return [{'id': provider + '-model'}]\n", encoding="utf-8")
-    original_file, proxy.__file__ = proxy.__file__, str(Path(tmp) / "cc-anthropic-proxy.py")
+    Path(tmp, "ccx-switch.py").write_text("def get_models(provider):\n    return [{'id': provider + '-model'}]\n", encoding="utf-8")
+    original_file, proxy.__file__ = proxy.__file__, str(Path(tmp) / "ccx-anthropic-proxy.py")
     try:
-        assert proxy.cc_models("cli") == [{"id": "cli-model"}]
-        proxy._cc_switch = None  # a fresh adapter process
-        Path(tmp, "cc-switch.py").unlink()
-        assert proxy.cc_models("cli") == [], "Without the sibling script discovery is empty"
+        assert proxy.ccx_models("cli") == [{"id": "cli-model"}]
+        proxy._ccx_switch = None  # a fresh adapter process
+        Path(tmp, "ccx-switch.py").unlink()
+        assert proxy.ccx_models("cli") == [], "Without the sibling script discovery is empty"
     finally:
         proxy.__file__ = original_file
-        proxy._cc_switch = None
+        proxy._ccx_switch = None
 
-# An in-process cc worker names its profile by model; the launch's own profiles win over the shared ones.
+# An in-process ccx worker names its profile by model; the launch's own profiles win over the shared ones.
 class _Live:
     PROVIDERS = {"openai-oauth": {"format": "openai", "key": "oauth"}, "minimax": {"format": "anthropic", "base": "https://mm/anthropic", "key": "minimax"},
                  "opencode-go": {"format": "anthropic", "base": "https://go", "key": "opencode-go", "header": "x-api-key"}}
@@ -99,14 +99,14 @@ class _Live:
         return name + "-key"
     def go_messages(self, model):
         return False
-proxy._cc_switch = _Live()
+proxy._ccx_switch = _Live()
 assert proxy.live_target("claude-opus-5-5", "L1") is None, "Ordinary models pass through"
-assert proxy.live_target("cc-live-sub", "L1") == {"provider": "minimax", "model": "MiniMax-M3", "effort": "high", "key": "minimax-key",
+assert proxy.live_target("ccx-live-sub", "L1") == {"provider": "minimax", "model": "MiniMax-M3", "effort": "high", "key": "minimax-key",
                                                   "format": "anthropic", "base": "https://mm/anthropic", "header": None}
-assert proxy.live_target("cc-live-sub", "other")["format"] == "chat" and proxy.live_target("cc-live-sub", None)["key"] == "openai-oauth"
-assert proxy.live_target("cc-live-go", None)["format"] == "chat", "Go models without /messages go through chat completions"
-assert proxy.live_target("cc-live-claude", None) == {"provider": "official", "model": proxy.LIVE_OFFICIAL_DEFAULT, "effort": None, "key": "", "format": "official"}
-for missing in ("cc-live-nobody", "cc-live-bare"):
+assert proxy.live_target("ccx-live-sub", "other")["format"] == "chat" and proxy.live_target("ccx-live-sub", None)["key"] == "openai-oauth"
+assert proxy.live_target("ccx-live-go", None)["format"] == "chat", "Go models without /messages go through chat completions"
+assert proxy.live_target("ccx-live-claude", None) == {"provider": "official", "model": proxy.LIVE_OFFICIAL_DEFAULT, "effort": None, "key": "", "format": "official"}
+for missing in ("ccx-live-nobody", "ccx-live-bare"):
     try:
         proxy.live_target(missing, None)
     except ValueError:
@@ -119,7 +119,7 @@ class _Agents:
     efforts = {"sub": "low", "plain": None}
     def load_agents(self):
         return {name: {"effort": effort} for name, effort in self.efforts.items()}
-proxy._cc_switch = _Agents()
+proxy._ccx_switch = _Agents()
 try:
     body = {"output_config": {"effort": "xhigh"}, "messages": ["kept"]}
     proxy.live_worker_effort(body, "sub")
@@ -129,7 +129,7 @@ try:
     proxy.live_worker_effort(body := {"output_config": {"effort": "high"}}, "gone")
     assert body["output_config"]["effort"] == "high", "an unknown profile keeps the started effort"
 finally:
-    proxy._cc_switch = None
+    proxy._ccx_switch = None
 
 body = {"model": "gpt-6-astra", "max_tokens": 100, "stream": True,
     "system": [{"type": "text", "text": "System", "cache_control": {"type": "ephemeral"}}],
@@ -285,7 +285,7 @@ assert any(e.get("content_block", {}).get("type") == "tool_use" for e in called)
 assert open_call.call_count == 1
 assert proxy.NO_ANSWER not in "".join(e["delta"].get("text", "") for e in called if e.get("delta", {}).get("type") == "text_delta")
 
-# The text-protocol CLI path (CC_CMDC_TEXT=1) holds a punctuation-only answer too.
+# The text-protocol CLI path (CCX_CMDC_TEXT=1) holds a punctuation-only answer too.
 def dot_events(*args, **kwargs):
     yield {"type": "text_delta", "delta": "."}
     yield {"type": "result", "finalText": ".", "usage": {}, "stopReason": "end_turn"}
@@ -394,7 +394,7 @@ with tempfile.TemporaryDirectory() as rate_dir, patch.object(proxy, 'RATE_DIR', 
 print('provider quota metadata ok')
 
 received = []
-# Discovery and effort metadata come from cc-switch; the suites stub that boundary.
+# Discovery and effort metadata come from ccx-switch; the suites stub that boundary.
 proxy.effort_supported = lambda provider, model, effort: True
 class Upstream(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -468,25 +468,25 @@ try:
     urllib.request.urlopen(request, timeout=10).read()
     assert "reasoning_effort" not in received[-1][2]
     proxy.effort_supported = lambda provider, model, effort: True
-    # `cc official`: passed to Anthropic as sent (path, login, body, stream) until /model routes the launch.
+    # `ccx official`: passed to Anthropic as sent (path, login, body, stream) until /model routes the launch.
     proxy.OFFICIAL_UPSTREAM = f"http://127.0.0.1:{upstream.server_port}"
     route_for = proxy.route_for
     proxy.route_for = lambda launch: None
     official = f"http://127.0.0.1:{adapter.server_port}/official/v1/messages?beta=true"
-    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
     with urllib.request.urlopen(request, timeout=10) as response:
         assert response.read() == wire, 'The official stream comes back byte for byte'
     assert received[-1] == ("/v1/messages?beta=true", "Bearer oauth-login", {**body, "stream": True})
     # Routed by /model: converted for the picked provider, with its key and model.
     proxy.route_for = lambda launch: {"provider": "nvidia", "model": "routed", "effort": None, "key": "nv-key", "format": "chat"}
-    stamped = [{"type": "text", "text": "x-anthropic-billing-header: cc_version=1; cch=abc; cc_turn_index=3;"}]
-    request = urllib.request.Request(official, data=json.dumps({**body, "stream": False, "system": stamped}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    stamped = [{"type": "text", "text": "x-anthropic-billing-header: ccx_version=1; cch=abc; ccx_turn_index=3;"}]
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": False, "system": stamped}).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
     assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
     assert received[-1][:2] == ("/v1/chat/completions", "Bearer nv-key") and received[-1][2]["model"] == "routed"
-    assert "cch=" not in json.dumps(received[-1][2]) and "cc_version=1;" in json.dumps(received[-1][2]), 'per-request stamps stay with Anthropic'
+    assert "cch=" not in json.dumps(received[-1][2]) and "ccx_version=1;" in json.dumps(received[-1][2]), 'per-request stamps stay with Anthropic'
     # Routed back to another Claude model: passed to Anthropic with the login, the model swapped.
     proxy.route_for = lambda launch: {"provider": "official", "model": "claude-other", "effort": None, "key": "", "format": "official"}
-    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
     urllib.request.urlopen(request, timeout=10).read()
     assert received[-1][:2] == ("/v1/messages?beta=true", "Bearer oauth-login") and received[-1][2]["model"] == "claude-other"
     # Auto mode's check is the safety classifier: it follows the provider's helper default (haiku
@@ -506,8 +506,8 @@ try:
             return "low"
 
     check = {"model": "claude-sonnet-5", "max_tokens": 64, "stream": False, "thinking": {"type": "disabled"}, "stop_sequences": ["</severity>"], "messages": [{"role": "user", "content": "x"}]}
-    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
-    with patch.object(proxy, "_load_cc_switch", return_value=FakeSwitch()):
+    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
+    with patch.object(proxy, "_load_ccx_switch", return_value=FakeSwitch()):
         urllib.request.urlopen(request, timeout=10).read()
     sent = received[-1][2]
     assert sent["model"] == "claude-haiku-5-5" and sent["output_config"]["effort"] == "low", sent
@@ -516,7 +516,7 @@ try:
     helper_target = proxy.helper_target
     proxy.helper_target = lambda launch, kind, current: {**current, "model": "gpt-6-luna", "effort": "low"} if kind == "auto" else {**current, "effort": "low"}
     for helper, expected in ((check, "gpt-6-luna"), ({**check, "stop_sequences": [], "output_config": {"effort": "xhigh"}}, "gpt-6.1-sol")):
-        request = urllib.request.Request(official, data=json.dumps(helper).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+        request = urllib.request.Request(official, data=json.dumps(helper).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
         urllib.request.urlopen(request, timeout=10).read()
         sent = received[-1]
         assert sent[:2] == ("/v1/chat/completions", "Bearer oa-key")
@@ -525,10 +525,10 @@ try:
     # Explicit helper routing can exist with no main override; it must not redirect main turns.
     proxy.route_for = lambda launch: None
     proxy.helper_target = lambda launch, kind, current: {"provider": "openai-oauth", "model": "gpt-6-luna", "effort": "low", "key": "oa-key", "format": "chat"}
-    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    request = urllib.request.Request(official, data=json.dumps(check).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
     urllib.request.urlopen(request, timeout=10).read()
     assert received[-1][2]["model"] == "gpt-6-luna"
-    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-cc-launch": "L"})
+    request = urllib.request.Request(official, data=json.dumps({**body, "stream": True}).encode(), headers={"Authorization": "Bearer oauth-login", "x-ccx-launch": "L"})
     assert urllib.request.urlopen(request, timeout=10).read() == wire
     proxy.helper_target = helper_target
     proxy.route_for = route_for
@@ -550,7 +550,7 @@ try:
                                                        'key': 'go-key', 'format': 'anthropic', 'base': live_base}
         # an official session runs as first party: its Anthropic-only diagnostics stay with Anthropic
         request = urllib.request.Request(official, data=json.dumps({**body, 'stream': False, 'diagnostics': {'x': 1}}).encode(),
-                                         headers={'Authorization': 'Bearer oauth-login', 'x-cc-launch': 'L'})
+                                         headers={'Authorization': 'Bearer oauth-login', 'x-ccx-launch': 'L'})
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 assert expect == 200 and response.status == 200 and json.loads(response.read())['choices']
@@ -569,11 +569,11 @@ try:
     assert proxy.third_party_beta(None) is None
     # First party, Claude Code stamps per-request ids into its billing line (the first system block);
     # a third party would see a new prompt prefix every turn and never hit its cache.
-    billing = ('x-anthropic-billing-header: cc_version=2.1.318.aa4; cc_entrypoint=sdk-cli; cch=d582e; cc_prompt_id=e09; '
-               'cc_turn_origin=sdk; cc_prev_req=req_1; cc_prompt_index=0; cc_turn_index=1;')
+    billing = ('x-anthropic-billing-header: ccx_version=2.1.318.aa4; ccx_entrypoint=sdk-cli; cch=d582e; ccx_prompt_id=e09; '
+               'ccx_turn_origin=sdk; ccx_prev_req=req_1; ccx_prompt_index=0; ccx_turn_index=1;')
     clean = proxy.third_party_body({'system': [{'type': 'text', 'text': billing}, {'type': 'text', 'text': 'cch=keep;'}],
                                     'diagnostics': {}, 'model': 'm'})
-    assert clean == {'system': [{'type': 'text', 'text': 'x-anthropic-billing-header: cc_version=2.1.318.aa4; cc_entrypoint=sdk-cli;'},
+    assert clean == {'system': [{'type': 'text', 'text': 'x-anthropic-billing-header: ccx_version=2.1.318.aa4; ccx_entrypoint=sdk-cli;'},
                                 {'type': 'text', 'text': 'cch=keep;'}], 'model': 'm'}, clean
     assert proxy.third_party_body({'system': 'plain', 'model': 'm'}) == {'system': 'plain', 'model': 'm'}
     # A key out of quota rests while a spare from <KEY>_API_KEYS serves; the upstream's
@@ -591,7 +591,7 @@ try:
     assert proxy.reset_seconds("1.5s") == 1.5 and proxy.reset_seconds("20ms") == 0.02 and proxy.reset_seconds("bogus") == 60
     # A refused request gets one try on the session's fallback route; other sessions keep the error.
     proxy.fallback_for = lambda launch: {"provider": "nvidia", "model": "backup", "key": "fb"} if launch == "L" else None
-    request = urllib.request.Request(url, data=json.dumps({**body, "model": "fail", "stream": False}).encode(), headers={"x-api-key": "fake", "x-cc-launch": "L"})
+    request = urllib.request.Request(url, data=json.dumps({**body, "model": "fail", "stream": False}).encode(), headers={"x-api-key": "fake", "x-ccx-launch": "L"})
     assert json.loads(urllib.request.urlopen(request, timeout=10).read())["content"][0]["text"] == "Ready"
     assert received[-1][1] == "Bearer fb" and received[-1][2]["model"] == "backup"
     assert json.loads(Path(proxy.RATE_DIR, "fallback-L.json").read_text(encoding="utf-8"))["provider"] == "nvidia"
@@ -663,9 +663,9 @@ else:
     shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake_dir / "cmdc.py"}" "$@"\n', encoding="utf-8")
     shim.chmod(0o755)
 proxy.commandcode_executable = lambda: str(shim)
-proxy.cc_models = lambda provider: [{"id": "claude-x"}]  # the plan-filtered list cc-switch owns
+proxy.ccx_models = lambda provider: [{"id": "claude-x"}]  # the plan-filtered list ccx-switch owns
 argv = lambda: json.loads((fake_dir / "argv.json").read_text())
-proxy.os.environ["CC_CMDC_TEXT"] = "1"  # the cmdc text-protocol path; /alpha/generate is tested below
+proxy.os.environ["CCX_CMDC_TEXT"] = "1"  # the cmdc text-protocol path; /alpha/generate is tested below
 adapter = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
 threading.Thread(target=adapter.serve_forever, daemon=True).start()
 try:
@@ -712,7 +712,7 @@ try:
             f"http://127.0.0.1:{adapter.server_port}/commandcode-cli/v1/models?limit=1000", headers={"x-api-key": "x"}), timeout=10) as response:
         assert json.loads(response.read())["data"] == [{"id": "claude-x", "display_name": "claude-x"}], 'The CLI route offers its plan-filtered ids'
     # Default path: /alpha/generate on the CLI's login, native tool calls, cache tokens passed through.
-    del proxy.os.environ["CC_CMDC_TEXT"]
+    del proxy.os.environ["CCX_CMDC_TEXT"]
     posted = []
 
     class Generate(BaseHTTPRequestHandler):
@@ -755,14 +755,14 @@ finally:
 print("PASS: Messages conversion, streamed text/tools/usage, truncation detection, both provider routes, authentication, HTTP errors; no external requests.")
 
 
-def test_cc_switch_reloads_after_edit(tmp_path, monkeypatch):
-    # A stale cc-switch (one without a newly listed model) made the adapter drop those requests.
-    saved = proxy._cc_switch
+def test_ccx_switch_reloads_after_edit(tmp_path, monkeypatch):
+    # A stale ccx-switch (one without a newly listed model) made the adapter drop those requests.
+    saved = proxy._ccx_switch
     try:
-        proxy._cc_switch = None
-        first = proxy._load_cc_switch()
-        assert proxy._load_cc_switch() is first
-        first._cc_loaded_mtime -= 1  # as if cc-switch.py changed on disk
-        assert proxy._load_cc_switch() is not first
+        proxy._ccx_switch = None
+        first = proxy._load_ccx_switch()
+        assert proxy._load_ccx_switch() is first
+        first._ccx_loaded_mtime -= 1  # as if ccx-switch.py changed on disk
+        assert proxy._load_ccx_switch() is not first
     finally:
-        proxy._cc_switch = saved
+        proxy._ccx_switch = saved

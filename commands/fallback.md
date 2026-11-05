@@ -11,7 +11,7 @@ If they contain anything else, stop and ask me.
 
 Run this, with the arguments single-quoted, and report its output verbatim:
 
-    python "$HOME/.config/cc/cc-switch.py" fallback <arguments>
+    python "$HOME/.config/ccx/ccx-switch.py" fallback <arguments>
 
 With no arguments it shows the current fallback. If the command fails, show the error and stop;
 do not retry and do not edit fallbacks.json yourself.

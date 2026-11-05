@@ -70,7 +70,7 @@ def _openai_oauth_proxy_running() -> bool:
 
 # shortcut: local build of EvanZhouDev/openai-oauth#47 (Codex prompt caching) wins over
 # npx @latest while it exists; delete the folder once a release includes the fix.
-OPENAI_OAUTH_PATCHED = Path.home() / ".config" / "cc" / "openai-oauth-patched" / "node_modules" / ".bin" / "openai-oauth.cmd"
+OPENAI_OAUTH_PATCHED = Path.home() / ".config" / ("ccx" if (Path.home() / ".config" / "ccx").is_dir() else "cc") / "openai-oauth-patched" / "node_modules" / ".bin" / "openai-oauth.cmd"
 
 
 def ensure_openai_oauth_proxy(*, log: Optional[Callable[[str], None]] = None) -> None:

@@ -23,17 +23,18 @@ ccx-install
 
 Or from a checkout: `python -B install-resume.py`. Run `ccx-install` again after upgrading.
 
-The installer copies the runtime to `~/.config/cc` and backs up the files it replaces. It adds a `ccx`
+The installer copies the runtime to `~/.config/ccx` and backs up the files it replaces. It adds a `ccx`
 shell function (PowerShell 5 and 7 profiles on Windows, `~/.bashrc` and `~/.zshrc` elsewhere), and
 installs the status line, the delegation hooks and the `/model` picker mod without touching your other
-settings. Open a new terminal afterwards. With a redirected Documents folder on Windows, add the
+settings. An older install in `~/.config/cc` is copied over and its `cc` function replaced. Open a new
+terminal afterwards. With a redirected Documents folder on Windows, add the
 function by hand:
 
 ```powershell
-function ccx { & "$env:USERPROFILE\.config\cc\cc-switch.ps1" @args }
+function ccx { & "$env:USERPROFILE\.config\ccx\ccx-switch.ps1" @args }
 ```
 
-Credentials, saved picks and backups stay in `~/.config/cc` and are never committed. When a provider
+Credentials, saved picks and backups stay in `~/.config/ccx` and are never committed. When a provider
 has no key, `ccx` asks once and saves it to `keys.json`, readable only by you.
 
 ## Usage
@@ -51,7 +52,7 @@ ccx status
 
 | Route | How it connects |
 |---|---|
-| `official` | Through the adapter, untouched until `/model` or a fallback reroutes it (`CC_OFFICIAL_DIRECT=1` connects directly) |
+| `official` | Through the adapter, untouched until `/model` or a fallback reroutes it (`CCX_OFFICIAL_DIRECT=1` connects directly) |
 | `commandcode`, `minimax`, `opencode-*`, `openrouter` | Anthropic-format endpoint, direct; models the endpoint doesn't serve go through the adapter |
 | `openai-oauth`, `nvidia`, `gemini`, `ollama-cloud`, `lmstudio`, `gpt4free` | Local adapter on `127.0.0.1:10532` |
 | `commandcode-cli` | Adapter runs `cmdc` once per request (Command Code subscription, Go plan included) |
@@ -77,7 +78,7 @@ in-terminal grid.
 
 Each provider and model family shows a coloured initials badge. To use a real logo instead, drop a
 24×24 SVG named after the provider or family (`openai.svg`, `deepseek.svg`, …) into
-`~/.config/cc/logos`; it needs Tk 8.7 or newer, which reads SVG.
+`~/.config/ccx/logos`; it needs Tk 8.7 or newer, which reads SVG.
 
 ![Model tab](docs/picker-model.png)
 ![Presets tab](docs/picker-presets.png)
@@ -99,7 +100,7 @@ names its cause (`key expired`, `auth failed`) instead of hiding the bar.
 
 ## Subagents on other providers
 
-Profiles in `~/.config/cc/agents.json` each run as their own headless `claude -p`, with their own
+Profiles in `~/.config/ccx/agents.json` each run as their own headless `claude -p`, with their own
 provider, model, effort and auto-compact:
 
 ```json
@@ -113,7 +114,7 @@ ccx agents set cheap --provider nvidia --model deepseek-ai/deepseek-v4-pro --eff
 ccx agent cheap "task text"                   # run one task directly
 ```
 
-Each profile becomes a `cc-<name>` subagent type. The installed hooks steer delegation to those
+Each profile becomes a `ccx-<name>` subagent type. The installed hooks steer delegation to those
 types. A worker resumes an isolated copy of the parent conversation, plus project instructions and
 memory, and never rewrites the original transcript. In adapter sessions the worker runs in-process,
 so its tab shows the full chat.
@@ -136,7 +137,7 @@ python -B -m pytest -q             # offline: fake credentials, fake claude/code
 python -B critic_mock_check.py     # optional: real Claude Code against local mock providers
 ```
 
-`test_cc_switch.py` drives the PowerShell launcher and runs on Windows; `test_cc_posix.py` sources
+`test_ccx_switch.py` drives the PowerShell launcher and runs on Windows; `test_ccx_posix.py` sources
 `apply.sh` in a real shell and reads keys through a pty on macOS/Linux. No paid generation runs in
 these checks. They do not cover live OAuth generation, account model access or model quality.
 

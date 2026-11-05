@@ -16,7 +16,7 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-PROFILE = Path(os.getenv("CC_OPENCODE_PROFILE") or Path.home() / ".config" / "cc" / "browser_profile" / "opencode")
+PROFILE = Path(os.getenv("CCX_OPENCODE_PROFILE") or Path.home() / ".config" / "ccx" / "browser_profile" / "opencode")
 AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 ACCOUNT = "https://opencode.ai/console/account"
 KEY_RE = re.compile(r"\b(?:oc_sk_|sk-)[A-Za-z0-9_-]{24,}")
@@ -29,7 +29,7 @@ class NotSignedIn(RuntimeError):
 def key_ok(key):
     """False when OpenCode rejects the key, True when it accepts it, None when unknown (offline)."""
     req = urllib.request.Request("https://opencode.ai/zen/go/v1/usage",
-                                 headers={"Authorization": "Bearer " + key, "User-Agent": "Mozilla/5.0 cc-switch"})
+                                 headers={"Authorization": "Bearer " + key, "User-Agent": "Mozilla/5.0 ccx-switch"})
     try:
         urllib.request.urlopen(req, timeout=8).close()
         return True
@@ -85,7 +85,7 @@ def create_key():
 
         WebDriverWait(d, 30).until(add_button).click()
         dialog = WebDriverWait(d, 15).until(lambda c: c.find_element("css selector", "[role=dialog] form"))
-        dialog.find_element("css selector", "input[type=text]").send_keys(f"cc {date.today()}")
+        dialog.find_element("css selector", "input[type=text]").send_keys(f"ccx {date.today()}")
         # Restricted (the default): call models, and read usage for the status line.
         dialog.find_element("css selector", '[aria-label="Usage access"] [role=button]').click()
         WebDriverWait(d, 10).until(lambda c: next(

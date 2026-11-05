@@ -9,7 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('adapter', root / 'cc-anthropic-proxy.py')
+spec = importlib.util.spec_from_file_location('adapter', root / 'ccx-anthropic-proxy.py')
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
 requests = []
@@ -48,7 +48,7 @@ bridge = ThreadingHTTPServer(('127.0.0.1', 0), adapter.Handler)
 for server in (upstream, bridge):
     threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
-    with tempfile.TemporaryDirectory(prefix='cc-critic-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='ccx-critic-') as tmp:
         tool_path = str(Path(tmp) / 'fixture.txt')
         Path(tool_path).write_text('LOCAL_TOOL_RESULT_321', encoding='utf-8')
         env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'CLAUDE_', 'OPENAI_'))}

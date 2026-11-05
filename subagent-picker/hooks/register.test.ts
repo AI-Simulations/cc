@@ -159,8 +159,8 @@ test('preset rows carry their provider, model and effort', async () => {
 import { relaunchCommand } from './register'
 
 test('a direct session relaunches into the same conversation on the picked route', async () => {
-  expect(relaunchCommand('nvidia', 'a/b', 'default', 'sid-1')).toBe('cc nvidia a/b --resume sid-1')
-  expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'high', 'sid-1')).toBe('cc openai-oauth gpt-6.1-sol --effort high --resume sid-1')
+  expect(relaunchCommand('nvidia', 'a/b', 'default', 'sid-1')).toBe('ccx nvidia a/b --resume sid-1')
+  expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'high', 'sid-1')).toBe('ccx openai-oauth gpt-6.1-sol --effort high --resume sid-1')
   // Claude's --effort ignores levels outside its own ladder; leave them off rather than lose them silently
-  expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'ultra', 'sid-1')).toBe('cc openai-oauth gpt-6.1-sol --resume sid-1')
+  expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'ultra', 'sid-1')).toBe('ccx openai-oauth gpt-6.1-sol --resume sid-1')
 })

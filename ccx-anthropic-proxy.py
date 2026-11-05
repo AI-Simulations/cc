@@ -1,4 +1,4 @@
-"""Loopback-only Messages adapter for cc's OpenAI-format providers (stdlib)."""
+"""Loopback-only Messages adapter for ccx's OpenAI-format providers (stdlib)."""
 import hashlib
 import json
 import math
@@ -43,12 +43,12 @@ DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
-IDENTITY = {"service": "cc-anthropic-proxy", "version": 35}
+IDENTITY = {"service": "ccx-anthropic-proxy", "version": 35}
 # `ccx official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
 # until /model routes its launch to another provider.
 OFFICIAL_ROUTE = "official"
 OFFICIAL_UPSTREAM = "https://api.anthropic.com"
-HOP_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "accept-encoding", "x-cc-launch"}
+HOP_HEADERS = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "accept-encoding", "x-ccx-launch"}
 # MiMo also closes with `</tool_call_<hash>>`, or not at all at the end of its reply.
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call[^>]*>|$)", re.S)
 XML_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>(.*?)(?:</function>|$)", re.S)
@@ -778,7 +778,7 @@ def cli_stream(body):
     yield {"type": "message_stop"}
 
 
-_cc_switch = None
+_ccx_switch = None
 
 
 def reset_seconds(value, default=60.0):
@@ -949,13 +949,13 @@ def fallback_for(launch):
     if not launch:
         return None
     try:
-        cc = _load_cc_switch()
-        target = (cc.load_agents().get(launch[6:], {}).get("fallback") if launch.startswith("agent-")
-                  else cc.load_fallbacks().get(launch))
+        ccx = _load_ccx_switch()
+        target = (ccx.load_agents().get(launch[6:], {}).get("fallback") if launch.startswith("agent-")
+                  else ccx.load_fallbacks().get(launch))
         if not target or target.get("provider") not in UPSTREAMS:
             return None
-        name = cc.PROVIDERS[target["provider"]]["key"]
-        key = "" if name in ("oauth", "cli") else cc.auth_key(name)
+        name = ccx.PROVIDERS[target["provider"]]["key"]
+        key = "" if name in ("oauth", "cli") else ccx.auth_key(name)
     except Exception:
         return None
     return {**target, "key": key or target["provider"]}
@@ -966,7 +966,7 @@ def route_for(launch):
     if not launch:
         return None
     try:
-        target = _load_cc_switch().load_routes().get(launch)
+        target = _load_ccx_switch().load_routes().get(launch)
     except Exception:
         return None
     if not isinstance(target, dict):
@@ -980,9 +980,9 @@ def route_for(launch):
         return None
 
 
-# An in-process ccx subagent's model (its agent file says `model: cc-live-<profile>`): the adapter
+# An in-process ccx subagent's model (its agent file says `model: ccx-live-<profile>`): the adapter
 # resolves the profile on every request, so a /model or picker change applies at the next turn.
-LIVE_MODEL = "cc-live-"
+LIVE_MODEL = "ccx-live-"
 # shortcut: a profile with no model on official runs this, follow the newest Claude generation
 LIVE_OFFICIAL_DEFAULT = "claude-opus-5-5"
 
@@ -993,8 +993,8 @@ def live_target(model, launch):
         return None
     name = model[len(LIVE_MODEL):]
     try:
-        cc = _load_cc_switch()
-        agents = (cc._session_agents(launch) if launch else None) or cc.load_agents(session=False)
+        ccx = _load_ccx_switch()
+        agents = (ccx._session_agents(launch) if launch else None) or ccx.load_agents(session=False)
         profile = agents.get(name)
     except (Exception, SystemExit):
         profile = None
@@ -1010,13 +1010,13 @@ def provider_target(provider, model, effort):
     """{provider, model, effort, key, format: official|chat|anthropic, base, header} of one ccx provider's model."""
     if provider == "official":
         return {"provider": provider, "model": model or LIVE_OFFICIAL_DEFAULT, "effort": effort, "key": "", "format": "official"}
-    cc = _load_cc_switch()
-    p = cc.PROVIDERS[provider]
+    ccx = _load_ccx_switch()
+    p = ccx.PROVIDERS[provider]
     key_id = p.get("key")
-    key = cc.auth_key(key_id) if key_id and key_id not in ("oauth", "cli", "gpt4free", "lmstudio") else ""
+    key = ccx.auth_key(key_id) if key_id and key_id not in ("oauth", "cli", "gpt4free", "lmstudio") else ""
     # route_env's split: Command Code serves non-Claude models, and OpenCode Go most models, over chat completions.
     chat = (p["format"] == "openai" or (provider == "commandcode" and not model.startswith("claude-"))
-            or (provider == "opencode-go" and not cc.go_messages(model)))
+            or (provider == "opencode-go" and not ccx.go_messages(model)))
     return {"provider": provider, "model": model, "effort": effort, "key": key or provider,
             "format": "chat" if chat else "anthropic", "base": p.get("base", ""), "header": p.get("header")}
 
@@ -1034,40 +1034,40 @@ def note_fallback(launch, target):
 def spare_keys(route):
     """Extra keys for a route from <KEY>_API_KEYS (comma-separated), tried in turn after a 429/402."""
     try:
-        cc = _load_cc_switch()
-        env = cc.PROVIDERS[route]["key"].upper().replace("-", "_") + "_API_KEYS"
-        listed = os.environ.get(env) or cc.user_env(env) or ""
+        ccx = _load_ccx_switch()
+        env = ccx.PROVIDERS[route]["key"].upper().replace("-", "_") + "_API_KEYS"
+        listed = os.environ.get(env) or ccx.user_env(env) or ""
     except Exception:
         return []
     return [k.strip() for k in listed.split(",") if k.strip()]
 
 
-def _load_cc_switch():
-    """Import cc-switch.py beside this file, again whenever it changes: it owns the plan and effort
+def _load_ccx_switch():
+    """Import ccx-switch.py beside this file, again whenever it changes: it owns the plan and effort
     metadata, and a stale copy (one without a newly listed model) would refuse that model's requests."""
-    global _cc_switch
+    global _ccx_switch
     directory = str(Path(__file__).resolve().parent)
-    loaded = getattr(_cc_switch, "_cc_loaded_mtime", None)  # absent on an injected stand-in
+    loaded = getattr(_ccx_switch, "_ccx_loaded_mtime", None)  # absent on an injected stand-in
     try:
-        mtime = Path(directory, "cc-switch.py").stat().st_mtime
+        mtime = Path(directory, "ccx-switch.py").stat().st_mtime
     except OSError:
         mtime = loaded
-    if _cc_switch is None or (loaded is not None and mtime != loaded):
+    if _ccx_switch is None or (loaded is not None and mtime != loaded):
         import importlib.util
         if directory not in sys.path:
-            sys.path.insert(0, directory)  # cc-switch imports the vendored ai_suite beside it
-        spec = importlib.util.spec_from_file_location("cc_switch_models", Path(directory, "cc-switch.py"))
+            sys.path.insert(0, directory)  # ccx-switch imports the vendored ai_suite beside it
+        spec = importlib.util.spec_from_file_location("ccx_switch_models", Path(directory, "ccx-switch.py"))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        module._cc_loaded_mtime = mtime
-        _cc_switch = module
-    return _cc_switch
+        module._ccx_loaded_mtime = mtime
+        _ccx_switch = module
+    return _ccx_switch
 
 
-def cc_models(provider):
-    """The provider's plan-filtered models from cc-switch.py, when it sits beside this file."""
+def ccx_models(provider):
+    """The provider's plan-filtered models from ccx-switch.py, when it sits beside this file."""
     try:
-        return _load_cc_switch().get_models(provider)
+        return _load_ccx_switch().get_models(provider)
     except Exception:
         return []  # a standalone adapter simply offers no discovery list
 
@@ -1081,7 +1081,7 @@ FIRST_PARTY_FIELDS = ("diagnostics",)
 
 BILLING_PREFIX = "x-anthropic-billing-header:"
 # Per-request stamps in the billing line: they would change a third party's prompt prefix every turn.
-FIRST_PARTY_STAMPS = re.compile(r"\s*\b(?:cch|cc_prev_\w+|cc_prompt_\w+|cc_turn_\w+)=[^;]*;")
+FIRST_PARTY_STAMPS = re.compile(r"\s*\b(?:cch|ccx_prev_\w+|ccx_prompt_\w+|ccx_turn_\w+)=[^;]*;")
 
 
 def third_party_beta(beta):
@@ -1121,25 +1121,25 @@ def helper_kind(body, request_class=None):
 
 def helper_target(launch, kind, current):
     """An explicit helper pick, else the selected provider without main-turn effort."""
-    picked = (_load_cc_switch().load_routes().get(launch, {}).get("helpers") or {}).get(kind) if launch else None
+    picked = (_load_ccx_switch().load_routes().get(launch, {}).get("helpers") or {}).get(kind) if launch else None
     if picked:
         effort = picked.get("effort")
         if kind == "tools" and not effort:
-            effort = _load_cc_switch().lowest_effort(picked["provider"], picked["model"]) or (current or {}).get("effort")
+            effort = _load_ccx_switch().lowest_effort(picked["provider"], picked["model"]) or (current or {}).get("effort")
         return provider_target(picked["provider"], picked["model"], effort)
-    default = _load_cc_switch().helper_default(kind, current["provider"] if current else "official")
+    default = _load_ccx_switch().helper_default(kind, current["provider"] if current else "official")
     if default:
         return provider_target(default["provider"], default["model"], default["effort"])
     if not current:
         return None  # no effective main model is known
     if kind == "tools":
-        return {**current, "effort": _load_cc_switch().lowest_effort(current["provider"], current["model"]) or current.get("effort")}
+        return {**current, "effort": _load_ccx_switch().lowest_effort(current["provider"], current["model"]) or current.get("effort")}
     if current["provider"] == "official":
         return None  # official classifiers retain Claude Code's own model and thinking settings
     target = {**current, "effort": None}
     if kind == "auto" and target["provider"] == "openai-oauth":
         # The local Codex catalog is the access/effort authority; never guess Luna access.
-        levels = _load_cc_switch().model_efforts("openai-oauth", "gpt-6-luna")
+        levels = _load_ccx_switch().model_efforts("openai-oauth", "gpt-6-luna")
         if levels and "low" in levels:
             target.update(model="gpt-6-luna", effort="low")
     return target
@@ -1156,7 +1156,7 @@ def fit_thinking(body):
 def live_worker_effort(body, profile):
     """Apply the profile's current effort to a running ccx worker's next request; its context is untouched."""
     try:
-        agent = _load_cc_switch().load_agents().get(profile)
+        agent = _load_ccx_switch().load_agents().get(profile)
     except (Exception, SystemExit):
         return  # an unreadable agents.json keeps the effort the worker started with
     if agent is None:
@@ -1171,7 +1171,7 @@ def live_worker_effort(body, profile):
 def publishes_max(provider, model):
     """True when the provider lists `max` for this model (gpt-6 does; older OpenAI models stop at xhigh)."""
     try:
-        return "max" in (_load_cc_switch().model_efforts(provider, model) or ())
+        return "max" in (_load_ccx_switch().model_efforts(provider, model) or ())
     except Exception:
         return False
 
@@ -1179,7 +1179,7 @@ def publishes_max(provider, model):
 def effort_supported(provider, model, effort):
     """False only when the provider says this model takes no such reasoning effort."""
     try:
-        supported = _load_cc_switch().model_efforts(provider, model)
+        supported = _load_ccx_switch().model_efforts(provider, model)
     except Exception:
         return True  # unknown: keep the request as the client sent it
     if supported is None or not isinstance(effort, str):
@@ -1211,7 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
         beta = third_party_beta(self.headers.get("anthropic-beta"))
         if beta:
             headers["anthropic-beta"] = beta
-        headers.update({"Content-Type": "application/json", "Authorization": f"Bearer {live['key']}", "User-Agent": "Mozilla/5.0 cc"})
+        headers.update({"Content-Type": "application/json", "Authorization": f"Bearer {live['key']}", "User-Agent": "Mozilla/5.0 ccx"})
         if live.get("header") == "x-api-key":
             headers["x-api-key"] = live["key"]
         if live["provider"] == "opencode-go" and cache_key(body):
@@ -1261,7 +1261,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
         if path[0] == OFFICIAL_ROUTE:
-            if path[1:] == ["v1", "models"] and route_for(self.headers.get("x-cc-launch")):
+            if path[1:] == ["v1", "models"] and route_for(self.headers.get("x-ccx-launch")):
                 self.gateway_models(OFFICIAL_ROUTE)
             else:
                 self.forward_official("GET")
@@ -1275,7 +1275,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def gateway_models(self, provider):
         """Claude Code's /model discovery: this route's models, or none when it cannot ask."""
-        override = route_for(self.headers.get("x-cc-launch"))
+        override = route_for(self.headers.get("x-ccx-launch"))
         if override:
             # /model's Model tab pinned this session's model: list exactly the one it serves, so /model
             # cannot offer picks the adapter would ignore.
@@ -1283,9 +1283,9 @@ class Handler(BaseHTTPRequestHandler):
                                  "has_more": False})
             return
         if provider == CLI_ROUTE:
-            # cc-switch.py sits beside this file and owns the plan filter; without it,
+            # ccx-switch.py sits beside this file and owns the plan filter; without it,
             # listing the CLI's models could offer ones the subscription cannot use.
-            self.send_json(200, {"data": [{"id": m["id"], "display_name": m["id"]} for m in cc_models(provider)],
+            self.send_json(200, {"data": [{"id": m["id"], "display_name": m["id"]} for m in ccx_models(provider)],
                                  "has_more": False})
             return
         if self.headers.get("Origin"):
@@ -1327,9 +1327,9 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             body = json.loads(raw)
             kind = helper_kind(body, self.headers.get("x-claude-code-request-class"))
-            if not kind and self.headers.get("x-cc-worker-profile"):
-                live_worker_effort(body, self.headers["x-cc-worker-profile"])
-            launch = self.headers.get("x-cc-launch")
+            if not kind and self.headers.get("x-ccx-worker-profile"):
+                live_worker_effort(body, self.headers["x-ccx-worker-profile"])
+            launch = self.headers.get("x-ccx-launch")
             # All model-backed helpers follow the effective provider, not the launch's /official URL.
             override = live_target(body.get("model"), launch) or route_for(launch)
             if kind:
@@ -1420,7 +1420,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except (Exception, SystemExit) as exc:
-            # cc-switch helpers die() with SystemExit; uncaught, it ended the thread and the client saw ECONNRESET.
+            # ccx-switch helpers die() with SystemExit; uncaught, it ended the thread and the client saw ECONNRESET.
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None) or (400 if isinstance(exc, (ValueError, KeyError, TypeError, AttributeError)) and not streaming else 502)
             # A ValueError describes the request this adapter built or converted, never
             # credentials or upstream payloads: name the cause so the fix is diagnosable.
@@ -1437,8 +1437,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def answer_cli(self, body):
         """Streams Command Code's reply as it arrives, with pings while it is quiet: straight from
-        /alpha/generate on the CLI's login, or (CC_CMDC_TEXT=1) one cmdc run with the text tool protocol."""
-        text_protocol = os.environ.get("CC_CMDC_TEXT") == "1"
+        /alpha/generate on the CLI's login, or (CCX_CMDC_TEXT=1) one cmdc run with the text tool protocol."""
+        text_protocol = os.environ.get("CCX_CMDC_TEXT") == "1"
         if text_protocol:
             to_prompt(body)  # reject bad input before any response is sent
         if not body.get("stream"):

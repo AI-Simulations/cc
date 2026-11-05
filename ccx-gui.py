@@ -1,4 +1,4 @@
-"""cc's model picker as its own dark window (stdlib Tkinter, no dependencies).
+"""ccx's model picker as its own dark window (stdlib Tkinter, no dependencies).
 
 Tabs mirror the /model grid: Model, Subagent, Fallbacks, Auto, Tools and Presets. Every list has a
 search field; the model lists group by family on demand. Apply runs the same ccx commands the
@@ -18,7 +18,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
-CC = Path(__file__).with_name('cc-switch.py')
+CCX = Path(__file__).with_name('ccx-switch.py')
 TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
         ('auto', 'Auto'), ('tools', 'Tools'), ('presets', 'Presets')]
 TARGET_TABS = ('subagent', 'fallback')
@@ -41,11 +41,11 @@ EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 # The browsing view (provider, pick, sort, search, effort) kept per session, so reopening the
 # window lands where the person left it. Applying is still explicit: this never routes anything.
-VIEW_FILE = Path.home() / '.config/cc/gui-view.json'
+VIEW_FILE = Path.home() / '.config/ccx/gui-view.json'
 
 
 def view_key():
-    return os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
+    return os.environ.get('CCX_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
 
 
 def load_view():
@@ -160,8 +160,8 @@ def badge_color(name):
     return f'#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}'
 
 
-# Real marks, kept locally in ~/.config/cc/logos (Simple Icons, CC0) and loaded when present.
-LOGO_DIR = Path.home() / '.config/cc/logos'
+# Real marks, kept locally in ~/.config/ccx/logos (Simple Icons, CC0) and loaded when present.
+LOGO_DIR = Path.home() / '.config/ccx/logos'
 PROVIDER_LOGOS = {
     'official': 'claude',
     'openai-oauth': 'openai',
@@ -255,7 +255,7 @@ def session_usage(session_id=None):
     paths = glob.glob(str(Path.home() / '.claude' / 'projects' / '*' / f'{session_id}.jsonl'))
     if not paths:
         return None
-    spec = importlib.util.spec_from_file_location('cc_statusline', Path(__file__).with_name('statusline.py'))
+    spec = importlib.util.spec_from_file_location('ccx_statusline', Path(__file__).with_name('statusline.py'))
     statusline = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(statusline)
     total, last = {'input': 0, 'write': 0, 'read': 0, 'output': 0, 'usd': 0.0}, None
@@ -390,7 +390,7 @@ def sort_models(models, facts, mode):
 
 
 def tab_rows(out):
-    """cc's `value<TAB>label` picker rows."""
+    """ccx's `value<TAB>label` picker rows."""
     rows = []
     for line in out.splitlines():
         if '\t' in line:
@@ -401,7 +401,7 @@ def tab_rows(out):
 
 
 def plain_rows(out):
-    """cc's `route/fallback models` listing: one id per line."""
+    """ccx's `route/fallback models` listing: one id per line."""
     return [line.strip() for line in out.splitlines() if line.strip() and not line.strip().startswith('(')]
 
 
@@ -425,11 +425,11 @@ def parse_target(out, name):
     return target
 
 
-def run_cc(*args):
+def run_ccx(*args):
     """Run ccx beside this window, hidden; (ok, stdout-or-stderr)."""
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     try:
-        done = subprocess.run([sys.executable, '-B', str(CC), *args], capture_output=True,
+        done = subprocess.run([sys.executable, '-B', str(CCX), *args], capture_output=True,
                               text=True, creationflags=flags, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f'{type(exc).__name__}: {exc}'
@@ -439,13 +439,13 @@ def run_cc(*args):
 def session_launch_id():
     """The key ccx files this session's settings under, or '' outside a session."""
     sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
-    return os.environ.get('CC_LAUNCH_ID') or (f'claude-{sid}' if sid else '')
+    return os.environ.get('CCX_LAUNCH_ID') or (f'claude-{sid}' if sid else '')
 
 
 def session_entry():
     """This session's session-agents.json entry ({} when it has none)."""
     try:
-        entry = json.loads((Path.home() / '.config/cc/session-agents.json').read_text(encoding='utf-8')).get(session_launch_id())
+        entry = json.loads((Path.home() / '.config/ccx/session-agents.json').read_text(encoding='utf-8')).get(session_launch_id())
     except (OSError, ValueError, AttributeError):
         return {}
     return entry if isinstance(entry, dict) else {}
@@ -455,7 +455,7 @@ def load_profiles():
     """agents.json profiles for this session, as the picker names them."""
     agents = {}
     try:
-        agents = json.loads((Path.home() / '.config/cc/agents.json').read_text(encoding='utf-8'))
+        agents = json.loads((Path.home() / '.config/ccx/agents.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         pass
     agents = session_entry().get('agents', agents)
@@ -550,7 +550,7 @@ class RowHover:
 
 
 class PickerTab(ttk.Frame):
-    """One tab: a provider, a searchable model list and an effort, applied through cc."""
+    """One tab: a provider, a searchable model list and an effort, applied through ccx."""
 
     def __init__(self, app, key, parent=None):
         super().__init__(parent if parent is not None else app, style='Tab.TFrame')
@@ -666,7 +666,7 @@ class PickerTab(ttk.Frame):
         self.now.pack(fill='x', padx=18, pady=(0, 12))
 
     def toggle_agents(self):
-        ok, out = run_cc('agents', 'on' if self.use_agents.get() else 'off')
+        ok, out = run_ccx('agents', 'on' if self.use_agents.get() else 'off')
         if not ok:
             self.use_agents.set(not self.use_agents.get())
         self.status.configure(text=out)
@@ -707,12 +707,12 @@ class PickerTab(ttk.Frame):
 
     def provider_rows(self):
         if self.key == 'subagent':
-            return tab_rows(run_cc('agents', 'providers')[1])
+            return tab_rows(run_ccx('agents', 'providers')[1])
         if self.key == 'fallback':
             # a subagent fallback picks from the routes the adapter can reach
             command = 'fallback' if self.target.get() in ('', 'session') else 'route'
-            return tab_rows(run_cc(command, 'routes')[1])
-        return tab_rows(run_cc('route', 'routes')[1])
+            return tab_rows(run_ccx(command, 'routes')[1])
+        return tab_rows(run_ccx('route', 'routes')[1])
 
     def model_command(self, provider):
         if self.key == 'subagent':
@@ -820,7 +820,7 @@ class PickerTab(ttk.Frame):
                     self.app.models_cache[(self.key, target, provider)] = result
                 self.show_models(result)
 
-        self.app.background(lambda: run_cc(*args), done)
+        self.app.background(lambda: run_ccx(*args), done)
         self.load_facts(provider)
 
     def load_facts(self, provider):
@@ -828,7 +828,7 @@ class PickerTab(ttk.Frame):
         if provider in self.app.facts_cache:
             self.facts = self.app.facts_cache[provider]
             return
-        self.app.background(lambda: run_cc('facts', provider),
+        self.app.background(lambda: run_ccx('facts', provider),
                             lambda result: self.show_facts(provider, result))
 
     def show_facts(self, provider, result):
@@ -986,7 +986,7 @@ class PickerTab(ttk.Frame):
             self.current = None
             self.now.configure(text='')
             return
-        out = run_cc(*command)[1]
+        out = run_ccx(*command)[1]
         name = {'model': 'Route', 'fallback': 'Fallback', 'auto': 'Helper', 'tools': 'Helper'}[self.key]
         self.current = parse_target(out, name)
         if self.key == 'model' and self.current:
@@ -1012,17 +1012,17 @@ class PickerTab(ttk.Frame):
             ok, said = set_model_compact(model, compact if compact != 'inherit' else 'global')
             if not ok:
                 return ok, said
-            ok, out = run_cc('route', provider, model, *level)
+            ok, out = run_ccx('route', provider, model, *level)
             return ok, f'{out.rstrip()}\n{said}' if ok else out
         if self.key in ('auto', 'tools'):
-            return run_cc('helper', self.key, provider, model, *level)
+            return run_ccx('helper', self.key, provider, model, *level)
         if self.key == 'subagent':
-            return run_cc('agents', 'set', target, '--provider', provider,
+            return run_ccx('agents', 'set', target, '--provider', provider,
                           '--model', model, '--effort', effort or 'default', '--autocompact', compact)
         if self.key == 'fallback' and target == 'session':
-            return run_cc('fallback', provider, model, *level)
+            return run_ccx('fallback', provider, model, *level)
         if self.key == 'fallback':
-            return run_cc('fallback', 'subagent', target, provider, model, *level)
+            return run_ccx('fallback', 'subagent', target, provider, model, *level)
         return False, 'Nothing to apply.'
 
     def mark_current(self):
@@ -1144,7 +1144,7 @@ class PresetsTab(ttk.Frame):
 
     def load(self):
         self.busy('Loading presets…')
-        self.app.background(lambda: run_cc('presets', 'bundles'), self.show_result_load)
+        self.app.background(lambda: run_ccx('presets', 'bundles'), self.show_result_load)
 
     def show_result_load(self, result):
         ok, out = result
@@ -1154,7 +1154,7 @@ class PresetsTab(ttk.Frame):
         self.show(out)
 
     def show(self, out):
-        self.current = parse_target(run_cc('route')[1], 'Route')
+        self.current = parse_target(run_ccx('route')[1], 'Route')
         self.presets = []
         if out.lstrip().startswith('['):
             try:
@@ -1228,7 +1228,7 @@ class PresetsTab(ttk.Frame):
             args = ['route', preset['provider'], preset['model']]
             if preset['effort']:
                 args.append(preset['effort'])
-            work = lambda: run_cc(*args)
+            work = lambda: run_ccx(*args)
         else:
             profiles = list(load_profiles())
             def work():
@@ -1245,7 +1245,7 @@ class PresetsTab(ttk.Frame):
                                    else ['helper', key, *(['inherit'] if provider == 'off' else pair)])
                         commands = [command]
                     for command in commands:
-                        ok, out = run_cc(*command)
+                        ok, out = run_ccx(*command)
                         if not ok:
                             return False, f'{label}: {out}\nEarlier categories may already be applied. {label}: {out.splitlines()[-1] if out else "Failed."}'
                 return True, 'Applied all five preset categories.'
@@ -1268,7 +1268,7 @@ class PresetsTab(ttk.Frame):
         ok, out = result
         self.settle(out.splitlines()[-1] if out else ('Applied.' if ok else 'Failed.'))
         if ok:
-            self.current = parse_target(run_cc('route')[1], 'Route')
+            self.current = parse_target(run_ccx('route')[1], 'Route')
             self.mark_current()
 
 
@@ -1294,10 +1294,10 @@ class PresetEditor(tk.Toplevel):
         settings = preset.get('settings') or {key: dict(main) for key, _ in TABS[:-1]}
         if not preset.get('settings'):
             settings['fallback'] = {'provider': 'off'}
-        providers = [value for value, _ in tab_rows(run_cc('agents', 'providers')[1]) if value != 'off']
+        providers = [value for value, _ in tab_rows(run_ccx('agents', 'providers')[1]) if value != 'off']
         providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] != 'off']]))
-        fallback_providers = [value for value, _ in tab_rows(run_cc('fallback', 'routes')[1])]
-        helper_providers = [value for value, _ in tab_rows(run_cc('route', 'routes')[1])]
+        fallback_providers = [value for value, _ in tab_rows(run_ccx('fallback', 'routes')[1])]
+        helper_providers = [value for value, _ in tab_rows(run_ccx('route', 'routes')[1])]
         for column, title in enumerate(('Category', 'Provider', 'Model', 'Effort')):
             ttk.Label(body, text=title, style='Dim.TLabel').grid(row=1, column=column, sticky='w', padx=(0, 10))
         for row, (key, label) in enumerate(TABS[:-1], 2):
@@ -1369,7 +1369,7 @@ class PresetEditor(tk.Toplevel):
         fields['model_box'].configure(state='disabled' if disabled else 'normal')
         fields['effort_box'].configure(state='disabled' if disabled else 'readonly')
         if not disabled:
-            self.app.background(lambda: run_cc('models', provider),
+            self.app.background(lambda: run_ccx('models', provider),
                                 lambda result: self.show_models(result, key)
                                 if self.winfo_exists() and provider == fields['provider'].get()
                                 and request == fields['request'] else None)
@@ -1421,11 +1421,11 @@ class PresetEditor(tk.Toplevel):
                              **({'effort': effort} if effort not in ('', 'default') else {})}
         args = ['presets', 'set-bundle', self.preset['provider'], json.dumps(settings)]
         self.status.configure(text='Saving…')
-        self.app.background(lambda: run_cc(*args), self.done)
+        self.app.background(lambda: run_ccx(*args), self.done)
 
     def reset(self):
         self.status.configure(text='Restoring default…')
-        self.app.background(lambda: run_cc('presets', 'reset', self.preset['provider']), self.done)
+        self.app.background(lambda: run_ccx('presets', 'reset', self.preset['provider']), self.done)
 
     def done(self, result):
         if not self.winfo_exists():
@@ -1552,7 +1552,7 @@ class App(tk.Tk):
         self.after(60, self.load_current)
         self.after(90, lambda: self.background(session_usage, self.show_usage))
         self.bind('<Escape>', lambda _e: self.destroy())
-        ico = Path(__file__).with_name('cc.ico')
+        ico = Path(__file__).with_name('ccx.ico')
         try:
             self.iconbitmap(default=str(ico))
         except tk.TclError:  # icon file missing or non-Windows Tk: plain accent square
@@ -1612,7 +1612,7 @@ class App(tk.Tk):
         return self.selected
 
     def logo(self, key):
-        """A brand mark from ~/.config/cc/logos, or None when the file is missing."""
+        """A brand mark from ~/.config/ccx/logos, or None when the file is missing."""
         if not key:
             return None
         if key in self.logo_cache:
@@ -1630,7 +1630,7 @@ class App(tk.Tk):
         return image
 
     def mark(self, slug, name):
-        """The brand mark when ~/.config/cc/logos has one, else an initials badge."""
+        """The brand mark when ~/.config/ccx/logos has one, else an initials badge."""
         return self.logo(slug) or self.badge(name)
 
     def badge(self, name):
@@ -1691,8 +1691,8 @@ class App(tk.Tk):
 
 def session_label():
     """What this window would change: the launch, or the plain session."""
-    launch = os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
-    provider = os.environ.get('CC_MAIN_PROVIDER')
+    launch = os.environ.get('CCX_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+    provider = os.environ.get('CCX_MAIN_PROVIDER')
     if not launch:
         return 'no ccx launch'
     label = f'{provider} · {launch}' if provider else launch
@@ -1703,13 +1703,13 @@ def efforts_for(provider, model):
     """The model's effort ladder: None when unknown, empty when not adjustable."""
     snippet = (
         "import importlib.util, json, sys\n"
-        "spec = importlib.util.spec_from_file_location('cc_switch', sys.argv[1])\n"
-        "cc = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(cc)\n"
-        "print(json.dumps(cc.model_efforts(sys.argv[2], sys.argv[3])))\n")
+        "spec = importlib.util.spec_from_file_location('ccx_switch', sys.argv[1])\n"
+        "ccx = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(ccx)\n"
+        "print(json.dumps(ccx.model_efforts(sys.argv[2], sys.argv[3])))\n")
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     try:
-        done = subprocess.run([sys.executable, '-B', '-c', snippet, str(CC), provider, model],
+        done = subprocess.run([sys.executable, '-B', '-c', snippet, str(CCX), provider, model],
                               capture_output=True, text=True, creationflags=flags, timeout=60)
         levels = json.loads(done.stdout.strip().splitlines()[-1])
         return [level for level in levels if isinstance(level, str)] if isinstance(levels, list) else None
@@ -1744,9 +1744,9 @@ def pid_alive(pid):
 
 def lock_file():
     """One window per session, not one per machine."""
-    key = os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
+    key = os.environ.get('CCX_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or 'default'
     safe = ''.join(ch for ch in key if ch.isalnum() or ch in '-_')[:60] or 'default'
-    return Path.home() / '.config/cc' / f'gui-{safe}.pid'
+    return Path.home() / '.config/ccx' / f'gui-{safe}.pid'
 
 
 def raise_existing():
@@ -1800,14 +1800,14 @@ def main(argv=None):
         if index + 1 < len(argv):
             start = argv[index + 1]
     if '--help' in argv or '-h' in argv:
-        print('Usage: python cc-gui.py [--tab model|subagent|fallback|auto|tools|presets]')
+        print('Usage: python ccx-gui.py [--tab model|subagent|fallback|auto|tools|presets]')
         return 0
     if not claim_window():
         return 0
     if os.name == 'nt':  # own taskbar identity: shared pythonw.exe otherwise borrows another app's pinned icon
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('cc.ModelPicker')
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('ccx.ModelPicker')
         except (AttributeError, OSError):
             pass
     try:
@@ -1824,11 +1824,11 @@ if __name__ == '__main__':
     except SystemExit:
         raise
     except Exception as exc:
-        log = Path.home() / '.config/cc/gui-error.log'
+        log = Path.home() / '.config/ccx/gui-error.log'
         try:
             log.write_text(traceback.format_exc(), encoding='utf-8')
         except OSError:
             pass
         if sys.stderr:
-            print(f'cc-gui: {type(exc).__name__}: {exc}', file=sys.stderr)
+            print(f'ccx-gui: {type(exc).__name__}: {exc}', file=sys.stderr)
         raise SystemExit(1)

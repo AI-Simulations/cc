@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# cc-switch.py - Claude Code provider switcher (menu UI, stdlib only)
+# ccx-switch.py - Claude Code provider switcher (menu UI, stdlib only)
 # Usage:
 #   ccx                     interactive menu, then opens Claude Code
 #   ccx <provider> [model]  e.g. ccx official | ccx minimax | ccx opencode-go
@@ -42,7 +42,7 @@ def background_process_options():
 def ensure_openai_oauth_proxy():
     return _service.ensure_openai_oauth_proxy()
 
-CFG_DIR = os.path.join(os.path.expanduser("~"), ".config", "cc")
+CFG_DIR = os.path.join(os.path.expanduser("~"), ".config", "ccx")
 APPLY_FILE = os.path.join(CFG_DIR, "apply.ps1" if os.name == "nt" else "apply.sh")
 PYTHON = "python" if os.name == "nt" else "python3"  # the command a relay's Bash tool runs
 STATE_FILE = os.path.join(CFG_DIR, "state.json")
@@ -59,7 +59,7 @@ OAUTH_PORT = 10531
 ADAPTER_PORT = 10532
 G4F_PORT = 1337
 
-CC_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+CCX_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
            "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "ENABLE_TOOL_SEARCH", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_AUTO_MODE_SERVER", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
@@ -76,9 +76,9 @@ AUTOCOMPACTS = [50, 60, 70, 80, 90, 95]
 COMPACT_TOKENS = ["100k", "200k", "300k", "400k", "600k"]
 AGENT_FLAGS = ("--provider", "--model", "--effort", "--autocompact", "--description")
 OAI_VARS = ["OPENAI_BASE_URL", "OPENAI_API_KEY"]
-CC_VARS += [slot + "_SUPPORTED_CAPABILITIES" for slot in ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", *PICKER_SLOTS]]
-CC_VARS += ["CC_AGENT_CHILD", "CC_LAUNCH_ID", "CC_MAIN_PROVIDER", "CC_WORKER_PROFILE", "CLAUDE_CODE_FORK_SUBAGENT"]
-CONTEXT_PREFIX = "CC_CONTEXT_V1 "
+CCX_VARS += [slot + "_SUPPORTED_CAPABILITIES" for slot in ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", *PICKER_SLOTS]]
+CCX_VARS += ["CCX_AGENT_CHILD", "CCX_LAUNCH_ID", "CCX_MAIN_PROVIDER", "CCX_WORKER_PROFILE", "CLAUDE_CODE_FORK_SUBAGENT"]
+CONTEXT_PREFIX = "CCX_CONTEXT_V1 "
 
 PROVIDERS = {
     "commandcode": {"label": "Command Code API (needs Provider plan; Go plan is CLI-only)", "format": "anthropic", "base": "https://api.commandcode.ai/provider", "key": "commandcode"},
@@ -200,7 +200,7 @@ def renew_opencode_key(key):
     if key != opencode_key.stored_key() or opencode_key.key_ok(key) is not False:
         return
     print("OpenCode rejected its API key; creating a new one from the console...", file=sys.stderr)
-    interactive = os.environ.get("CC_AGENT_CHILD") != "1" and sys.stdin.isatty() and sys.stdout.isatty()
+    interactive = os.environ.get("CCX_AGENT_CHILD") != "1" and sys.stdin.isatty() and sys.stdout.isatty()
     try:
         new = opencode_key.renew(interactive)
     except Exception as exc:
@@ -222,7 +222,7 @@ def ensure_key(name):
         renew_opencode_key(key)
     if key:
         return
-    if os.environ.get("CC_AGENT_CHILD") == "1" or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if os.environ.get("CCX_AGENT_CHILD") == "1" or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return  # route_env reports the missing key
     print(f"No API key for {name}. Get one from its account page.", file=sys.stderr)
     try:
@@ -285,7 +285,7 @@ def quit_on_ctrl_c():
 
 
 def fetch(url, headers=None, timeout=15):
-    h = {"User-Agent": "Mozilla/5.0 cc-switch"}
+    h = {"User-Agent": "Mozilla/5.0 ccx-switch"}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, headers=h)
@@ -304,15 +304,15 @@ def go_limits():
 # Command Code's plans in ascending order and the categories each may use (its own tables):
 # a model's minimumPlan is the cheapest plan allowed to use it; without one, its category
 # decides. Purchased or free credits unlock every model, as in cmdc.
-CC_PLANS = ["individual-go", "individual-go-v1", "individual-goat", "individual-pro",
+CCX_PLANS = ["individual-go", "individual-go-v1", "individual-goat", "individual-pro",
             "individual-pro-v1", "individual-provider", "individual-max", "individual-ultra", "teams-pro"]
-CC_PLAN_CATEGORIES = {
+CCX_PLAN_CATEGORIES = {
     "individual-go": {"opensource"}, "individual-go-v1": {"opensource"}, "individual-goat": {"opensource"},
     "individual-pro": {"premium", "opensource"}, "individual-pro-v1": {"premium", "opensource"},
     "individual-provider": {"premium", "opensource"}, "individual-max": {"premium", "opensource"},
     "individual-ultra": {"premium", "opensource"}, "teams-pro": {"premium", "opensource"},
 }
-CC_ACTIVE_SUBSCRIPTIONS = {"active", "trialing", "past_due"}
+CCX_ACTIVE_SUBSCRIPTIONS = {"active", "trialing", "past_due"}
 COMMANDCODE_API = "https://api.commandcode.ai"
 PLAN_TTL = 600
 _PLAN_CACHE = {}
@@ -326,13 +326,13 @@ def commandcode_model_allowed(m, plan, rank):
     if category not in ("premium", "opensource"):
         return True  # a model cmdc cannot classify is not restricted
     if "minimumPlan" not in m:
-        return category in CC_PLAN_CATEGORIES[plan]
+        return category in CCX_PLAN_CATEGORIES[plan]
     minimum = m["minimumPlan"]
     if minimum is None:
         return False  # cmdc locks a null minimumPlan for every plan
-    if minimum in CC_PLANS:
-        return rank >= CC_PLANS.index(minimum)
-    return category in CC_PLAN_CATEGORIES[plan]  # a newer plan id than this ccx knows
+    if minimum in CCX_PLANS:
+        return rank >= CCX_PLANS.index(minimum)
+    return category in CCX_PLAN_CATEGORIES[plan]  # a newer plan id than this ccx knows
 
 
 _CATALOG_CACHE = {}
@@ -724,8 +724,8 @@ def process_alive(pid):
 
 
 def gui_lock_path():
-    """The pid file cc-gui.py writes for this session (same naming rule as its lock_file)."""
-    key = os.environ.get("CC_LAUNCH_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "default"
+    """The pid file ccx-gui.py writes for this session (same naming rule as its lock_file)."""
+    key = os.environ.get("CCX_LAUNCH_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "default"
     safe = "".join(ch for ch in key if ch.isalnum() or ch in "-_")[:60] or "default"
     return os.path.join(CFG_DIR, f"gui-{safe}.pid")
 
@@ -745,9 +745,9 @@ def gui_command(words):
     tab = "fallback" if tab == "fallbacks" else tab
     if len(words) > 1 or tab not in tabs:
         die("Usage: ccx gui [model|subagent|fallback|auto|tools|presets]")
-    script = os.path.join(CFG_DIR, "cc-gui.py")
+    script = os.path.join(CFG_DIR, "ccx-gui.py")
     if not os.path.isfile(script):
-        die(f"Missing {script}; reinstall cc.")
+        die(f"Missing {script}; reinstall ccx.")
     python = sys.executable
     if os.name == "nt":
         windowed = os.path.join(os.path.dirname(python), "pythonw.exe")
@@ -789,7 +789,7 @@ def gui_command(words):
     except OSError:
         pass
     code = proc.poll()
-    die(f"Could not open the picker window: {detail or (f'cc-gui.py exited {code}' if code is not None else 'it did not start')}")
+    die(f"Could not open the picker window: {detail or (f'ccx-gui.py exited {code}' if code is not None else 'it did not start')}")
 
 
 def default_effort(name, model_id):
@@ -832,13 +832,13 @@ def commandcode_plan_models():
         subscription = fetch(f"{COMMANDCODE_API}/alpha/billing/subscriptions", headers)["data"]
         credits = fetch(f"{COMMANDCODE_API}/alpha/billing/credits", headers).get("credits") or {}
         name, status = subscription.get("planId"), subscription.get("status")
-        if name not in CC_PLANS or status not in CC_ACTIVE_SUBSCRIPTIONS:
+        if name not in CCX_PLANS or status not in CCX_ACTIVE_SUBSCRIPTIONS:
             # cmdc trusts only an active subscription; anything else allows every model.
             result = None
         elif credits.get("purchasedCredits") or credits.get("freeCredits"):
             result = {m["id"].casefold() for m in rows if not m.get("hidden")}
         else:
-            rank = CC_PLANS.index(name)
+            rank = CCX_PLANS.index(name)
             result = {m["id"].casefold() for m in rows if commandcode_model_allowed(m, name, rank)}
     except Exception:
         result = None  # no data: keep every advertised model rather than hide working ones
@@ -999,7 +999,7 @@ def stop_windows_port_owner(port):
     if not pids and port == ADAPTER_PORT:
         # Windows can report the listener as PID 0; find the adapter by its command line instead.
         query = ("Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
-                 "Where-Object { $_.CommandLine -match 'cc-anthropic-proxy[.]py' } | ForEach-Object { $_.ProcessId }")
+                 "Where-Object { $_.CommandLine -match 'ccx-anthropic-proxy[.]py' } | ForEach-Object { $_.ProcessId }")
         pids = set(subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True,
                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout.split())
     for pid in pids:
@@ -1058,14 +1058,15 @@ def ensure_anthropic_proxy():
 
 def _ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "cc-anthropic-proxy", "version": 35}
+    expected = {"service": "ccx-anthropic-proxy", "version": 35}
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
         running = None
     if running == expected:
         return
-    if isinstance(running, dict) and running.get("service") == expected["service"]:
+    # "cc-anthropic-proxy": the same adapter from before the ccx rename.
+    if isinstance(running, dict) and running.get("service") in (expected["service"], "cc-anthropic-proxy"):
         # An older adapter from a previous install: replace it. Sessions still on it drop.
         stop_port_owner(ADAPTER_PORT)
     elif running is not None:
@@ -1073,7 +1074,7 @@ def _ensure_anthropic_proxy():
     options = background_process_options()
     # Below normal: every cmdc the adapter starts inherits it, so workers never starve the desktop.
     options["creationflags"] = options.get("creationflags", 0) | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)
-    subprocess.Popen([sys.executable, os.path.join(CFG_DIR, "cc-anthropic-proxy.py")],
+    subprocess.Popen([sys.executable, os.path.join(CFG_DIR, "ccx-anthropic-proxy.py")],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
     for _ in range(40):
         try:
@@ -1164,21 +1165,21 @@ def compact_text(value, unset="inherit"):
 
 def compact_launch(env, args, value):
     """Apply an auto-compact limit to a Claude launch: a percentage through Claude's env override,
-    a token window through --settings. Either stays in CC_AUTOCOMPACT for its workers to inherit."""
+    a token window through --settings. Either stays in CCX_AUTOCOMPACT for its workers to inherit."""
     env.pop("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", None)
-    env.pop("CC_AUTOCOMPACT", None)
+    env.pop("CCX_AUTOCOMPACT", None)
     if type(value) is int:
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = str(value)
     elif value:
         args += ["--settings", json.dumps({"autoCompactWindow": compact_tokens(value)})]
     if value:
-        env["CC_AUTOCOMPACT"] = str(value)
+        env["CCX_AUTOCOMPACT"] = str(value)
 
 
 def parent_compact(context):
     """The limit a subagent without its own inherits: its parent's ccx limit, else the parent model's
     autoCompactWindow (or the global one) in Claude's settings."""
-    own = os.environ.get("CC_AUTOCOMPACT") or os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
+    own = os.environ.get("CCX_AUTOCOMPACT") or os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
     if own:
         return int(own) if own.isdigit() else own
     try:
@@ -1270,7 +1271,7 @@ def helper_command(words):
     if not words or words[0] not in ("auto", "tools"):
         die("Usage: ccx helper <auto|tools> [inherit | <provider> <model> [effort]]")
     kind, rest = words[0], words[1:]
-    launch = os.environ.get("CC_LAUNCH_ID")
+    launch = os.environ.get("CCX_LAUNCH_ID")
     if not launch or not on_adapter():
         die("Helper routing needs a ccx adapter session; restart with ccx before choosing helper models.")
     data = load_routes()
@@ -1300,7 +1301,7 @@ def helper_command(words):
 
 def on_adapter():
     """This session reaches the adapter: an adapter route, or `ccx official` passed through it."""
-    return (os.environ.get("CC_MAIN_PROVIDER") in FALLBACK_ROUTES
+    return (os.environ.get("CCX_MAIN_PROVIDER") in FALLBACK_ROUTES
             or os.environ.get("ANTHROPIC_BASE_URL", "").endswith(f":{ADAPTER_PORT}/official"))
 
 
@@ -1324,12 +1325,12 @@ def route_command(words):
         for m in get_models(words[1]):
             print(m["id"])
         return
-    launch = os.environ.get("CC_LAUNCH_ID")
+    launch = os.environ.get("CCX_LAUNCH_ID")
     if not launch:
         die(f"This session has no ccx launch id; /model's Model tab needs a session started by ccx on one of: {', '.join(FALLBACK_ROUTES)}.")
     if not on_adapter():
-        # The adapter reads x-cc-launch; a direct Anthropic route never reaches it.
-        die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly; "
+        # The adapter reads x-ccx-launch; a direct Anthropic route never reaches it.
+        die(f"This session connects to {os.environ.get('CCX_MAIN_PROVIDER') or 'its provider'} directly; "
             f"/model's Model tab works only on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
         set_route(launch)
@@ -1383,7 +1384,7 @@ def fallback_command(words):
     routes and models print rows for the /fallback picker."""
     if words == ["routes"]:
         for n in FALLBACK_ROUTES:
-            if n != os.environ.get("CC_MAIN_PROVIDER"):
+            if n != os.environ.get("CCX_MAIN_PROVIDER"):
                 print(f"{n}\t{PROVIDERS[n]['label']}")
         return
     if len(words) == 2 and words[0] == "models":
@@ -1415,11 +1416,11 @@ def fallback_command(words):
             save_agents(profiles)
         print_target("Fallback", profiles[name].get("fallback"), "off")
         return
-    launch = os.environ.get("CC_LAUNCH_ID")
+    launch = os.environ.get("CCX_LAUNCH_ID")
     if not launch:
         die(f"This session has no ccx launch id; fallback needs a session started by ccx on one of: {', '.join(FALLBACK_ROUTES)}.")
     if not on_adapter():
-        die(f"This session connects to {os.environ.get('CC_MAIN_PROVIDER') or 'its provider'} directly, so there is "
+        die(f"This session connects to {os.environ.get('CCX_MAIN_PROVIDER') or 'its provider'} directly, so there is "
             f"nothing to fall back from; fallback works on adapter routes: {', '.join(FALLBACK_ROUTES)}.")
     if words == ["off"]:
         set_fallback(launch)
@@ -1530,8 +1531,8 @@ def route_env(name, model_id, passthrough=False):
     env = {}
     if name == "official":
         # The normal claude.ai login, through the adapter, which hands it to Anthropic untouched until
-        # /model routes the launch elsewhere. CC_OFFICIAL_DIRECT=1, or no adapter, connects directly.
-        if passthrough and os.environ.get("CC_OFFICIAL_DIRECT") != "1":
+        # /model routes the launch elsewhere. CCX_OFFICIAL_DIRECT=1, or no adapter, connects directly.
+        if passthrough and os.environ.get("CCX_OFFICIAL_DIRECT") != "1":
             try:
                 ensure_anthropic_proxy()
                 env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/official"
@@ -1566,7 +1567,7 @@ def route_env(name, model_id, passthrough=False):
         if name == "openai-oauth":
             ensure_oauth_proxy()
         elif name == "commandcode-cli":
-            pass  # the adapter posts to /alpha/generate on the CLI's login (CC_CMDC_TEXT=1: one cmdc run per request)
+            pass  # the adapter posts to /alpha/generate on the CLI's login (CCX_CMDC_TEXT=1: one cmdc run per request)
         elif name == "gpt4free":
             ensure_g4f()  # the key is optional: only needed when g4f runs with --g4f-api-key
         elif not key and name != "lmstudio":  # LM Studio runs keyless unless auth is on
@@ -1625,13 +1626,13 @@ def route_env(name, model_id, passthrough=False):
 def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autocompact=None, fallback=None, launch=None):
     env = route_env(name, model_id, passthrough=True)
     # Every launch gets an id: subagent profiles and the optional route override are per session.
-    env["CC_LAUNCH_ID"] = launch = launch or os.environ.get("CC_LAUNCH_ID") or uuid.uuid4().hex
+    env["CCX_LAUNCH_ID"] = launch = launch or os.environ.get("CCX_LAUNCH_ID") or uuid.uuid4().hex
     if name in FALLBACK_ROUTES or env.get("ANTHROPIC_BASE_URL", "").endswith("/official"):
         # Names this launch to the adapter, so /fallback and /model can change it mid-session.
-        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [env.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-launch: {launch}"]))
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [env.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-ccx-launch: {launch}"]))
         if fallback:
             set_fallback(launch, fallback["provider"], fallback["model"])
-    env["CC_MAIN_PROVIDER"] = name
+    env["CCX_MAIN_PROVIDER"] = name
     env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"
     base = env.get("ANTHROPIC_BASE_URL", "")
     if not is_resume(claude_args):  # a resume takes its old session's settings back (link_session)
@@ -1654,7 +1655,7 @@ def apply(name, model_id=None, no_run=False, claude_args=(), effort=None, autoco
     save_state({**state, "provider": name, "model": model_id or "", "recent": recent, **({} if effort is None else {"effort": effort}),
                 **({} if autocompact is None else {"autocompact": autocompact})})
     # Clear every switcher variable this route does not set, so no earlier choice leaks in.
-    write_apply(env, [v for v in CC_VARS + OAI_VARS if v not in env], run_claude, claude_args, model_id)
+    write_apply(env, [v for v in CCX_VARS + OAI_VARS if v not in env], run_claude, claude_args, model_id)
     print()
     print("Switched: " + (f"{name}/{model_id}" if model_id else name))
     print(f"Effective: ANTHROPIC_BASE_URL={env.get('ANTHROPIC_BASE_URL', '')}  "
@@ -1676,8 +1677,8 @@ _AGENT_OVERRIDE = None  # relay_job: the fallback profile a failed worker reruns
 
 def session_launch():
     """The launch a subagent edit belongs to: inside its Claude session or its startup prompt only.
-    apply.ps1 leaves CC_LAUNCH_ID in the terminal, and a later plain `ccx agents` edits agents.json."""
-    launch = os.environ.get("CC_LAUNCH_ID", "")
+    apply.ps1 leaves CCX_LAUNCH_ID in the terminal, and a later plain `ccx agents` edits agents.json."""
+    launch = os.environ.get("CCX_LAUNCH_ID", "")
     if launch and (os.environ.get("CLAUDECODE") == "1" or launch == _STARTUP_LAUNCH):
         return launch
     # A Claude session not started by ccx still gets its own subagent setup, keyed by its session id.
@@ -2046,7 +2047,7 @@ def _restorable_context(source):
         yield source
         return
     # Always snapshot the source: a live parent may append records during restoration.
-    with tempfile.TemporaryDirectory(prefix="cc-worker-context-") as directory:
+    with tempfile.TemporaryDirectory(prefix="ccx-worker-context-") as directory:
         restored = Path(directory) / "context.jsonl"
         with restored.open("w", encoding="utf-8") as handle:
             for entry in _context_tail(list(_context_entries(path))):
@@ -2133,7 +2134,7 @@ def _context_tail(entries, budget=CONTEXT_BUDGET):
 
 
 def run_agent(agent, prompt, opts=None, require_context=False):
-    require_context = require_context or bool(os.environ.get("CLAUDECODE") and os.environ.get("CC_AGENT_CHILD") != "1")
+    require_context = require_context or bool(os.environ.get("CLAUDECODE") and os.environ.get("CCX_AGENT_CHILD") != "1")
     if require_context and opts:
         die("Delegated workers use their configured profile; per-run route overrides are not allowed.")
     a = load_agents().get(agent)
@@ -2177,12 +2178,12 @@ def run_agent(agent, prompt, opts=None, require_context=False):
     # Drop the parent session's route and compaction threshold, and the marker that makes
     # Claude refuse to start inside another Claude Code session.
     env = {k: v for k, v in os.environ.items()
-           if k not in (*CC_VARS, *OAI_VARS, "CLAUDECODE", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")}
+           if k not in (*CCX_VARS, *OAI_VARS, "CLAUDECODE", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")}
     env.update({k: str(v) for k, v in route.items()})
     if route.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/"):
         # The local adapter rereads this profile's effort per request, so effort changes reach running workers.
-        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [route.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-cc-worker-profile: {agent}", f"x-cc-launch: agent-{agent}"]))
-    env.update(CC_AGENT_CHILD="1", CC_WORKER_PROFILE=agent, CC_MAIN_PROVIDER=name,
+        env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(filter(None, [route.get("ANTHROPIC_CUSTOM_HEADERS"), f"x-ccx-worker-profile: {agent}", f"x-ccx-launch: agent-{agent}"]))
+    env.update(CCX_AGENT_CHILD="1", CCX_WORKER_PROFILE=agent, CCX_MAIN_PROVIDER=name,
                CLAUDE_CODE_FORK_SUBAGENT="0")
     compact = a.get("autocompact") or parent_compact(context)
     # Only codegraph, unwatched: each worker otherwise starts every MCP server, and a codegraph that indexes and watches the repo.
@@ -2250,10 +2251,10 @@ def run_agent(agent, prompt, opts=None, require_context=False):
 
 
 JOBS_DIR = os.path.join(CFG_DIR, "jobs")
-LIVE_MODEL = "cc-live-"  # an in-process worker's model name; the adapter's live_target resolves the profile
+LIVE_MODEL = "ccx-live-"  # an in-process worker's model name; the adapter's live_target resolves the profile
 RELAY_WAIT = 540  # seconds per relay Bash call, under the tool's 600 s cap
 FEED_WAIT = 120  # with a feed: shorter calls, so the relay's view gains a finished block every 2 minutes
-RELAY_RESULT = "CC_RELAY_RESULT"
+RELAY_RESULT = "CCX_RELAY_RESULT"
 ORPHAN_AFTER = 720  # s without a relay_wait heartbeat: the relay that started the job is gone
 DELIVER_CAP = 30000  # characters of an orphan's result put into the prompt; the rest stays in a file
 _RELAY_JOB = None
@@ -2501,7 +2502,7 @@ def relay_job(agent, job):
             fallback = (load_agents().get(agent) or {}).get("fallback")
             if not fallback or fallback.get("provider") != "official" or exc.code in (0, None):
                 raise
-            print(f"[cc] worker failed; rerunning once on its fallback {fallback['provider']}/{fallback['model']}", flush=True)
+            print(f"[ccx] worker failed; rerunning once on its fallback {fallback['provider']}/{fallback['model']}", flush=True)
             global _AGENT_OVERRIDE
             _AGENT_OVERRIDE = {k: v for k, v in fallback.items() if k in ("provider", "model", "effort")}
             try:  # the status line names the route the worker now runs on (fallback_jobs)
@@ -2555,7 +2556,7 @@ def relay_wait(job):
         _feed(job, state, 0)  # the lines written just before the worker ended
         feed.write_text(json.dumps(state))
     if not rc.exists():
-        print(f"CC_RELAY_PENDING {job}")
+        print(f"CCX_RELAY_PENDING {job}")
         return
     if state is not None:
         print(RELAY_RESULT)
@@ -2583,16 +2584,21 @@ def sync_agents():
 
     os.makedirs(AGENTS_DIR, exist_ok=True)
     for file in Path(AGENTS_DIR).glob("cc-*.md"):
+        # Relays and twins written before the ccx rename; they call the old ~/.config/cc copy.
+        text = file.read_text(encoding="utf-8", errors="replace")
+        if re.search(r'cc-switch\.py" agent(?:-relay)? |model: cc-live-', text):
+            file.unlink()
+    for file in Path(AGENTS_DIR).glob("ccx-*.md"):
         # Only relays (and their in-process twins) this command wrote, for profiles no session or the global file uses.
         text = file.read_text(encoding="utf-8", errors="replace")
         live = file.stem.endswith("-live") and f"model: {LIVE_MODEL}" in text
-        if (file.stem[3:-5] if live else file.stem[3:]) not in all_agent_names() and (live or re.search(r'cc-switch\.py" agent(?:-relay)? ', text)):
+        if (file.stem[4:-5] if live else file.stem[4:]) not in all_agent_names() and (live or re.search(r'ccx-switch\.py" agent(?:-relay)? ', text)):
             file.unlink()
     for agent, a in written.items():
         # No route here: each session may run this profile elsewhere, and its context hook names that route.
-        description = (a.get("description") or "General task") + f" Runs the task on this session's cc-{agent} route; inherits the supplied conversation context and project memory. Use this configured worker for delegation."
+        description = (a.get("description") or "General task") + f" Runs the task on this session's ccx-{agent} route; inherits the supplied conversation context and project memory. Use this configured worker for delegation."
         body = f"""---
-name: cc-{agent}
+name: ccx-{agent}
 description: {json.dumps(description)}
 model: haiku
 tools: Bash
@@ -2600,15 +2606,15 @@ tools: Bash
 You relay one task to another Claude Code process. Do not do the task yourself.
 
 Run this with the Bash tool and a 600000 ms timeout, putting the entire prompt you were given,
-including its leading CC_CONTEXT_V1 line, complete and unchanged, between the two markers.
+including its leading CCX_CONTEXT_V1 line, complete and unchanged, between the two markers.
 That line supplies the previous conversation and worker context; never omit or rewrite it:
 
-{PYTHON} "$HOME/.config/cc/cc-switch.py" agent-relay --feed {agent} <<'CC_TASK_END'
+{PYTHON} "$HOME/.config/ccx/ccx-switch.py" agent-relay --feed {agent} <<'CCX_TASK_END'
 <the complete prompt, including its context line>
-CC_TASK_END
+CCX_TASK_END
 
-The output shows the worker's progress live, then ends with `CC_RELAY_PENDING <job>` while the
-worker is still running: run `{PYTHON} "$HOME/.config/cc/cc-switch.py" agent-wait <job>` with a
+The output shows the worker's progress live, then ends with `CCX_RELAY_PENDING <job>` while the
+worker is still running: run `{PYTHON} "$HOME/.config/ccx/ccx-switch.py" agent-wait <job>` with a
 600000 ms timeout, and repeat until the output no longer ends with that line. Never start the
 task a second time. Do not comment on the progress lines between calls.
 
@@ -2616,13 +2622,13 @@ When it finishes, reply with everything after the `{RELAY_RESULT}` line verbatim
 before it (the progress lines are for the user's view only). If it fails, reply with the error
 text; do not retry.
 """
-        with open(os.path.join(AGENTS_DIR, f"cc-{agent}.md"), "w", encoding="utf-8") as f:
+        with open(os.path.join(AGENTS_DIR, f"ccx-{agent}.md"), "w", encoding="utf-8") as f:
             f.write(body)
-        # The in-process twin: agent_hook sends cc-{agent} here when the session runs through the adapter,
+        # The in-process twin: agent_hook sends ccx-{agent} here when the session runs through the adapter,
         # which resolves the profile from the model name, so its tab shows the worker's whole conversation.
         live = f"""---
-name: cc-{agent}-live
-description: {json.dumps(f"In-process cc-{agent} worker; ccx picks it for cc-{agent} itself. Do not call it directly.")}
+name: ccx-{agent}-live
+description: {json.dumps(f"In-process ccx-{agent} worker; ccx picks it for ccx-{agent} itself. Do not call it directly.")}
 model: {LIVE_MODEL}{agent}
 disallowedTools: {WORKER_UNUSED_TOOLS}
 ---
@@ -2631,11 +2637,11 @@ concise report of what you did, what you found and anything left undone: the par
 
 {WORKER_RULES}
 """
-        twin = Path(AGENTS_DIR, f"cc-{agent}-live.md")
+        twin = Path(AGENTS_DIR, f"ccx-{agent}-live.md")
         if not twin.is_file() or twin.read_text(encoding="utf-8") != live:  # a rewrite would hide it from running sessions (known_live)
             twin.write_text(live, encoding="utf-8")
         shown_route, shown_settings = label(agents.get(agent, a))
-        print(f"  cc-{agent}: {shown_route}, {shown_settings}")
+        print(f"  ccx-{agent}: {shown_route}, {shown_settings}")
     # Relays read agents.json on every call, so only a new or removed profile needs a reload.
     source = SESSION_AGENTS_FILE if session_launch() else AGENTS_FILE
     print(f"{len(agents)} subagent(s) in {AGENTS_DIR} from {source}. Model, effort and autocompact apply to the "
@@ -2684,7 +2690,7 @@ def _recorded_context(transcript, strict=False):
 
 def agent_hook(data):
     """Enforce configured worker types without bypassing native permission rules."""
-    if os.environ.get("CC_AGENT_CHILD") == "1" or data.get("tool_name") not in ("Agent", "Task"):
+    if os.environ.get("CCX_AGENT_CHILD") == "1" or data.get("tool_name") not in ("Agent", "Task"):
         return {}
 
     def deny(reason):
@@ -2698,10 +2704,10 @@ def agent_hook(data):
         profiles = load_agents()
         if not profiles:
             return deny("No configured ccx subagents. Configure `ccx agents`; native delegation is blocked.")
-        choices = ", ".join("cc-" + name for name in profiles)
+        choices = ", ".join("ccx-" + name for name in profiles)
         original = data.get("tool_input") or {}
         kind = original.get("subagent_type") or "general-purpose"
-        if kind.endswith("-live") and kind[:-5] in {"cc-" + name for name in profiles}:
+        if kind.endswith("-live") and kind[:-5] in {"ccx-" + name for name in profiles}:
             kind = kind[:-5]
         def known_live():
             # Claude Code reads agent files at startup and on /reload-plugins, and records each change to the
@@ -2725,7 +2731,7 @@ def agent_hook(data):
                     return json.load(handle).get("agentType") == kind + "-live"
             except (OSError, ValueError, KeyError, TypeError):
                 return False
-        if (kind in {"cc-" + name for name in profiles} and os.environ.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/")
+        if (kind in {"ccx-" + name for name in profiles} and os.environ.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/")
                 and known_live() and (not original.get("resume") or resumes_live())):
             # Through the adapter the worker runs in-process (a full native tab); it starts from the task
             # prompt alone, without the copied conversation the relay gives an external worker.
@@ -2734,7 +2740,7 @@ def agent_hook(data):
                 prompt = prompt.partition("\n")[2]
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                     "updatedInput": {**original, "subagent_type": kind + "-live", "prompt": prompt}}}
-        if kind not in {"cc-" + name for name in profiles}:
+        if kind not in {"ccx-" + name for name in profiles}:
             return deny(f"Use configured subagent {choices} instead of {kind}. Resubmit the complete task "
                         "with that subagent_type. For an old worker keep its resume id: ccx will hand off its "
                         "transcript into the configured worker. Do not retry a native type. Specialized "
@@ -2742,7 +2748,7 @@ def agent_hook(data):
                         "read-only tools when no matching configured worker exists.")
         context = {"token": str(uuid.uuid4()), "source": data.get("transcript_path"),
                    "permission_mode": data.get("permission_mode") or "default"}
-        updated = {**original, "subagent_type": kind}  # a direct cc-*-live call outside the adapter relays instead
+        updated = {**original, "subagent_type": kind}  # a direct ccx-*-live call outside the adapter relays instead
         if original.get("resume"):
             path = _agent_files(data, original["resume"])
             with path.with_suffix(".meta.json").open(encoding="utf-8") as handle:
@@ -2753,7 +2759,7 @@ def agent_hook(data):
             history = path.with_suffix(".jsonl")
             if previous == kind:
                 saved = _recorded_context(history, strict=True)
-                if saved and saved.get("profile") != kind[3:]:
+                if saved and saved.get("profile") != kind[4:]:
                     raise ValueError("previous worker belongs to another profile")
                 context["source"] = saved.get("session_id") or str(history)
                 context["read_only"] = bool(saved.get("read_only"))
@@ -2826,17 +2832,17 @@ def hook_command(data):
 def subagent_stop(data):
     """Keep a ccx relay alive when its worker outlived the first agent-relay call.
 
-    A weak relay model sometimes treats CC_RELAY_PENDING as its final answer. One
+    A weak relay model sometimes treats CCX_RELAY_PENDING as its final answer. One
     blocked stop per job hands it the agent-wait command without looping forever."""
     kind = data.get("agent_type")
     path = data.get("agent_transcript_path")
-    if not isinstance(kind, str) or not kind.startswith("cc-") or not isinstance(path, str):
+    if not isinstance(kind, str) or not kind.startswith("ccx-") or not isinstance(path, str):
         return {}
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
-    for job in reversed(re.findall(r"CC_RELAY_PENDING ([0-9a-f-]{36})", text)):
+    for job in reversed(re.findall(r"CCX_RELAY_PENDING ([0-9a-f-]{36})", text)):
         out, rc = Path(JOBS_DIR, job + ".out"), Path(JOBS_DIR, job + ".rc")
         if rc.exists() or not out.exists():
             continue  # finished, or already collected and cleaned
@@ -2849,13 +2855,13 @@ def subagent_stop(data):
             pass
         return {"decision": "block",
                 "reason": (f"The ccx worker job {job} is still running. Do not finish. Run this with the Bash tool "
-                           f"and a 600000 ms timeout:\n\n{PYTHON} \"$HOME/.config/cc/cc-switch.py\" agent-wait {job}\n\n"
-                           "Repeat until the output no longer ends with CC_RELAY_PENDING. Never start the task again.")}
+                           f"and a 600000 ms timeout:\n\n{PYTHON} \"$HOME/.config/ccx/ccx-switch.py\" agent-wait {job}\n\n"
+                           "Repeat until the output no longer ends with CCX_RELAY_PENDING. Never start the task again.")}
     return {}
 
 
 def hook_context(data):
-    if os.environ.get("CC_AGENT_CHILD") == "1":
+    if os.environ.get("CCX_AGENT_CHILD") == "1":
         return {}
     if isinstance(data.get("session_id"), str):
         link_session(data["session_id"])
@@ -2866,12 +2872,12 @@ def hook_context(data):
                 "with your own tools. Do not call Agent or Task; every such call is blocked."
                 + ("\n\n" + orphans if orphans else "")}}
     profiles = load_agents()
-    choices = "; ".join(f"cc-{name}: {agent_summary(a)}" for name, a in profiles.items())
+    choices = "; ".join(f"ccx-{name}: {agent_summary(a)}" for name, a in profiles.items())
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
             "additionalContext": "Delegate only through configured ccx subagents: " + (choices or "none configured") +
-            ". Native fork/general-purpose/custom worker calls are blocked. Use a cc-* subagent_type and "
+            ". Native fork/general-purpose/custom worker calls are blocked. Use a ccx-* subagent_type and "
             "a self-contained task; ccx copies only the recent conversation and project memory. To continue an old worker, "
-            "use a configured cc-* type with its resume id; do not restart it as a native fork."
+            "use a configured ccx-* type with its resume id; do not restart it as a native fork."
             + ("\n\n" + orphans if orphans else "")}}
 
 
@@ -2921,7 +2927,7 @@ def _worker_tokens(path):
 def _statusline():
     """The sibling statusline.py, for its API price table (one copy of the prices)."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("cc_statusline", Path(__file__).with_name("statusline.py"))
+    spec = importlib.util.spec_from_file_location("ccx_statusline", Path(__file__).with_name("statusline.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -2964,10 +2970,10 @@ def agent_statusline(data):
         if not isinstance(task, dict) or not task.get("id"):
             continue
         kind = task.get("agentType") or "unknown"
-        live = isinstance(kind, str) and kind.startswith("cc-") and kind.endswith("-live")
-        name = kind[3:-5] if live else kind[3:] if isinstance(kind, str) else ""
-        profile = profiles.get(name) if isinstance(kind, str) and kind.startswith("cc-") else None
-        if isinstance(kind, str) and kind.startswith("cc-"):
+        live = isinstance(kind, str) and kind.startswith("ccx-") and kind.endswith("-live")
+        name = kind[4:-5] if live else kind[4:] if isinstance(kind, str) else ""
+        profile = profiles.get(name) if isinstance(kind, str) and kind.startswith("ccx-") else None
+        if isinstance(kind, str) and kind.startswith("ccx-"):
             saved, path = {}, None
             try:
                 own = _agent_files(data, task["id"]).with_suffix(".jsonl")
@@ -3093,7 +3099,7 @@ def main():
         else:
             pos.append(args.pop(0))
     claude_args = args[1:] if args[:1] == ["--"] else args
-    autocompact = take_option(claude_args, "--autocompact")  # cc's own, not Claude's
+    autocompact = take_option(claude_args, "--autocompact")  # ccx's own, not Claude's
     autocompact = None if autocompact is None else parse_pct(autocompact)
     if no_run and claude_args:
         die("-NoRun cannot be combined with Claude launch arguments.")
@@ -3127,7 +3133,7 @@ def main():
         preset = ((saved_bundle("official") or {}).get("model") or {}).get("model")
         if not resuming:
             # A fresh launch id: the terminal may still hold an earlier launch's, whose settings are not this session's.
-            _STARTUP_LAUNCH = os.environ["CC_LAUNCH_ID"] = uuid.uuid4().hex
+            _STARTUP_LAUNCH = os.environ["CCX_LAUNCH_ID"] = uuid.uuid4().hex
             if model is None and preset:
                 model, claude_args = preset, ["--model", preset, *claude_args]  # the saved Claude preset's model
         # Fresh default Opus launches must not inherit a gateway's persisted effort; the saved preset's wins.
@@ -3150,7 +3156,7 @@ def main():
         if menus and autocompact is None:
             steps.append("autocompact")
         launch = _STARTUP_LAUNCH = uuid.uuid4().hex
-        os.environ["CC_LAUNCH_ID"] = launch  # the startup subagent prompt edits this launch only
+        os.environ["CCX_LAUNCH_ID"] = launch  # the startup subagent prompt edits this launch only
         fallback, backing = None, False
         if menus:
             steps.append("fallback")

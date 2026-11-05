@@ -70,7 +70,7 @@ class PlanLabelTests(unittest.TestCase):
                 patch.object(statusline, 'settings_ultracode', return_value=False), \
                 patch.object(statusline, 'keyword_ultracode', return_value=False), \
                 patch.object(statusline, 'effort_levels', return_value=['low', 'medium', 'high']), \
-                patch.dict(os.environ, {'CC_LAUNCH_ID': 'L'}):
+                patch.dict(os.environ, {'CCX_LAUNCH_ID': 'L'}):
             rendered = statusline.render({'model': {'id': 'main-model'}, 'effort': {'level': 'high'}})
             tools = rendered.split('Tools: ')[1].splitlines()[0]
             self.assertIn('main-model', tools)
@@ -109,7 +109,7 @@ class PlanLabelTests(unittest.TestCase):
     def test_adapter_route_shows_recorded_rate_limits(self):
         saved = {"at": 1000, "rate_limits": {"req": {"used_percentage": 75, "resets_at": None}}}
         with patch.object(statusline, "quota_source", return_value=None), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
-                patch.object(statusline, "load_json", side_effect=lambda name: saved if name == "ratelimit-gemini.json" else {}), patch.dict(os.environ, {"CC_MAIN_PROVIDER": "gemini"}):
+                patch.object(statusline, "load_json", side_effect=lambda name: saved if name == "ratelimit-gemini.json" else {}), patch.dict(os.environ, {"CCX_MAIN_PROVIDER": "gemini"}):
             rendered = statusline.render({"model": {"id": "gemini-2.5-pro"}})
         self.assertIn("req", rendered)
         self.assertIn("▰▱▱▱", re.sub(r"\x1b\[[0-9;]*m", "", rendered))  # 75%: seven of ten cells
@@ -119,11 +119,11 @@ class PlanLabelTests(unittest.TestCase):
         def load(name):
             return files.get(os.path.basename(name), {})
         with patch.object(statusline, "quota_source", return_value=None), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
-                patch.object(statusline, "load_json", side_effect=load), patch.dict(os.environ, {"CC_MAIN_PROVIDER": "nvidia", "CC_LAUNCH_ID": "L"}):
+                patch.object(statusline, "load_json", side_effect=load), patch.dict(os.environ, {"CCX_MAIN_PROVIDER": "nvidia", "CCX_LAUNCH_ID": "L"}):
             idle = statusline.render({"model": {"id": "deepseek-v4-pro"}})
             files["fallback-L.json"] = {"at": time.time()}
             serving = statusline.render({"model": {"id": "deepseek-v4-pro"}})
-            os.environ["CC_LAUNCH_ID"] = "other"
+            os.environ["CCX_LAUNCH_ID"] = "other"
             unset = statusline.render({"model": {"id": "deepseek-v4-pro"}})
         self.assertIn("↪ fallback gemini/gemini-2.5-flash", idle)
         self.assertNotIn("active", idle)
@@ -133,7 +133,7 @@ class PlanLabelTests(unittest.TestCase):
     def test_cached_label_display(self):
         quota = {"plan": "ChatGPT Prolite", "rate_limits": {"seven_day": {"used_percentage": 0}}}
         with patch.object(statusline, "quota_source", return_value="openai"), patch.object(statusline, "provider_quota", return_value=(quota, None)), patch.object(statusline, "settings_effort", return_value=None), patch.object(statusline, "settings_ultracode", return_value=False), patch.object(statusline, "keyword_ultracode", return_value=False), \
-                patch.dict(os.environ, {"CC_LAUNCH_ID": ""}):  # the running session's /model route must not leak in
+                patch.dict(os.environ, {"CCX_LAUNCH_ID": ""}):  # the running session's /model route must not leak in
             rendered = statusline.render({"model": {"id": "gpt-test"}})
         self.assertIn("ChatGPT Pro Lite", rendered)
         self.assertNotIn("ChatGPT Prolite", rendered)
@@ -220,7 +220,7 @@ class SubagentLineTests(unittest.TestCase):
 
     def render(self, source, subs):
         with patch.object(statusline, "quota_source", return_value=source), \
-             patch.object(statusline, "cc_routing_enabled", return_value=False), \
+             patch.object(statusline, "ccx_routing_enabled", return_value=False), \
              patch.object(statusline, "subagent_sources", return_value=subs), \
              patch.object(statusline, "provider_quota", return_value=({"plan": "Command Code", "extra": "$1.00 left", "rate_limits": {}}, None)), \
              patch.object(statusline, "claude_json", return_value={}), \
@@ -233,7 +233,7 @@ class SubagentLineTests(unittest.TestCase):
             return re.sub(r"\x1b\[[0-9;]*m", "", statusline.render(
                 {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"}}))
 
-    def test_official_claude_shows_no_cc_subagent_data(self):
+    def test_official_claude_shows_no_ccx_subagent_data(self):
         rendered = self.render("anthropic", {"commandcode": ["sub"]})
         self.assertNotIn("subagent", rendered)
         self.assertNotIn("Command Code", rendered)
@@ -269,10 +269,10 @@ class QuotaErrorTests(unittest.TestCase):
 class ConfiguredAgentLineTests(unittest.TestCase):
     def render(self, main, profiles, quota=None, ansi=False):
         hooks = {'PreToolUse': [{'matcher': 'Agent|Task', 'hooks': [
-            {'type': 'command', 'command': 'python cc-switch.py hook-agent'}]}]}
-        with patch.dict(os.environ, {'CC_MAIN_PROVIDER': main, 'CC_AGENT_CHILD': ''}), \
+            {'type': 'command', 'command': 'python ccx-switch.py hook-agent'}]}]}
+        with patch.dict(os.environ, {'CCX_MAIN_PROVIDER': main, 'CCX_AGENT_CHILD': ''}), \
              patch.object(statusline, 'user_settings', return_value={'hooks': hooks}), \
-             patch.object(statusline, 'cc_profiles', return_value=profiles, create=True), \
+             patch.object(statusline, 'ccx_profiles', return_value=profiles, create=True), \
              patch.object(statusline, 'quota_source', return_value='anthropic' if main == 'official' else 'openai'), \
              patch.object(statusline, 'provider_quota', return_value=(quota or {}, None)), \
              patch.object(statusline, 'claude_json', return_value={}), \
@@ -381,13 +381,13 @@ class QuotaCredentialTests(unittest.TestCase):
     def test_provider_environment_precedes_windows_saved_environment(self):
         with patch.dict(os.environ, {'USERPROFILE': str(Path.home()), 'OPENROUTER_API_KEY': 'process-key'}, clear=True), \
                 patch('winreg.OpenKey') as registry:
-            self.assertEqual(statusline.cc_key('openrouter'), 'process-key')
+            self.assertEqual(statusline.ccx_key('openrouter'), 'process-key')
             registry.assert_not_called()
         with patch.dict(os.environ, {'USERPROFILE': str(Path.home())}, clear=True), \
                 patch('winreg.OpenKey'), patch('winreg.QueryValueEx', return_value=('user-key', 1)):
-            self.assertEqual(statusline.cc_key('openrouter'), 'user-key')
+            self.assertEqual(statusline.ccx_key('openrouter'), 'user-key')
 
-    def test_switched_provider_uses_cc_saved_key_not_launch_token(self):
+    def test_switched_provider_uses_ccx_saved_key_not_launch_token(self):
         for provider, fetcher, response in (
                 ('commandcode', statusline.commandcode_quota, {}),
                 ('opencode-go', statusline.opencode_go_quota, {}),
@@ -421,13 +421,13 @@ class ModelSwitchTests(unittest.TestCase):
                    'rate_limits': {'five_hour': {'used_percentage': 99}},
                    'cost': {'total_cost_usd': 12}, 'prompt_cache': {'warm': False}}
         with ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'CC_LAUNCH_ID': 'L', 'CC_MAIN_PROVIDER': launch_provider,
-                'ANTHROPIC_BASE_URL': 'http://127.0.0.1:10532/' + launch_provider, 'CC_AGENT_CHILD': ''}, clear=True))
+            stack.enter_context(patch.dict(os.environ, {'CCX_LAUNCH_ID': 'L', 'CCX_MAIN_PROVIDER': launch_provider,
+                'ANTHROPIC_BASE_URL': 'http://127.0.0.1:10532/' + launch_provider, 'CCX_AGENT_CHILD': ''}, clear=True))
             for name, value in {'claude_json': {'oauthAccount': {'organizationType': 'claude_max'}},
                                 'credentials': {'claudeAiOauth': {'accessToken': 'test'}},
                                 'settings_effort': None, 'settings_ultracode': False, 'keyword_ultracode': False,
-                                'cc_routing_enabled': bool(profiles), 'cc_profiles': profiles or {},
-                                'cc_fallback_jobs': {}, 'cc_running_jobs': 0, 'cc_orphans': [],
+                                'ccx_routing_enabled': bool(profiles), 'ccx_profiles': profiles or {},
+                                'ccx_fallback_jobs': {}, 'ccx_running_jobs': 0, 'ccx_orphans': [],
                                 'subagent_sources': {}}.items():
                 stack.enter_context(patch.object(statusline, name, return_value=value))
             stack.enter_context(patch.object(statusline, 'load_json', side_effect=lambda name: files.get(os.path.basename(name), {})))
@@ -534,7 +534,7 @@ class ModelSwitchTests(unittest.TestCase):
         for url, (provider, source) in cases.items():
             with self.subTest(url=url), patch.dict(os.environ, {'ANTHROPIC_BASE_URL': url}, clear=True):
                 self.assertEqual(statusline.quota_source(), source)
-                self.assertEqual(statusline.cc_main_provider(None), provider)
+                self.assertEqual(statusline.ccx_main_provider(None), provider)
 
 
 class CacheWindowTests(unittest.TestCase):
@@ -586,7 +586,7 @@ class SessionCostTests(unittest.TestCase):
                               cache_creation={"ephemeral_1h_input_tokens": 1_000_000}))
                 f.write(reply("c", "unpriced-model", input_tokens=5))  # no known price: tokens only
             with open(os.path.join(tmp, "s", "subagents", "agent-1.meta.json"), "w") as f:
-                json.dump({"agentType": "cc-sub-live"}, f)
+                json.dump({"agentType": "ccx-sub-live"}, f)
             self.assertAlmostEqual(statusline.transcript_cost(main)["usd"], 4.2)  # $4 input + $0.20 cache read
             self.assertEqual(statusline.transcript_cost(main)["sent"], 2_000_000)  # incremental re-read adds nothing
             sub = statusline.subagent_costs(main)["sub"]

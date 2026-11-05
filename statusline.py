@@ -167,7 +167,7 @@ def default_effort(provider, model_id):
 def effort_levels(provider, model_id):
     """The reasoning efforts the provider publishes for this model; None when it publishes none.
 
-    Local reads only: Codex's model cache for the OpenAI route, the copy cc-switch.py keeps of
+    Local reads only: Codex's model cache for the OpenAI route, the copy ccx-switch.py keeps of
     Command Code's catalog for its two. The status line never waits on a network call.
     """
     if not model_id:
@@ -184,7 +184,7 @@ def effort_levels(provider, model_id):
                 return [e["effort"] for e in levels if isinstance(e, dict) and isinstance(e.get("effort"), str)]
         return None
     if provider in ("commandcode", "commandcode-cli"):
-        models = read_json(os.path.expanduser("~/.config/cc/efforts.json")).get("models") or {}
+        models = read_json(os.path.expanduser("~/.config/ccx/efforts.json")).get("models") or {}
         for mid, levels in models.items():
             if str(mid).casefold() == key:
                 return levels if isinstance(levels, list) else None
@@ -264,32 +264,32 @@ def quota_source():
 
 
 def fetch_json(url, headers):
-    req = urllib.request.Request(url, headers={"User-Agent": "cc-statusline", **headers})
+    req = urllib.request.Request(url, headers={"User-Agent": "ccx-statusline", **headers})
     with urllib.request.urlopen(req, timeout=3) as r:
         return json.load(r)
 
 
-def load_cc_switch():
-    """The cc-switch.py this status line belongs to: the checkout's sibling first, else the install."""
+def load_ccx_switch():
+    """The ccx-switch.py this status line belongs to: the checkout's sibling first, else the install."""
     import importlib.util
-    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cc-switch.py")
-    source = sibling if os.path.isfile(sibling) else os.path.expanduser("~/.config/cc/cc-switch.py")
-    spec = importlib.util.spec_from_file_location("cc_switch", source)
-    cc = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cc)
-    return cc
+    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccx-switch.py")
+    source = sibling if os.path.isfile(sibling) else os.path.expanduser("~/.config/ccx/ccx-switch.py")
+    spec = importlib.util.spec_from_file_location("ccx_switch", source)
+    ccx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ccx)
+    return ccx
 
 
-def cc_key(provider):
+def ccx_key(provider):
     """Use the launcher's credential precedence for providers picked after launch."""
     try:
-        return load_cc_switch().auth_key(provider)
+        return load_ccx_switch().auth_key(provider)
     except (OSError, ImportError):
         return ""
 
 
 def commandcode_quota():
-    key = os.environ.get("CMD_API_KEY") or cc_key("commandcode")
+    key = os.environ.get("CMD_API_KEY") or ccx_key("commandcode")
     if not key:
         with open(os.path.expanduser("~/.commandcode/auth.json"), encoding="utf-8-sig") as f:
             key = json.load(f)["apiKey"]
@@ -322,8 +322,8 @@ def openai_quota():
 
 def opencode_go_quota():
     # ccx hands the Go key to Claude Code as ANTHROPIC_AUTH_TOKEN; a ccx subagent on Go while the
-    # session is elsewhere reads cc's own source instead. 403 without a Go subscription.
-    key = os.environ.get("OPENCODE_GO_API_KEY") or cc_key("opencode-go")
+    # session is elsewhere reads ccx's own source instead. 403 without a Go subscription.
+    key = os.environ.get("OPENCODE_GO_API_KEY") or ccx_key("opencode-go")
     if not key and quota_source() == "opencode-go":
         key = os.environ["ANTHROPIC_AUTH_TOKEN"]
     if not key:
@@ -356,7 +356,7 @@ def hyper_quota():
 
 
 def openrouter_quota():
-    key = os.environ.get("OPENROUTER_API_KEY") or cc_key("openrouter")
+    key = os.environ.get("OPENROUTER_API_KEY") or ccx_key("openrouter")
     if not key and quota_source() == "openrouter":
         key = os.environ["ANTHROPIC_AUTH_TOKEN"]
     if not key:
@@ -372,23 +372,23 @@ QUOTA_FETCHERS = {"commandcode": commandcode_quota, "openai": openai_quota,
                   "opencode-go": opencode_go_quota, "hyper": hyper_quota, "openrouter": openrouter_quota}
 QUOTA_TTL = 10  # the usage endpoints are plain account lookups: no model tokens
 QUOTA_RETRY = 60  # after a failed fetch
-# ccx provider names (~/.config/cc/agents.json) that share a quota source; the rest have no quota API.
-CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "commandcode-cli": "commandcode",
+# ccx provider names (~/.config/ccx/agents.json) that share a quota source; the rest have no quota API.
+CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "commandcode-cli": "commandcode",
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
-def cc_agents(session_id=None):
+def ccx_agents(session_id=None):
     """This session's subagent profiles, or the shared defaults."""
     try:
-        with open(os.path.expanduser("~/.config/cc/agents.json"), encoding="utf-8") as f:
+        with open(os.path.expanduser("~/.config/ccx/agents.json"), encoding="utf-8") as f:
             agents = json.load(f)
     except (OSError, ValueError):
         return {}
-    # cc-switch's session_launch: a Claude session not started by ccx keys its profiles by session id
-    launch = os.environ.get("CC_LAUNCH_ID") or (f"claude-{session_id}" if session_id else "")
+    # ccx-switch's session_launch: a Claude session not started by ccx keys its profiles by session id
+    launch = os.environ.get("CCX_LAUNCH_ID") or (f"claude-{session_id}" if session_id else "")
     if launch:
         try:
-            with open(os.path.expanduser("~/.config/cc/session-agents.json"), encoding="utf-8") as f:
+            with open(os.path.expanduser("~/.config/ccx/session-agents.json"), encoding="utf-8") as f:
                 entry = json.load(f).get(launch) or {}
             if isinstance(entry.get("agents"), dict):
                 return entry["agents"]
@@ -398,62 +398,62 @@ def cc_agents(session_id=None):
 
 
 def subagent_sources(session_id=None):
-    """{quota source: [ccx subagent names]} for cc's own-process subagents."""
-    agents = cc_agents(session_id)
+    """{quota source: [ccx subagent names]} for ccx's own-process subagents."""
+    agents = ccx_agents(session_id)
     found = {}
     for name, a in agents.items() if isinstance(agents, dict) else ():
-        source = CC_QUOTA_SOURCES.get((a if isinstance(a, dict) else {}).get("provider", "official"))
+        source = CCX_QUOTA_SOURCES.get((a if isinstance(a, dict) else {}).get("provider", "official"))
         if source:
             found.setdefault(source, []).append(name)
     return found
 
 
-def cc_profiles(session_id=None):
-    return {name: profile for name, profile in cc_agents(session_id).items() if isinstance(profile, dict)}
+def ccx_profiles(session_id=None):
+    return {name: profile for name, profile in ccx_agents(session_id).items() if isinstance(profile, dict)}
 
 
-def cc_orphans(session_id):
-    """This session's relay jobs nobody waits on any more (cc-switch's orphan_jobs), with the worker's tokens."""
+def ccx_orphans(session_id):
+    """This session's relay jobs nobody waits on any more (ccx-switch's orphan_jobs), with the worker's tokens."""
     if not isinstance(session_id, str) or not session_id:
         return []
     try:
-        cc = load_cc_switch()
-        return [{**item, "tokens": cc._worker_tokens(cc._worker_path({"session_id": item["session"]})) if item["session"] else ""}
-                for item in cc.orphan_jobs(session_id)]
+        ccx = load_ccx_switch()
+        return [{**item, "tokens": ccx._worker_tokens(ccx._worker_path({"session_id": item["session"]})) if item["session"] else ""}
+                for item in ccx.orphan_jobs(session_id)]
     except Exception:  # a status line never fails over an optional row
         return []
 
 
-def cc_fallback_jobs(session_id):
-    """{subagent name: route} for this session's workers that ccx moved onto their fallback (cc-switch's fallback_jobs)."""
+def ccx_fallback_jobs(session_id):
+    """{subagent name: route} for this session's workers that ccx moved onto their fallback (ccx-switch's fallback_jobs)."""
     if not isinstance(session_id, str) or not session_id:
         return {}
     try:
-        return load_cc_switch().fallback_jobs(session_id)
+        return load_ccx_switch().fallback_jobs(session_id)
     except Exception:  # a status line never fails over an optional row
         return {}
 
 
-def cc_running_jobs(session_id):
-    """Count of this session's relay workers still running (cc-switch's running_jobs)."""
+def ccx_running_jobs(session_id):
+    """Count of this session's relay workers still running (ccx-switch's running_jobs)."""
     if not isinstance(session_id, str) or not session_id:
         return 0
     try:
-        return load_cc_switch().running_jobs(session_id)
+        return load_ccx_switch().running_jobs(session_id)
     except Exception:  # a status line never fails over an optional row
         return 0
 
 
-def cc_routing_enabled():
+def ccx_routing_enabled():
     hooks = (user_settings().get("hooks") or {}).get("PreToolUse") or []
-    return any("cc-switch.py" in hook.get("command", "") and "hook-agent" in hook.get("command", "")
+    return any("ccx-switch.py" in hook.get("command", "") and "hook-agent" in hook.get("command", "")
                for group in hooks if isinstance(group, dict)
                for hook in group.get("hooks") or [] if isinstance(hook, dict))
 
 
-def cc_main_provider(source):
-    if os.environ.get("CC_MAIN_PROVIDER"):
-        return os.environ["CC_MAIN_PROVIDER"]
+def ccx_main_provider(source):
+    if os.environ.get("CCX_MAIN_PROVIDER"):
+        return os.environ["CCX_MAIN_PROVIDER"]
     url = os.environ.get("ANTHROPIC_BASE_URL", "").lower().rstrip("/")
     for provider in ("commandcode-cli", "commandcode", "nvidia", "minimax", "openrouter", "opencode-zen", "gpt4free", "gemini", "ollama-cloud", "lmstudio"):
         if provider in url:
@@ -733,7 +733,7 @@ def subagent_costs(transcript_path):
                 continue
             path = os.path.join(root, file)
             kind = read_json(path[:-len(".jsonl")] + ".meta.json").get("agentType") or "subagent"
-            name = re.sub(r"-live$", "", re.sub(r"^cc-", "", kind))  # cc-sub-live is profile "sub"
+            name = re.sub(r"-live$", "", re.sub(r"^ccx-", "", kind))  # ccx-sub-live is profile "sub"
             cost = transcript_cost(path)
             into = found.setdefault(name, {"usd": 0.0, "sent": 0, "read": 0, "priced": False, "ctx": 0, "at": 0})
             for key in ("usd", "sent", "read"):
@@ -909,10 +909,10 @@ def mode_row(session_id, now):
     paths = glob.glob(os.path.join(os.path.expanduser("~/.claude/projects"), "*", session_id + ".jsonl"))
     if not paths:
         return ""
-    launch = os.environ.get("CC_LAUNCH_ID")
-    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch) or {}
-    main = route.get("provider") if route.get("model") else cc_main_provider(quota_source())
-    profiles = cc_profiles(session_id)
+    launch = os.environ.get("CCX_LAUNCH_ID")
+    route = (load_json(os.path.expanduser("~/.config/ccx/routes.json")) if launch else {}).get(launch) or {}
+    main = route.get("provider") if route.get("model") else ccx_main_provider(quota_source())
+    profiles = ccx_profiles(session_id)
     spent = {}  # quota source (or bare provider) -> usd, main first
     runs = [(main, transcript_cost(paths[0]))]
     # a native subagent (Explore, general-purpose) runs on the main route; a ccx profile on its own
@@ -920,7 +920,7 @@ def mode_row(session_id, now):
              for name, cost in subagent_costs(paths[0]).items()]
     for provider, cost in runs:
         if cost.get("sent") or cost.get("priced"):
-            key = CC_QUOTA_SOURCES.get(provider) or ("hyper" if provider == "hyper" else provider or "?")
+            key = CCX_QUOTA_SOURCES.get(provider) or ("hyper" if provider == "hyper" else provider or "?")
             spent[key] = spent.get(key, 0.0) + cost.get("usd", 0.0)
     parts = []
     for key, usd in spent.items():
@@ -941,17 +941,17 @@ def render(d):
     if effort == "ultracode":
         effort = None
     # /model's Model tab switched this ccx session (ccx route): Claude Code still reports the launch model.
-    launch = os.environ.get("CC_LAUNCH_ID")
-    route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
+    launch = os.environ.get("CCX_LAUNCH_ID")
+    route = (load_json(os.path.expanduser("~/.config/ccx/routes.json")) if launch else {}).get(launch)
     helper_picks = (route or {}).get("helpers") or {}
     route = route if route and route.get("model") else None
     if route:
         model = {"id": route["model"], "display_name": route["model"].rsplit("/", 1)[-1]}
         effort = route.get("effort") or effort
     source = quota_source()
-    main_provider = route["provider"] if route else cc_main_provider(source)
+    main_provider = route["provider"] if route else ccx_main_provider(source)
     if route:
-        source = CC_QUOTA_SOURCES.get(main_provider)
+        source = CCX_QUOTA_SOURCES.get(main_provider)
     mid = model.get("id") or ""
     # Claude keeps Anthropic's clay; other vendors get a stable hue from their name.
     hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split("/")[0].encode()) % 360
@@ -1004,7 +1004,7 @@ def render(d):
         q, cached_at = provider_quota(source, now)
         limits, plan, extra = q.get("rate_limits") or {}, q.get("plan"), q.get("extra")
     else:
-        # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on the last reply.
+        # Adapter routes: the x-ratelimit-* windows ccx-anthropic-proxy saw on the last reply.
         q = load_json(f"ratelimit-{main_provider}.json")
         limits, cached_at, plan = q.get("rate_limits") or {}, q.get("at"), None
     shown = quota_parts(plan, extra, limits, cached_at, now)
@@ -1015,7 +1015,7 @@ def render(d):
     else:
         parts += shown
     # The session's fallback route (ccx fallback); yellow while it served within the last 5 minutes.
-    fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
+    fallback = (load_json(os.path.expanduser("~/.config/ccx/fallbacks.json")) if launch else {}).get(launch)
     if fallback:
         served = load_json(f"fallback-{launch}.json").get("at") or 0
         label = f"fallback {fallback['provider']}/{fallback['model']}"
@@ -1029,7 +1029,7 @@ def render(d):
         helper_rows = []
         for kind in ("auto", "tools"):
             pick = helper_picks.get(kind)
-            default = (load_json(os.path.expanduser("~/.config/cc/helper-defaults.json")).get(kind) or {}).get(main_provider)
+            default = (load_json(os.path.expanduser("~/.config/ccx/helper-defaults.json")).get(kind) or {}).get(main_provider)
             target = pick or default
             provider = target.get("provider", main_provider) if target else main_provider
             helper_model = target.get("model") if target else model.get("id") or "provider default"
@@ -1048,17 +1048,17 @@ def render(d):
             dots = " " + effort_indicator(helper_effort, label=False, levels=effort_levels(provider, helper_model)) if helper_effort else ""
             helper_rows.append(f"{kind.title()}: {helper_model}{dots}{'' if pick else ' · inherit'}")
         sub_lines.append(f"{DIM}↳{RESET} " + SEP.join(helper_rows))
-    child = os.environ.get("CC_AGENT_CHILD") == "1"
-    configured = not child and cc_routing_enabled()
+    child = os.environ.get("CCX_AGENT_CHILD") == "1"
+    configured = not child and ccx_routing_enabled()
     if configured:
         # a continued session keeps writing the transcript its workers name as their parent, under a new session id
-        moved = {**cc_fallback_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]),
-                 **cc_fallback_jobs(d.get("session_id"))}
+        moved = {**ccx_fallback_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]),
+                 **ccx_fallback_jobs(d.get("session_id"))}
         # shortcut: jobs don't record their agent name, so any running worker lights every configured row
-        active = bool(cc_running_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0])
-                      or cc_running_jobs(d.get("session_id")))
+        active = bool(ccx_running_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0])
+                      or ccx_running_jobs(d.get("session_id")))
         sub_costs = subagent_costs(d.get("transcript_path"))
-        for name, profile in cc_profiles(d.get("session_id")).items():
+        for name, profile in ccx_profiles(d.get("session_id")).items():
             # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
             provider = profile.get("provider", "official")
@@ -1076,7 +1076,7 @@ def render(d):
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
             head = f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}"
             own = profile.get('autocompact')
-            # A profile without its own limit inherits the main session's (cc-switch parent_compact).
+            # A profile without its own limit inherits the main session's (ccx-switch parent_compact).
             ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own
                   else f" {DIM}ac {k(limit)}{RESET}" if limit else '')
             used = sub_costs.get(name) or {}
@@ -1085,7 +1085,7 @@ def render(d):
             if used.get("ctx"):
                 # shortcut: the window is the main session's; a subagent model with another window misreads it
                 seg.append(f"{DIM}{k(used['ctx'])}/{k(size)}{RESET}{ac}{cached_text(used)}")
-            sub_source = CC_QUOTA_SOURCES.get(provider)
+            sub_source = CCX_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:
                 if sub_source == 'anthropic':
                     saved = load_json('quota.json')
@@ -1099,7 +1099,7 @@ def render(d):
                 shown = quota_parts(plan, q.get('extra'), q.get('rate_limits') or {}, sub_cached, now)
                 seg += shown or ([f"{YELLOW}{q['error']}{RESET}"] if q.get('error') else [])
             elif not sub_source and provider != main_provider:
-                # Adapter routes: the x-ratelimit-* windows cc-anthropic-proxy saw on its last reply.
+                # Adapter routes: the x-ratelimit-* windows ccx-anthropic-proxy saw on its last reply.
                 q = load_json(f"ratelimit-{provider}.json")
                 seg += quota_parts(None, None, q.get('rate_limits') or {}, q.get('at'), now)
             sub_lines.append(SEP.join(seg))
@@ -1119,7 +1119,7 @@ def render(d):
         if seg:
             sub_lines.append(f"{DIM}↳ subagent {', '.join(names)}{RESET}" + SEP + SEP.join(seg))
 
-    for item in [] if child else cc_orphans(d.get("session_id")):
+    for item in [] if child else ccx_orphans(d.get("session_id")):
         state = (f"{BOLD}result unread{RESET} · reaches Claude with your next message" if item["done"]
                  else "running, relay gone")
         tokens = f" · {DIM}{item['tokens']}{RESET}" if item.get("tokens") else ""

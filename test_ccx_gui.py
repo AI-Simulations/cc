@@ -1,4 +1,4 @@
-"""Offline checks for the Tkinter picker's pure parts: no window, no network, no cc run."""
+"""Offline checks for the Tkinter picker's pure parts: no window, no network, no ccx run."""
 import importlib.util
 import os
 import subprocess
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('cc_gui', root / 'cc-gui.py')
+spec = importlib.util.spec_from_file_location('ccx_gui', root / 'ccx-gui.py')
 gui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gui)
 
@@ -51,7 +51,7 @@ assert gui.effort_values([], 'high') == ['default', 'low', 'medium', 'high', 'xh
 assert gui.effort_values(['low', 'high'], 'max') == ['default', 'low', 'high', 'max']
 assert gui.effort_values(None) == ['default', 'low', 'medium', 'high', 'xhigh', 'max']
 
-# cc's picker rows and model listings.
+# ccx's picker rows and model listings.
 assert gui.tab_rows('official\tClaude official\ncommandcode\tCommand Code\nnoise') == [
     ('official', 'Claude official'), ('commandcode', 'Command Code')]
 assert gui.indented_rows('sub: a/b, effort high\n  * xiaomi/mimo\n    gpt-6-luna\n') == ['xiaomi/mimo', 'gpt-6-luna']
@@ -67,9 +67,9 @@ assert gui.migrate_view({'sort': 'Price'})['sort'] == 'Price'
 assert gui.migrate_view(None) == {}
 
 # One window per session, named safely after whatever identifies the launch.
-os.environ['CC_LAUNCH_ID'] = 'abc/../def'
+os.environ['CCX_LAUNCH_ID'] = 'abc/../def'
 assert gui.lock_file().name == 'gui-abcdef.pid'
-os.environ.pop('CC_LAUNCH_ID', None)
+os.environ.pop('CCX_LAUNCH_ID', None)
 os.environ.pop('CLAUDE_CODE_SESSION_ID', None)
 assert gui.lock_file().name == 'gui-default.pid'
 assert gui.pid_alive(os.getpid())
@@ -79,9 +79,9 @@ finished = subprocess.Popen([sys.executable, '-c', 'pass'],
 finished.wait()
 assert not gui.pid_alive(finished.pid), 'a reaped child still reads as alive'
 
-print('cc-gui pure parts ok')
+print('ccx-gui pure parts ok')
 
-# Real Tk widgets, hidden; all cc commands and background work stay stubbed.
+# Real Tk widgets, hidden; all ccx commands and background work stay stubbed.
 import unittest
 from unittest import mock
 import tempfile
@@ -94,8 +94,8 @@ class PickerTests(unittest.TestCase):
         self.cache_path = Path(self.temp.name) / 'gui-view.json'
         self.cache_patch = mock.patch.object(gui, 'VIEW_FILE', self.cache_path, create=True)
         self.cache_patch.start()
-        self.calls = mock.patch.object(gui, 'run_cc', return_value=(True, 'Route: beta/model-b\nEffort: high'))
-        self.run_cc = self.calls.start()
+        self.calls = mock.patch.object(gui, 'run_ccx', return_value=(True, 'Route: beta/model-b\nEffort: high'))
+        self.run_ccx = self.calls.start()
         self.bg = mock.patch.object(gui.App, 'background', autospec=True)
         self.background = self.bg.start()
         self.app = gui.App()
@@ -259,7 +259,7 @@ class PickerTests(unittest.TestCase):
         done((True, 'stale-model'))
         self.assertNotIn('stale-model', self.tab.models)
         work()
-        self.run_cc.assert_called_with('route', 'models', 'beta')
+        self.run_ccx.assert_called_with('route', 'models', 'beta')
 
     def test_presets_keep_selection_and_search_model_and_effort(self):
         tab = self.app.tabs['presets']
@@ -293,7 +293,7 @@ class PickerTests(unittest.TestCase):
             work = self.background.call_args.args[1]
             tab.target.set('second')
             work()
-            args = self.run_cc.call_args.args
+            args = self.run_ccx.call_args.args
             self.assertIn('first', args)
             self.assertNotIn('second', args)
 
@@ -346,7 +346,7 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(tab.sort_mode.get(), 'Price')
         self.assertEqual(tab.query.get(), 'model')
         self.assertEqual(tab.effort.get(), 'low')
-        self.assertFalse(any(c.args[:1] == ('route',) and len(c.args) > 1 for c in self.run_cc.call_args_list))
+        self.assertFalse(any(c.args[:1] == ('route',) and len(c.args) > 1 for c in self.run_ccx.call_args_list))
 
     def test_cached_models_avoid_relisting_provider(self):
         self.tab.load_models()
@@ -496,7 +496,7 @@ class PickerTests(unittest.TestCase):
         editor.fields['tools']['model'].set('changed-tools')
         editor.save()
         self.background.call_args.args[1]()
-        args = self.run_cc.call_args.args
+        args = self.run_ccx.call_args.args
         self.assertEqual(args[:3], ('presets', 'set-bundle', 'beta'))
         import json
         saved = json.loads(args[3])
@@ -513,25 +513,25 @@ class PickerTests(unittest.TestCase):
         with mock.patch.object(tab, 'picked', return_value=preset), \
                 mock.patch.object(gui, 'load_profiles', return_value={'first': {}, 'second': {}}):
             tab.apply()
-            self.run_cc.reset_mock()
+            self.run_ccx.reset_mock()
             work = self.background.call_args.args[1]
             work()
-        self.assertEqual(self.run_cc.call_args_list, [
+        self.assertEqual(self.run_ccx.call_args_list, [
             mock.call('route', 'beta', 'model-model', 'low'),
             mock.call('agents', 'set', 'first', '--provider', 'beta', '--model', 'subagent-model', '--effort', 'low'),
             mock.call('agents', 'set', 'second', '--provider', 'beta', '--model', 'subagent-model', '--effort', 'low'),
             mock.call('fallback', 'beta', 'fallback-model', 'low'),
             mock.call('helper', 'auto', 'beta', 'auto-model', 'low'),
             mock.call('helper', 'tools', 'beta', 'tools-model', 'low')])
-        self.run_cc.reset_mock()
-        self.run_cc.side_effect = [(True, 'ok'), (False, 'blocked')]
+        self.run_ccx.reset_mock()
+        self.run_ccx.side_effect = [(True, 'ok'), (False, 'blocked')]
         ok, out = work()
         self.assertFalse(ok)
         self.assertIn('Subagent', out)
-        self.assertEqual(self.run_cc.call_count, 2)
+        self.assertEqual(self.run_ccx.call_count, 2)
 
     def test_editor_restricts_known_efforts_and_uses_actual_providers(self):
-        self.run_cc.side_effect = lambda *args: (True, 'nvidia\tNVIDIA\ngpt4free\tFree' if args == ('fallback', 'routes')
+        self.run_ccx.side_effect = lambda *args: (True, 'nvidia\tNVIDIA\ngpt4free\tFree' if args == ('fallback', 'routes')
                                                 else 'commandcode\tCommand Code\ncommandcode-cli\tCommand Code CLI\ngpt4free\tFree\nnvidia\tNVIDIA')
         editor = self.make_editor()
         fields = editor.fields['tools']
