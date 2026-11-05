@@ -3,9 +3,11 @@ import type { EngineInterface, Register, UiOpenResult } from 'claude-code'
 
 import type { Col, Grid, GridTab, Row } from '../types'
 
-// shortcut: fixed path to the user's cc install, make it configurable if the mod is shared
+// cc's install folder; python expands ~ since hooks have no process or fs access
 const CC = '~/.config/cc/cc-switch.py'
 const COST = '~/.config/cc/statusline.py'
+// runs a script path that starts with ~, as `python <script> <args>` would
+const RUN = "import os, runpy, sys; p = os.path.expanduser(sys.argv[1]); sys.argv = [p] + sys.argv[2:]; sys.path.insert(0, os.path.dirname(p)); runpy.run_path(p, run_name='__main__')"
 // Claude Code's ladder, for models whose provider publishes none of its own
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // the Compact column: auto-compact at this share of the context window, or the default threshold
@@ -44,7 +46,7 @@ async function sessionEnv($: EngineInterface) {
 }
 
 async function cc($: EngineInterface, args: string[]) {
-  const r = await $.process.run(['python', '-B', CC, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
+  const r = await $.process.run(['python', '-B', '-c', RUN, CC, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
   return { ok: r.exitCode === 0, out: `${r.stdout}\n${r.stderr}`.trim() }
 }
 
@@ -236,7 +238,7 @@ export function effortBar(level: string, levels: readonly string[] = EFFORTS) {
 // `~/.commandcode/config.json` effort, Codex's `default_reasoning_level`, or Claude Code's own
 // `modelSettings` / `effortLevel` for official workers; null when unknown.
 const EFFORT_INFO = `import importlib.util, json, os, sys
-spec = importlib.util.spec_from_file_location('cc_switch', sys.argv[1])
+spec = importlib.util.spec_from_file_location('cc_switch', os.path.expanduser(sys.argv[1]))
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 provider, model = sys.argv[2], sys.argv[3]
@@ -852,13 +854,29 @@ async function warm($: EngineInterface) {
   for (const p of all) void models($, p.name, p.provider).catch(() => undefined)
 }
 
+const dollars = (n: string, k: string) => Number(n.replace(/,/g, '')) * (k ? 1000 : 1)
+
+/** The week's figures (`7d $1,491/$13.6k`, `7d $3.10 4%`) dim, in the colour of the share of the week used. */
+export function weekly(Text: any, rest: string) {
+  const out: any[] = []
+  const week = /7d \$([\d,.]+)(k?)(?:\/\$([\d,.]+)(k?)| (\d+)%)/g
+  let at = 0
+  for (let m = week.exec(rest); m; m = week.exec(rest)) {
+    const pct = m[5] !== undefined ? Number(m[5]) : dollars(m[1]!, m[2]!) * 100 / dollars(m[3]!, m[4]!)
+    out.push(rest.slice(at, m.index), <Text dimColor color={costColor(pct)}>{m[0]}</Text>)
+    at = m.index + m[0].length
+  }
+  out.push(rest.slice(at))
+  return out
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     void warm($).catch(() => undefined)
     // The session's API-price cost (main, subagents), drawn at the end of the mode row under the prompt.
     $.ui.status(undefined)  // an earlier load pinned it as a status notice above the status line
     const showCost = async () => {
-      const r = await $.process.run(['python', '-B', COST, '--cost', await $.session.id()], { timeoutMs: 30000 })
+      const r = await $.process.run(['python', '-B', '-c', RUN, COST, '--cost', await $.session.id()], { timeoutMs: 30000 })
       update($, cost, () => r.stdout.trim())
     }
     void showCost().catch(() => undefined)
@@ -867,17 +885,24 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const part = /^api (\$([\d,.]+))(.*)$/.exec(await read($, cost))
-    if (!part) return next(e)
+    // `≈ $2.70 (7d $1,491/$13.6k Ultra)`: the session's API-price cost, coloured by size, then the week's
+    const part = /^(.*?)≈ (\$([\d,.]+))(.*)$/.exec(await read($, cost))
+    // The shift+tab reminder is dropped always, cost or not: the person knows the key. The mode badge stays.
+    const reminder = /\s*·?\s*\(?shift\+tab to cycle\)?/i
+    const raw = String(e.props.hint ?? '')
+    if (!part && !reminder.test(raw)) return next(e)
     // The engine's own line fills its row (a tree beside it wraps below) and its `tail` is always dim, so the
     // row is drawn here from its text: the hint dim, then the total coloured by how much it is.
-    const { Box, Text } = $.ui.resolve(e)
+    // One Text with inline children, cut at the edge: side-by-side boxes each wrapped on their own and split the row.
+    const { Text } = $.ui.resolve(e)
+    const hint = raw.replace(reminder, '').trim()
+    if (!part) return <Text dimColor wrap="truncate-end">{hint}</Text>
     return (
-      <Box flexDirection="row">
-        <Text dimColor>{`${e.props.hint} · api `}</Text>
-        <Text color={costColor(Number(part[2].replace(/,/g, '')))}>{part[1]}</Text>
-        <Text dimColor>{part[3]}</Text>
-      </Box>
+      <Text dimColor wrap="truncate-end">
+        {`${hint ? hint + ' · ' : ''}${part[1]}≈ `}
+        <Text color={costColor(Number(part[3]!.replace(/,/g, '')))}>{part[2]}</Text>
+        {weekly(Text, part[4]!)}
+      </Text>
     )
   })
 
