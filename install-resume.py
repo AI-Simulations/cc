@@ -33,6 +33,20 @@ ccx() {
 }
 '''
 
+# Replaces the pre-rename ~/.config/cc/cc-switch.py: terminals opened before the upgrade still hold the old
+# `cc` function, which runs that file and then applies ~/.config/cc/apply.ps1.
+LEGACY_SHIM = """# ccx moved to ~/.config/ccx; this forwards the old `cc` function there.
+import os, runpy, shutil, sys
+new = os.path.join(os.path.expanduser('~'), '.config', 'ccx')
+sys.argv[0] = os.path.join(new, 'ccx-switch.py')
+sys.path.insert(0, new)
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+finally:
+    for name in ('apply.ps1', 'apply.sh'):
+        if os.path.exists(os.path.join(new, name)):
+            shutil.move(os.path.join(new, name), os.path.join(os.path.dirname(os.path.abspath(__file__)), name))
+"""
 # The launcher's function before the ccx rename, named cc and pointing at ~/.config/cc.
 LEGACY_FUNCTION = re.compile(r'(?im)^(?:# Claude Code custom-provider launcher\.\r?\n)?[ \t]*function[ \t]+cc[ \t]*\{')
 
@@ -204,6 +218,8 @@ def main():
     legacy, target = home / '.config/cc', home / '.config/ccx'
     if legacy.is_dir() and not (target / 'ccx-switch.py').exists():
         migrate(legacy, target)
+    if (legacy / 'cc-switch.py').is_file():
+        (legacy / 'cc-switch.py').write_text(LEGACY_SHIM, encoding='utf-8')
     install(target, shell_profiles(home), commands, home / '.claude')
     # Rewrites ~/.claude/agents so the ccx-<name> subagent types exist right after an upgrade.
     subprocess.run([sys.executable, '-B', '-c', 'import runpy, sys; runpy.run_path(sys.argv[1])["sync_agents"]()',
