@@ -784,6 +784,48 @@ class MenuBack(Exception):
     """The user pressed Escape in a menu with back navigation enabled."""
 
 
+def _key_reader():
+    r"""One key per call, as msvcrt.getwch gives it: arrows and paging keys come as "\xe0" then
+    H/P/I/Q/G/O, Backspace as "\x08", Enter as "\r". POSIX terminals switch to cbreak mode only
+    while a key is read, so prompts after the menu keep their echo; Ctrl+C still raises SIGINT."""
+    if os.name == "nt":
+        import msvcrt
+        return msvcrt.getwch
+    import select
+    import termios
+    import tty
+    fd, pending = sys.stdin.fileno(), []
+    arrows = {"[A": "H", "[B": "P", "[5~": "I", "[6~": "Q", "[H": "G", "[F": "O",
+              "OA": "H", "OB": "P", "OH": "G", "OF": "O", "[1~": "G", "[4~": "O"}
+
+    def read():
+        if pending:
+            return pending.pop(0)
+        saved = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            raw = os.read(fd, 1)
+            if raw and raw[0] >= 0xC0:  # the rest of one UTF-8 character
+                raw += os.read(fd, 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3)
+            rest = ""
+            if raw == b"\x1b" and select.select([fd], [], [], 0.05)[0]:
+                rest = os.read(fd, 16).decode(errors="ignore")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        ch = raw.decode(errors="ignore")
+        posix = {"\x7f": "\x08", "\n": "\r"}  # Backspace and Enter as the Windows console sends them
+        if rest:
+            seq = re.match(r"\[[0-9]*~|\[[A-Z]|O[A-Z]", rest)
+            seq = seq.group(0) if seq else ""
+            pending.extend(posix.get(c, c) for c in rest[len(seq):])  # keys typed right after it
+            if seq in arrows:
+                pending.insert(0, arrows[seq])
+                return "\xe0"
+            return ""  # a key the menus do not use
+        return posix.get(ch, ch)
+    return read
+
+
 def _arrow_menu(title: str, rows: list[tuple[str, str]], default: str, footer: str = "",
                 sorts: list[tuple[str, list[str]]] | None = None, name: str = "",
                 multi: bool = False, back: bool = False) -> str | None:
@@ -800,10 +842,9 @@ def _arrow_menu(title: str, rows: list[tuple[str, str]], default: str, footer: s
     Returns None off a console so callers fall back to typing.
     back=True: Esc raises MenuBack instead of clearing the filter or confirming a default.
     """
-    if os.name != "nt" or not sys.stdin.isatty() or not sys.stdout.isatty():
-        # ponytail: Windows console only; termios raw mode if that's ever needed.
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
-    import msvcrt
+    getwch = _key_reader()
     text = dict(rows)
     sorts = sorts or [("", [rid for rid, _ in rows])]
     sort = 0
@@ -857,10 +898,10 @@ def _arrow_menu(title: str, rows: list[tuple[str, str]], default: str, footer: s
         lines.append(_color(f"    {scroll} · {keys}", "2"))
         lines += [_color(line, "2") for line in footer.splitlines()]
         redraw(lines)
-        ch = msvcrt.getwch()
+        ch = getwch()
         if ch in "\x00\xe0":  # arrow/function key: the second half says which
             step = {"H": -1, "P": 1, "I": -MENU_ROWS, "Q": MENU_ROWS,
-                    "G": -len(order), "O": len(order)}.get(msvcrt.getwch(), 0)
+                    "G": -len(order), "O": len(order)}.get(getwch(), 0)
             cur = min(max(cur + step, 0), max(len(order) - 1, 0))
         elif ch == " ":
             if order and order[cur] in picks:

@@ -1,12 +1,14 @@
-# cc — Claude Code on any provider
+# ccx — Claude Code on any provider
 
-`cc` launches Claude Code on Anthropic or on a dozen other providers (Command Code, OpenAI OAuth,
+`ccx` launches Claude Code on Anthropic or on a dozen other providers (Command Code, OpenAI OAuth,
 OpenRouter, NVIDIA, Gemini, OpenCode, MiniMax, Ollama Cloud, LM Studio, gpt4free). It includes a local
 adapter that turns Claude's Messages API into OpenAI Chat Completions. It also adds a `/model` picker
-window, a status line with quotas, subagents that run on other providers, and fallback routes.
+window with per-model cost estimates, a status line with quotas and API cost, subagents that run on
+other providers, and fallback routes.
 
-Windows only. Requirements: Python 3.10+, PowerShell and `claude` on PATH. The scripts use only the
-standard library. The `openai-oauth` route also needs Node.js and an
+Windows, macOS and Linux. Requirements: Python 3.10+ and `claude` on PATH. The scripts use only the
+standard library; the picker window needs Tk (`python3-tk` on Debian/Ubuntu, included with python.org
+and Homebrew Python). The `openai-oauth` route also needs Node.js and an
 [openai-oauth](https://github.com/EvanZhouDev/openai-oauth) install.
 
 ![Launch menu: provider](docs/menu-provider.png)
@@ -14,33 +16,37 @@ standard library. The `openai-oauth` route also needs Node.js and an
 
 ## Install
 
-```powershell
-python -B install-resume.py     # run from this checkout
+```sh
+pipx install git+https://github.com/AI-Simulations/cc     # or: uv tool install git+https://github.com/AI-Simulations/cc
+ccx-install
 ```
 
-The installer copies the runtime to `~/.config/cc` and backs up the files it replaces. It adds a `cc`
-function to both PowerShell profiles, and installs the status line and delegation hooks without
-touching your other settings. Open a new terminal afterwards. With a redirected Documents folder,
-add the function by hand:
+Or from a checkout: `python -B install-resume.py`. Run `ccx-install` again after upgrading.
+
+The installer copies the runtime to `~/.config/cc` and backs up the files it replaces. It adds a `ccx`
+shell function (PowerShell 5 and 7 profiles on Windows, `~/.bashrc` and `~/.zshrc` elsewhere), and
+installs the status line, the delegation hooks and the `/model` picker mod without touching your other
+settings. Open a new terminal afterwards. With a redirected Documents folder on Windows, add the
+function by hand:
 
 ```powershell
-function cc { & "$env:USERPROFILE\.config\cc\cc-switch.ps1" @args }
+function ccx { & "$env:USERPROFILE\.config\cc\cc-switch.ps1" @args }
 ```
 
 Credentials, saved picks and backups stay in `~/.config/cc` and are never committed. When a provider
-has no key, `cc` asks once and saves it to `keys.json`, readable only by you.
+has no key, `ccx` asks once and saves it to `keys.json`, readable only by you.
 
 ## Usage
 
-```powershell
-cc                                   # menus: provider, model, effort, auto-compact, subagent, fallback
-cc official                          # normal Claude login
-cc openai-oauth gpt-6.1-sol          # ChatGPT account through the adapter
-cc commandcode-cli deepseek/deepseek-v4.1-flash
-cc openrouter anthropic/claude-opus-5.5 --autocompact 70
-cc -NoRun nvidia <model-id>          # configure this terminal only, then run `claude`
-cc --resume [id] | cc --continue     # reuses the last provider unless you name one
-cc status
+```sh
+ccx                                   # menus: provider, model, effort, auto-compact, subagent, fallback
+ccx official                          # normal Claude login
+ccx openai-oauth gpt-6.1-sol          # ChatGPT account through the adapter
+ccx commandcode-cli deepseek/deepseek-v4.1-flash
+ccx openrouter anthropic/claude-opus-5.5 --autocompact 70
+ccx -NoRun nvidia <model-id>          # configure this shell only, then run `claude`
+ccx --resume [id] | ccx --continue    # reuses the last provider unless you name one
+ccx status
 ```
 
 | Route | How it connects |
@@ -60,16 +66,20 @@ tools and prompt cache controls do not carry over.
 
 `/model` with no arguments opens a picker window (Tkinter, no dependencies). It has six tabs: Model,
 Subagent, Fallbacks, Auto, Tools and Presets. Each tab has search and sorting by intelligence, score,
-context, price or family, and shows the effort and auto-compact controls. On adapter routes the
-Model tab switches provider and model live for this session only. Direct routes copy a
-`cc … --resume` command that continues the conversation on the new provider. `/model <id>` still works
-the usual way. Without a window (for example, no Tk) the picker falls back to an in-terminal grid.
+context, price or family, and shows the effort and auto-compact controls. The header shows what this
+session has cost so far at API list prices. The **This session** column estimates what the same
+tokens would have cost on each listed model (cache reads at 0.1x and writes at 1.25x input).
+
+On adapter routes the Model tab switches provider and model live for this session only. Direct routes
+copy a `ccx … --resume` command that continues the conversation on the new provider. `/model <id>`
+still works the usual way. Without a window (for example, no Tk) the picker falls back to an
+in-terminal grid.
 
 ![Model tab](docs/picker-model.png)
 ![Presets tab](docs/picker-presets.png)
 
 Presets store one Enter-away bundle per provider (main model, subagent, fallback, Auto and Tools
-helpers): `cc presets`, `cc presets set <provider> <model> [effort]`. `cc gui [tab]` opens the window
+helpers): `ccx presets`, `ccx presets set <provider> <model> [effort]`. `ccx gui [tab]` opens the window
 directly.
 
 ## Status line
@@ -78,8 +88,9 @@ directly.
 
 The first line shows the model, its effort dots (one per step of that model's own ladder), context
 use with the auto-compact point, and quota windows with time to reset. The second line shows the
-Auto and Tools helper models. The `sub:` line shows each configured subagent's route. Quotas come
-from the provider's usage endpoint or from the adapter's last rate-limit headers. A failed fetch
+Auto and Tools helper models. The `sub:` line shows each configured subagent's route. The last line
+is the session's API-price cost, then the week's spend against the plan's equivalent quota. Quotas
+come from the provider's usage endpoint or from the adapter's last rate-limit headers. A failed fetch
 names its cause (`key expired`, `auth failed`) instead of hiding the bar.
 
 ## Subagents on other providers
@@ -92,10 +103,10 @@ provider, model, effort and auto-compact:
   "deep":  {"provider": "official", "model": "claude-opus-5-5", "effort": "max"} }
 ```
 
-```powershell
-cc agents                                    # edit profiles in a menu
-cc agents set cheap --provider nvidia --model deepseek-ai/deepseek-v4-pro --effort low
-cc agent cheap "task text"                   # run one task directly
+```sh
+ccx agents                                    # edit profiles in a menu
+ccx agents set cheap --provider nvidia --model deepseek-ai/deepseek-v4-pro --effort low
+ccx agent cheap "task text"                   # run one task directly
 ```
 
 Each profile becomes a `cc-<name>` subagent type. The installed hooks steer delegation to those
@@ -116,13 +127,14 @@ so its tab shows the full chat.
 
 ## Tests
 
-```powershell
-python -B -m pytest -q     # offline: fake credentials, fake claude/codex, stubbed GUI
-python -B critic_mock_check.py   # optional: real Claude Code against local mock providers
+```sh
+python -B -m pytest -q             # offline: fake credentials, fake claude/codex, stubbed GUI
+python -B critic_mock_check.py     # optional: real Claude Code against local mock providers
 ```
 
-No paid generation runs in these checks. They do not cover live OAuth generation, account model
-access or model quality.
+`test_cc_switch.py` drives the PowerShell launcher and runs on Windows; `test_cc_posix.py` sources
+`apply.sh` in a real shell and reads keys through a pty on macOS/Linux. No paid generation runs in
+these checks. They do not cover live OAuth generation, account model access or model quality.
 
 References: [LLM gateway](https://code.claude.com/docs/en/llm-gateway) ·
 [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol) ·

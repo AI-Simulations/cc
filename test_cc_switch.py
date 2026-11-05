@@ -9,6 +9,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 from unittest.mock import patch
+import sys
+
+if os.name != 'nt':  # these checks drive the PowerShell launcher; test_cc_posix.py covers bash/zsh
+    if 'pytest' in sys.modules:
+        import pytest
+        pytest.skip('PowerShell launcher checks', allow_module_level=True)
+    print('SKIP: test_cc_switch.py needs Windows PowerShell; run test_cc_posix.py.')
+    raise SystemExit(0)
 
 root = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('cc_switch', root / 'cc-switch.py')
@@ -29,11 +37,11 @@ for filename in ('test_cc_switch.py', 'test_cc_resume.py', 'critic_mock_check.py
             assert any(k.arg == 'creationflags' or k.arg is None for k in node.keywords), f'{filename}:{node.lineno}: test command must be hidden'
 
 with patch.object(cc.subprocess, 'run') as launch:
-    launch.return_value.stdout = 'TCP 127.0.0.1:9999 0.0.0.0:0 LISTENING 12345'
+    launch.return_value.stdout = ('TCP 127.0.0.1:9999 0.0.0.0:0 LISTENING 12345' if os.name == 'nt' else '')
     cc.stop_port_owner(9999)
-    assert launch.call_count == 2
-    assert all(call.kwargs.get('creationflags') == getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-               for call in launch.call_args_list), 'background netstat/taskkill must be hidden'
+    assert launch.call_count == (2 if os.name == 'nt' else 1)  # netstat + taskkill; lsof elsewhere
+    assert os.name != 'nt' or all(call.kwargs.get('creationflags') == getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                                  for call in launch.call_args_list), 'background netstat/taskkill must be hidden'
 
 with tempfile.TemporaryDirectory(prefix='cc-check-') as directory:
     temp = Path(directory)

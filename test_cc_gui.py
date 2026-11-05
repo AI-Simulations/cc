@@ -300,8 +300,12 @@ class PickerTests(unittest.TestCase):
     def test_model_facts_have_separate_columns(self):
         self.tab.facts = {'model-b': {'ctx': 1000000, 'in': 4, 'out': 20, 'aa': 45, 'score': 72}}
         self.tab.render_models('model-b')
-        self.assertEqual(self.tab.list.cget('columns'), ('context', 'price', 'intelligence', 'score'))
-        self.assertEqual(self.tab.list.item(self.tab.iids['model-b'], 'values'), ('1M', '$4/$20', '45', '72'))
+        self.assertEqual(self.tab.list.cget('columns'), ('context', 'price', 'intelligence', 'score', 'session'))
+        self.assertEqual(self.tab.list.item(self.tab.iids['model-b'], 'values')[:4], ('1M', '$4/$20', '45', '72'))
+        # This session's tokens at the model's list price: cache reads 0.1x input.
+        self.app.usage = {'input': 1000, 'write': 0, 'read': 1_000_000, 'output': 10_000, 'usd': 1.5}
+        self.tab.render_models('model-b')
+        self.assertEqual(self.tab.list.item(self.tab.iids['model-b'], 'values')[4], '≈$0.604')
 
     def test_apply_updates_in_place_without_relisting(self):
         self.tab.apply()

@@ -40,6 +40,7 @@ def proxy_identity():
 
 
 class ResumeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_adapter_launch_has_no_console(self):
         with patch.object(cc, 'fetch', side_effect=[OSError(), proxy_identity()]), patch.object(cc.subprocess, 'Popen') as launch:
             cc.ensure_anthropic_proxy()
@@ -75,7 +76,7 @@ class ResumeTests(unittest.TestCase):
                         first = profile.read_bytes()
                         installer.install(target, [profile])
                     self.assertTrue(first.startswith(original))
-                    self.assertIn('function cc {', first.decode(encoding))
+                    self.assertIn('function ccx {', first.decode(encoding))
                     self.assertEqual(profile.read_bytes(), first)
 
     def test_install_registers_missing_profiles_and_preserves_existing(self):
@@ -87,7 +88,7 @@ class ResumeTests(unittest.TestCase):
             existing = Path(tmp)/'WindowsPowerShell'/'profile.ps1'
             missing = Path(tmp)/'PowerShell'/'profile.ps1'
             existing.parent.mkdir()
-            original = b"# Preserve existing settings\r\nfunction cc { Write-Output 'existing' }\r\n"
+            original = b"# Preserve existing settings\r\nfunction ccx { Write-Output 'existing' }\r\n"
             existing.write_bytes(original)
             commands = Path(tmp)/'commands'
             commands.mkdir()
@@ -97,7 +98,7 @@ class ResumeTests(unittest.TestCase):
                 installer.install(target, [existing, missing], commands)
             self.assertEqual(existing.read_bytes(), original)
             self.assertEqual(missing.read_bytes(), first)
-            self.assertIn(b'function cc {', first)
+            self.assertIn(b'function ccx {', first)
             self.assertIn(b'cc-switch.ps1" @args', first)
             for name in installer.COMMAND_FILES:
                 self.assertEqual((commands/name).read_bytes(), (ROOT/'commands'/name).read_bytes(),
@@ -114,6 +115,7 @@ class ResumeTests(unittest.TestCase):
             subprocess.run([sys.executable, '-I', '-S', '-c', code, str(target)],
                            check=True, capture_output=True, **cc.background_process_options())
 
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_install_clears_claude_alias_that_shadows_provider_launcher(self):
         spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
@@ -125,7 +127,7 @@ class ResumeTests(unittest.TestCase):
                     with self.subTest(encoding=encoding, existing_function=existing_function):
                         profile = Path(tmp) / (encoding + str(existing_function)) / 'profile.ps1'
                         profile.parent.mkdir()
-                        text = ('function cc { "custom provider menu" }\n' if existing_function else '')
+                        text = ('function ccx { "custom provider menu" }\n' if existing_function else '')
                         text += 'Set-Alias -Name cc -Value claude\nSet-Alias -Name keepme -Value Get-Date\n'
                         original = (('\ufeff' if encoding.startswith('utf-16') else '') + text).encode(encoding)
                         profile.write_bytes(original)
@@ -136,11 +138,29 @@ class ResumeTests(unittest.TestCase):
                         self.assertTrue(first.startswith(original), 'Preserve unrelated profile bytes')
                         self.assertEqual(profile.read_bytes(), first, 'Installation must be idempotent')
                         check = Path(tmp) / 'check.ps1'
-                        check.write_text('. $env:CC_TEST_PROFILE\nGet-Command cc | ForEach-Object { $_.CommandType.ToString() }\n(Get-Alias keepme).Definition\n', encoding='utf-8')
+                        check.write_text('. $env:CC_TEST_PROFILE\nGet-Command ccx | ForEach-Object { $_.CommandType.ToString() }\n(Get-Alias keepme).Definition\n', encoding='utf-8')
                         result = subprocess.run(['powershell', '-NoProfile', '-File', str(check)],
                             env=dict(os.environ, CC_TEST_PROFILE=str(profile)), capture_output=True,
                             text=True, check=True, **cc.background_process_options())
                         self.assertEqual(result.stdout.splitlines(), ['Function', 'Get-Date'])
+
+    def test_install_registers_posix_shell_function_once(self):
+        spec = importlib.util.spec_from_file_location('cc_install', ROOT / 'install-resume.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        with tempfile.TemporaryDirectory() as tmp:
+            target, rc = Path(tmp) / 'cc', Path(tmp) / '.zshrc'
+            rc.write_bytes(b'export KEEP=1\n')
+            with contextlib.redirect_stdout(io.StringIO()):
+                installer.install(target, [rc])
+                first = rc.read_bytes()
+                installer.install(target, [rc])
+            self.assertTrue(first.startswith(b'export KEEP=1\n'))
+            self.assertIn(b'ccx() {', first)
+            self.assertIn(b'. "$HOME/.config/cc/apply.sh"', first)
+            self.assertEqual(rc.read_bytes(), first, 'Installation must be idempotent')
+            self.assertTrue((target / 'subagent-picker' / 'hooks' / 'register.tsx').is_file(), 'The /model mod ships too')
+            self.assertTrue((target / 'opencode_key.py').is_file(), 'cc-switch imports opencode_key')
 
     def test_resume_cli_always_asks_provider_and_model(self):
         cases = [
@@ -178,6 +198,7 @@ class ResumeTests(unittest.TestCase):
             efforts.assert_called_once()
             apply.assert_called_once_with('nvidia', 'test/model', False, claude_args=['--resume', SESSION], effort='', autocompact='', fallback=None)
 
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_launch_env_is_restored_so_plain_claude_stays_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp)/'apply.ps1'
@@ -197,6 +218,7 @@ class ResumeTests(unittest.TestCase):
         self.assertIn(f"'http://127.0.0.1:{cc.ADAPTER_PORT}/commandcode'", text)
         self.assertIn('commandcode', runpy_upstreams())
 
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_quoted_arguments_reach_claude(self):
         tricky = "session'$(throw 'must not execute'); with spaces"
         with tempfile.TemporaryDirectory() as tmp:
@@ -209,6 +231,7 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout.splitlines()[-1]), ['--model', 'test/model', '--resume', tricky])
             self.assertFalse(script.exists())
 
+    @unittest.skipUnless(os.name == 'nt', 'PowerShell launcher')
     def test_compatibility_entry_forwards_native_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -540,24 +563,28 @@ class NavigationTests(unittest.TestCase):
             save.assert_not_called()  # Backtracking must not save an unfinished profile.
             return arrow_menu(title, rows, default, *args, **kwargs)
 
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.object(cc, 'APPLY_FILE', str(Path(tmp) / 'apply.ps1')), \
-             patch.object(cc, 'load_state', return_value={}), \
-             patch.object(cc, 'load_agents', return_value=agents or {}), \
-             patch.object(cc, '_latest_session_agents', return_value=None), \
-             patch.object(cc, 'save_agents') as save, patch.object(cc, 'sync_agents'), \
-             patch.object(cc, 'quit_on_ctrl_c'), patch.object(cc, 'apply') as apply, \
-             patch.object(cc, 'get_models', side_effect=lambda p: [{'id': p + '/test'}]), \
-             patch.object(cc.catalog, '_loading', return_value=contextlib.nullcontext()), \
-             patch.object(cc.catalog, '_models_dev', return_value={}), \
-             patch.object(cc.catalog, '_artificial_analysis', return_value=[]), \
-             patch.object(cc.catalog, '_model_facts', return_value={}), \
-             patch.object(cc.catalog, '_refresh_missing_intelligence'), \
-             patch.object(cc.catalog, '_enable_ansi'), \
-             patch.object(cc.catalog, '_arrow_menu', side_effect=menu), \
-             patch.dict(sys.modules, {'msvcrt': Mock(getwch=getch)}), \
-             patch.object(sys, 'stdin', Mock(isatty=lambda: True)), \
-             patch.object(sys, 'stdout', screen), patch.object(sys, 'argv', ['cc', *argv]):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(cc, 'APPLY_FILE', str(Path(tmp) / 'apply.ps1')))
+            stack.enter_context(patch.object(cc, 'load_state', return_value={}))
+            stack.enter_context(patch.object(cc, 'load_agents', return_value=agents or {}))
+            stack.enter_context(patch.object(cc, '_latest_session_agents', return_value=None))
+            save = stack.enter_context(patch.object(cc, 'save_agents'))
+            stack.enter_context(patch.object(cc, 'sync_agents'))
+            stack.enter_context(patch.object(cc, 'quit_on_ctrl_c'))
+            apply = stack.enter_context(patch.object(cc, 'apply'))
+            stack.enter_context(patch.object(cc, 'ensure_key'))
+            stack.enter_context(patch.object(cc, 'get_models', side_effect=lambda p: [{'id': p + '/test'}]))
+            stack.enter_context(patch.object(cc.catalog, '_loading', return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(cc.catalog, '_models_dev', return_value={}))
+            stack.enter_context(patch.object(cc.catalog, '_artificial_analysis', return_value=[]))
+            stack.enter_context(patch.object(cc.catalog, '_model_facts', return_value={}))
+            stack.enter_context(patch.object(cc.catalog, '_refresh_missing_intelligence'))
+            stack.enter_context(patch.object(cc.catalog, '_enable_ansi'))
+            stack.enter_context(patch.object(cc.catalog, '_arrow_menu', side_effect=menu))
+            stack.enter_context(patch.object(cc.catalog, '_key_reader', return_value=getch))
+            stack.enter_context(patch.object(sys, 'stdin', Mock(isatty=lambda: True)))
+            stack.enter_context(patch.object(sys, 'stdout', screen))
+            stack.enter_context(patch.object(sys, 'argv', ['cc', *argv]))
             cc.main()
         return seen, apply, save, screen.getvalue()
 

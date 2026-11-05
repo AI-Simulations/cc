@@ -9,6 +9,11 @@ import time
 import unittest
 from contextlib import ExitStack
 from unittest.mock import patch
+
+if os.name != 'nt':  # tests patch Windows' registry reads; give other systems a stand-in to patch
+    import sys
+    import types
+    sys.modules.setdefault('winreg', types.SimpleNamespace(OpenKey=None, QueryValueEx=None, HKEY_CURRENT_USER=0))
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("statusline", Path(__file__).with_name("statusline.py"))
@@ -372,6 +377,7 @@ class EffortLevelTests(unittest.TestCase):
 
 
 class QuotaCredentialTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', "Windows' user environment lives in the registry")
     def test_provider_environment_precedes_windows_saved_environment(self):
         with patch.dict(os.environ, {'USERPROFILE': str(Path.home()), 'OPENROUTER_API_KEY': 'process-key'}, clear=True), \
                 patch('winreg.OpenKey') as registry:

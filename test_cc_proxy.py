@@ -655,8 +655,14 @@ event(type="text_delta", delta="Checking.\n<tool")
 event(type="text_delta", delta='_call>{"name": "Read", "input": {}}</tool_call>')
 print(json.dumps({"type": "result", "finalText": 'Checking.\n<tool_call>{"name": "Read", "input": {}}</tool_call>', "usage": {"inputTokens": 1}}))
 ''', encoding="utf-8")
-(fake_dir / "cmdc.cmd").write_text(f'@"{sys.executable}" "%~dp0cmdc.py" %*\n', encoding="utf-8")
-proxy.commandcode_executable = lambda: str(fake_dir / "cmdc.cmd")
+if proxy.os.name == "nt":
+    shim = fake_dir / "cmdc.cmd"
+    shim.write_text(f'@"{sys.executable}" "%~dp0cmdc.py" %*\n', encoding="utf-8")
+else:
+    shim = fake_dir / "cmdc"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake_dir / "cmdc.py"}" "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+proxy.commandcode_executable = lambda: str(shim)
 proxy.cc_models = lambda provider: [{"id": "claude-x"}]  # the plan-filtered list cc-switch owns
 argv = lambda: json.loads((fake_dir / "argv.json").read_text())
 proxy.os.environ["CC_CMDC_TEXT"] = "1"  # the cmdc text-protocol path; /alpha/generate is tested below

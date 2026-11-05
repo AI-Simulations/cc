@@ -44,7 +44,7 @@ COOLDOWN = {}
 # Command Code's Go plan answers only its own CLI, so this route runs `cmdc -p` per request.
 CLI_ROUTE = "commandcode-cli"
 IDENTITY = {"service": "cc-anthropic-proxy", "version": 35}
-# `cc official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
+# `ccx official` (plain claude) comes in under this route: passed to Anthropic as sent, login and all,
 # until /model routes its launch to another provider.
 OFFICIAL_ROUTE = "official"
 OFFICIAL_UPSTREAM = "https://api.anthropic.com"
@@ -980,7 +980,7 @@ def route_for(launch):
         return None
 
 
-# An in-process cc subagent's model (its agent file says `model: cc-live-<profile>`): the adapter
+# An in-process ccx subagent's model (its agent file says `model: cc-live-<profile>`): the adapter
 # resolves the profile on every request, so a /model or picker change applies at the next turn.
 LIVE_MODEL = "cc-live-"
 # shortcut: a profile with no model on official runs this, follow the newest Claude generation
@@ -988,7 +988,7 @@ LIVE_OFFICIAL_DEFAULT = "claude-opus-5-5"
 
 
 def live_target(model, launch):
-    """{provider, model, effort, key, format} of the cc profile an in-process subagent names, or None."""
+    """{provider, model, effort, key, format} of the ccx profile an in-process subagent names, or None."""
     if not (isinstance(model, str) and model.startswith(LIVE_MODEL)):
         return None
     name = model[len(LIVE_MODEL):]
@@ -999,15 +999,15 @@ def live_target(model, launch):
     except (Exception, SystemExit):
         profile = None
     if not isinstance(profile, dict):
-        raise ValueError(f"No cc subagent profile '{name}' for this session.")
+        raise ValueError(f"No ccx subagent profile '{name}' for this session.")
     provider, model = profile.get("provider", "official"), profile.get("model")
     if provider != "official" and not model:
-        raise ValueError(f"cc subagent '{name}' names no model for {provider}; pick one in /model's Subagent tab.")
+        raise ValueError(f"ccx subagent '{name}' names no model for {provider}; pick one in /model's Subagent tab.")
     return provider_target(provider, model, profile.get("effort"))
 
 
 def provider_target(provider, model, effort):
-    """{provider, model, effort, key, format: official|chat|anthropic, base, header} of one cc provider's model."""
+    """{provider, model, effort, key, format: official|chat|anthropic, base, header} of one ccx provider's model."""
     if provider == "official":
         return {"provider": provider, "model": model or LIVE_OFFICIAL_DEFAULT, "effort": effort, "key": "", "format": "official"}
     cc = _load_cc_switch()
@@ -1154,7 +1154,7 @@ def fit_thinking(body):
 
 
 def live_worker_effort(body, profile):
-    """Apply the profile's current effort to a running cc worker's next request; its context is untouched."""
+    """Apply the profile's current effort to a running ccx worker's next request; its context is untouched."""
     try:
         agent = _load_cc_switch().load_agents().get(profile)
     except (Exception, SystemExit):
@@ -1206,7 +1206,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def forward_live(self, live, body):
-        """An in-process cc subagent on an Anthropic-format provider: its /v1/messages with the profile's key."""
+        """An in-process ccx subagent on an Anthropic-format provider: its /v1/messages with the profile's key."""
         headers = {k: v for k, v in self.headers.items() if k.lower() in ("anthropic-version", "accept")}
         beta = third_party_beta(self.headers.get("anthropic-beta"))
         if beta:
@@ -1358,7 +1358,7 @@ class Handler(BaseHTTPRequestHandler):
                 fit_thinking(body)
                 if override["format"] == "official":
                     if route[0] != OFFICIAL_ROUTE:
-                        raise ValueError("Claude official needs a session started with `cc official`.")
+                        raise ValueError("Claude official needs a session started with `ccx official`.")
                     self.forward_official("POST", json.dumps(body).encode())
                     return
                 if override["format"] == "anthropic":
@@ -1391,7 +1391,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 response = open_upstream(active, request, key, strict=bool(target), session=cache_key(body))
             except OSError as exc:
-                # The session's fallback (cc fallback, off unless chosen) gets one try at what the route refused.
+                # The session's fallback (ccx fallback, off unless chosen) gets one try at what the route refused.
                 if not target or (isinstance(exc, urllib.error.HTTPError) and exc.code not in (402, 429) and exc.code < 500):
                     raise
                 request["model"] = target["model"]

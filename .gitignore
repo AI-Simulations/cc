@@ -17,3 +17,6 @@ keys.json
 
 .claude/
 *.bak-*
+dist/
+build/
+*.egg-info/

@@ -1,11 +1,13 @@
 """cc's model picker as its own dark window (stdlib Tkinter, no dependencies).
 
 Tabs mirror the /model grid: Model, Subagent, Fallbacks, Auto, Tools and Presets. Every list has a
-search field; the model lists group by family on demand. Apply runs the same cc commands the
+search field; the model lists group by family on demand. Apply runs the same ccx commands the
 terminal menus run, so the session route, profiles and fallbacks stay one source of truth.
 """
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -22,12 +24,17 @@ TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
 TARGET_TABS = ('subagent', 'fallback')
 
 # Dark by default, independent of the desktop's light/dark setting.
-BG, PANEL, FIELD, HOVER = '#0f1319', '#171c25', '#1d2430', '#2a3444'
-FG, DIM, FAINT, ACCENT = '#eef3fb', '#a9b5c8', '#7f8da3', '#5b8cff'
-SELECTED, CURRENT = '#2b4a74', '#1d3b33'
-ZEBRA, BORDER = '#1a212c', '#2a3546'
-FONT = ('Segoe UI', 10)
-MONO = ('Consolas', 10)
+BG, PANEL, FIELD, HOVER = '#0d1117', '#141a22', '#19202a', '#243042'
+FG, DIM, FAINT, ACCENT = '#e8eef7', '#a3afc2', '#76839a', '#6b8cff'
+SELECTED, CURRENT = '#27426b', '#17352d'
+ZEBRA, BORDER = '#161d26', '#252e3b'
+COST_BG, COST_FG = '#1a2a22', '#7fe0a8'
+# Each desktop's own UI and code faces; Tk substitutes the nearest installed one.
+UI = 'Segoe UI' if os.name == 'nt' else 'Helvetica Neue' if sys.platform == 'darwin' else 'Cantarell'
+FONT = (UI, 10)
+BOLD = (UI, 10, 'bold')
+SMALL_BOLD = (UI, 9, 'bold')
+MONO = ('Consolas' if os.name == 'nt' else 'Menlo' if sys.platform == 'darwin' else 'DejaVu Sans Mono', 10)
 BUSY = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 # Claude Code's own ladder, used when a provider publishes none (as the launch menu does).
 EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -151,15 +158,6 @@ FAMILY_LOGOS = {
 }
 
 
-def brand_fg(color):
-    """Dark initials on a light tile, white on a dark one."""
-    try:
-        red, green, blue = (int(color[i:i + 2], 16) for i in (1, 3, 5))
-    except (ValueError, IndexError):
-        return FG
-    return '#101114' if 0.299 * red + 0.587 * green + 0.114 * blue > 150 else 'white'
-
-
 def model_family(model_id):
     """The family a model id belongs to, as the terminal picker groups it."""
     tail = model_id.rsplit('/', 1)[-1].strip().lower()
@@ -214,10 +212,58 @@ def facts_text(info):
     return ' · '.join(parts)
 
 
-def fact_values(info):
+def session_usage(session_id=None):
+    """This session's tokens and API-price cost, from its transcript: {input, write, read, output, usd}.
+    None before the first reply or outside a Claude Code session."""
+    import glob
+    session_id = session_id or os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+    if not re.fullmatch(r'[0-9a-f-]{36}', session_id):
+        return None
+    paths = glob.glob(str(Path.home() / '.claude' / 'projects' / '*' / f'{session_id}.jsonl'))
+    if not paths:
+        return None
+    spec = importlib.util.spec_from_file_location('cc_statusline', Path(__file__).with_name('statusline.py'))
+    statusline = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(statusline)
+    total, last = {'input': 0, 'write': 0, 'read': 0, 'output': 0, 'usd': 0.0}, None
+    with open(paths[0], 'rb') as f:
+        for line in f:
+            if b'"usage"' not in line:
+                continue
+            try:
+                message = json.loads(line).get('message') or {}
+            except (ValueError, AttributeError):
+                continue
+            usage = message.get('usage')
+            if not isinstance(usage, dict) or message.get('id') == last:
+                continue  # one reply spans several lines with the same usage
+            last = message.get('id')
+            total['input'] += usage.get('input_tokens') or 0
+            total['write'] += usage.get('cache_creation_input_tokens') or 0
+            total['read'] += usage.get('cache_read_input_tokens') or 0
+            total['output'] += usage.get('output_tokens') or 0
+            total['usd'] += statusline.usage_cost(message.get('model'), usage) or 0.0
+    return total if any(total[k] for k in ('input', 'write', 'read', 'output')) else None
+
+
+def money(usd):
+    return f'${usd:,.2f}' if usd >= 1 else f'${usd:.3f}'
+
+
+def session_cost(info, usage):
+    """What this session's tokens would cost at a model's list price; cache reads at 0.1x and
+    writes at 1.25x input, as most providers bill them. None without a price or usage."""
+    if not usage or not info or info.get('in') is None or info.get('out') is None:
+        return None
+    price_in, price_out = info['in'], info['out']
+    return (usage['input'] * price_in + usage['write'] * price_in * 1.25 + usage['read'] * price_in * 0.1
+            + usage['output'] * price_out) / 1e6
+
+
+def fact_values(info, usage=None):
     """One value per fact column; a fact the provider does not publish reads '?'."""
     if not info:
-        return ('?', '?', '?', '?')
+        return ('?', '?', '?', '?', '')
     context = info.get('ctx')
     price_in, price_out = info.get('in'), info.get('out')
     if price_in is not None and price_out is not None:
@@ -226,7 +272,8 @@ def fact_values(info):
         price = '?'
     return (tokens(context) if context else '?', price,
             f'{info["aa"]:.0f}' if info.get('aa') is not None else '?',
-            f'{info["score"]:.0f}' if info.get('score') is not None else '?')
+            f'{info["score"]:.0f}' if info.get('score') is not None else '?',
+            '' if (cost := session_cost(info, usage)) is None else '≈' + money(cost))
 
 
 SETTINGS_FILE = Path.home() / '.claude' / 'settings.json'
@@ -346,7 +393,7 @@ def parse_target(out, name):
 
 
 def run_cc(*args):
-    """Run cc beside this window, hidden; (ok, stdout-or-stderr)."""
+    """Run ccx beside this window, hidden; (ok, stdout-or-stderr)."""
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     try:
         done = subprocess.run([sys.executable, '-B', str(CC), *args], capture_output=True,
@@ -357,7 +404,7 @@ def run_cc(*args):
 
 
 def session_launch_id():
-    """The key cc files this session's settings under, or '' outside a session."""
+    """The key ccx files this session's settings under, or '' outside a session."""
     sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
     return os.environ.get('CC_LAUNCH_ID') or (f'claude-{sid}' if sid else '')
 
@@ -522,16 +569,13 @@ class PickerTab(ttk.Frame):
             hint = ('Target chooses the subagent profile this tab edits: each profile keeps its own provider, '
                     'model, effort and auto-compact.') if key == 'subagent' else (
                     'Target chooses whose fallback this tab edits: this session, or one subagent profile. '
-                    'A session fallback needs a cc adapter launch.')
+                    'A session fallback needs a ccx adapter launch.')
             ttk.Label(self, text=hint, style='Faint.TLabel', wraplength=900).pack(fill='x', padx=18, pady=(0, 8))
         ttk.Label(pick, text='Provider', style='Dim.TLabel').pack(side='left')
         self.provider = tk.StringVar()
         self.provider_box = ttk.Combobox(pick, textvariable=self.provider, state='readonly', width=24)
         self.provider_box.pack(side='left', padx=(8, 8))
-        self.badge = tk.Label(pick, text='', bg=PANEL, fg='white', font=('Segoe UI Semibold', 8),
-                              padx=6, pady=3)
-        self.badge.pack(side='left', padx=(0, 18))
-        self.provider_box.bind('<<ComboboxSelected>>', lambda _e: (self.update_badge(), self.load_models()))
+        self.provider_box.bind('<<ComboboxSelected>>', lambda _e: self.load_models())
         ttk.Label(pick, text='Effort', style='Dim.TLabel').pack(side='left')
         self.effort = tk.StringVar(value=self.view.get('effort') or 'default')
         self.effort_box = ttk.Combobox(pick, textvariable=self.effort, state='readonly', width=10)
@@ -550,17 +594,18 @@ class PickerTab(ttk.Frame):
         card.pack(fill='both', expand=True, padx=18, pady=(0, 10))
         inner = ttk.Frame(card, style='Card.TFrame')
         inner.pack(fill='both', expand=True, padx=1, pady=1)
-        self.list = ttk.Treeview(inner, columns=('context', 'price', 'intelligence', 'score'),
+        self.list = ttk.Treeview(inner, columns=('context', 'price', 'intelligence', 'score', 'session'),
                                  show='tree headings', style='Picker.Treeview', selectmode='browse',
                                  height=6)
         self.list.heading('#0', text='Model', anchor='w')
         self.list.column('#0', width=360, stretch=True, anchor='w')
-        for column, title, width in (('context', 'Context', 90), ('price', 'Price', 105),
-                                     ('intelligence', 'AA', 70), ('score', 'Score', 70)):
-            self.list.heading(column, text=title, anchor='w')
-            self.list.column(column, width=width, stretch=False, anchor='w')
+        for column, title, width in (('context', 'Context', 80), ('price', 'Price $/M', 110),
+                                     ('intelligence', 'AA', 50), ('score', 'Score', 60),
+                                     ('session', 'This session', 110)):
+            self.list.heading(column, text=title, anchor='e')
+            self.list.column(column, width=width, stretch=False, anchor='e')
         self.list.tag_configure('family', foreground=DIM, background=PANEL,
-                                font=('Segoe UI Semibold', 9))
+                                font=SMALL_BOLD)
         self.list.tag_configure('current', background=CURRENT, foreground='#a8ebcf')
         self.list.tag_configure('zebra', background=ZEBRA)
         self.list.tag_configure('hover', background=HOVER, foreground=FG)
@@ -715,18 +760,8 @@ class PickerTab(ttk.Frame):
         # 'default' is not a pick: it falls back to the effort the route in use was launched with.
         self.effort.set(effort if effort not in (None, '', 'default')
                         else (self.current[2] if self.current and len(self.current) > 2 else 'default'))
-        self.update_badge()
         self.remember()
         self.load_models()
-
-    def update_badge(self):
-        name = self.provider.get()
-        color, text = brand(name)
-        image = self.app.logo(PROVIDER_LOGOS.get(name))
-        if image is not None:
-            self.badge.configure(image=image, text='', bg=color)
-        else:
-            self.badge.configure(image='', text=text, bg=color, fg=brand_fg(color))
 
     def load_models(self):
         provider = self.provider.get()
@@ -865,7 +900,7 @@ class PickerTab(ttk.Frame):
         if current:
             tags += ('current',)
         iid = self.list.insert(parent, 'end', text=f' {model}' + ('  ·  Current' if current else ''), image=logo,
-                               values=fact_values(self.facts.get(model)), tags=tags)
+                               values=fact_values(self.facts.get(model), self.app.usage), tags=tags)
         self.iids[model] = iid
 
     def chosen(self):
@@ -999,9 +1034,6 @@ class PresetsTab(ttk.Frame):
 
         bar = ttk.Frame(self)
         bar.pack(fill='x', padx=18, pady=(16, 10))
-        self.badge = tk.Label(bar, text='', bg=PANEL, fg='white', font=('Segoe UI Semibold', 8),
-                              padx=6, pady=3)
-        self.badge.pack(side='left', padx=(0, 12))
         ttk.Label(bar, text='Find', style='Dim.TLabel').pack(side='left')
         self.query = tk.StringVar()
         self.query.trace_add('write', lambda *_: self.render())
@@ -1029,7 +1061,7 @@ class PresetsTab(ttk.Frame):
         self.list.bind('<MouseWheel>', lambda e: self.list.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
         self.list.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=10)
         scroll.pack(side='right', fill='y', padx=(6, 6), pady=10)
-        self.list.bind('<<TreeviewSelect>>', lambda _e: (self.hover.clear(), self.update_badge()))
+        self.list.bind('<<TreeviewSelect>>', lambda _e: self.hover.clear())
         self.list.bind('<Double-Button-1>', lambda _e: self.edit())
         self.list.bind('<Return>', lambda _e: self.apply())
         self.empty = ttk.Label(inner, text='', style='Empty.TLabel')
@@ -1139,7 +1171,6 @@ class PresetsTab(ttk.Frame):
             self.list.selection_set(iid)
             self.list.focus(iid)
             self.list.see(iid)
-        self.update_badge()
         self.show_empty()
 
     def picked(self):
@@ -1147,18 +1178,6 @@ class PresetsTab(ttk.Frame):
         if not selection:
             return None
         return next((preset for iid, preset in self.iids if iid == selection[0]), None)
-
-    def update_badge(self):
-        preset = self.picked()
-        if preset is None:
-            self.badge.configure(text='', image='', bg=PANEL)
-            return
-        color, text = brand(preset['provider'])
-        image = self.app.logo(PROVIDER_LOGOS.get(preset['provider']))
-        if image is not None:
-            self.badge.configure(image=image, text='', bg=color)
-        else:
-            self.badge.configure(image='', text=text, bg=color, fg=brand_fg(color))
 
     def edit(self):
         preset = self.picked()
@@ -1237,13 +1256,6 @@ class PresetEditor(tk.Toplevel):
         body.pack(fill='both', expand=True, padx=20, pady=18)
         head = ttk.Frame(body)
         head.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 14))
-        color, monogram = brand(preset['provider'])
-        image = app.logo(PROVIDER_LOGOS.get(preset['provider']))
-        if image is not None:
-            tk.Label(head, image=image, bg=color, padx=4, pady=3).pack(side='left', padx=(0, 10))
-        else:
-            tk.Label(head, text=monogram, bg=color, fg=brand_fg(color),
-                     font=('Segoe UI Semibold', 10), padx=7, pady=3).pack(side='left', padx=(0, 10))
         ttk.Label(head, text=preset['provider'], style='Title.TLabel').pack(side='left')
         self.fields = {}
         main = {'provider': preset['provider'], 'model': preset['model'], 'effort': preset.get('effort') or 'default'}
@@ -1407,7 +1419,7 @@ class PresetEditor(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self, start='model'):
         super().__init__()
-        self.title('cc model picker')
+        self.title('ccx model picker')
         self.configure(bg=BG)
         self.geometry('980x660')
         self.minsize(760, 520)
@@ -1424,15 +1436,16 @@ class App(tk.Tk):
         self.style.configure('Card.TFrame', background=PANEL)
         self.style.configure('TLabel', background=BG, foreground=FG)
         self.style.configure('Title.TLabel', background=BG, foreground=FG,
-                             font=('Segoe UI Semibold', 17))
+                             font=(UI, 16, 'bold'))
         self.style.configure('Dim.TLabel', background=BG, foreground=DIM)
         self.style.configure('Faint.TLabel', background=BG, foreground=FAINT)
+        self.style.configure('Cost.TLabel', background=COST_BG, foreground=COST_FG, font=BOLD, padding=(10, 4))
         self.style.configure('Empty.TLabel', background=PANEL, foreground=FAINT, font=FONT)
         self.style.configure('TButton', background=FIELD, foreground=FG, borderwidth=0, focusthickness=0,
-                             padding=(14, 7))
+                             padding=(16, 8), font=FONT)
         self.style.map('TButton', background=[('active', HOVER), ('pressed', SELECTED)])
-        self.style.configure('Accent.TButton', background=ACCENT, foreground='white', padding=(18, 7))
-        self.style.map('Accent.TButton', background=[('active', '#7aa4ff'), ('pressed', '#4778e6')])
+        self.style.configure('Accent.TButton', background=ACCENT, foreground='white', padding=(22, 8), font=BOLD)
+        self.style.map('Accent.TButton', background=[('active', '#8aa3ff'), ('pressed', '#5574e6')])
         self.style.configure('TNotebook', background=BG, borderwidth=0, tabmargins=(14, 10, 14, 0),
                              bordercolor=BG, lightcolor=BG, darkcolor=BG)
         self.style.configure('TNotebook.Tab', background=BG, foreground=DIM, padding=(18, 9),
@@ -1457,21 +1470,22 @@ class App(tk.Tk):
         self.style.configure('TCheckbutton', background=BG, foreground=FG)
         self.style.map('TCheckbutton', background=[('active', BG)])
         self.style.configure('Picker.Treeview', background=FIELD, fieldbackground=FIELD, foreground=FG,
-                             borderwidth=0, bordercolor=BORDER, rowheight=36, font=MONO)
+                             borderwidth=0, bordercolor=BORDER, rowheight=34, font=MONO)
         self.style.map('Picker.Treeview',
                        background=[('selected', SELECTED)], foreground=[('selected', 'white')])
         self.style.configure('Picker.Treeview.Heading', background=PANEL, foreground=DIM,
-                             borderwidth=0, relief='flat', font=('Segoe UI Semibold', 9),
+                             borderwidth=0, relief='flat', font=SMALL_BOLD,
                              padding=(10, 7))
 
         # A slim header naming the window and the session it edits, over an accent rule.
         head = ttk.Frame(self)
         head.pack(fill='x', padx=18, pady=(14, 10))
-        tk.Label(head, text='cc', bg=ACCENT, fg='white', font=('Segoe UI Semibold', 10),
-                 padx=7, pady=3).pack(side='left', padx=(0, 10))
         ttk.Label(head, text='Model picker', style='Title.TLabel').pack(side='left')
+        self.cost = ttk.Label(head, text='', style='Cost.TLabel')
+        self.cost.pack(side='right', padx=(12, 0))
         self.session = ttk.Label(head, text=session_label(), style='Faint.TLabel')
         self.session.pack(side='right')
+        self.usage = None
         rule = tk.Frame(self, bg=ACCENT, height=2)
         rule.pack(fill='x', padx=18)
 
@@ -1483,7 +1497,7 @@ class App(tk.Tk):
         self.container.grid_columnconfigure(0, weight=1)
         self.tabs = {}
         self.tab_labels = {}
-        self.facts_cache = {}  # provider -> {model id: cc facts}
+        self.facts_cache = {}  # provider -> {model id: ccx facts}
         self.models_cache = {}  # (tab, target, provider) -> successful model listing
         self.logo_cache = {}  # logo file stem -> PhotoImage
         for key, label in TABS:
@@ -1504,6 +1518,7 @@ class App(tk.Tk):
         self.notebook.bind('<Configure>', lambda _e: self.move_underline())
         self.after(30, self.move_underline)
         self.after(60, self.load_current)
+        self.after(90, lambda: self.background(session_usage, self.show_usage))
         self.bind('<Escape>', lambda _e: self.destroy())
         ico = Path(__file__).with_name('cc.ico')
         try:
@@ -1537,6 +1552,16 @@ class App(tk.Tk):
         x = max(0, (self.winfo_screenwidth() - width) // 2)
         y = max(0, (self.winfo_screenheight() - height) // 3)
         self.geometry(f'{width}x{height}+{x}+{y}')
+
+    def show_usage(self, usage):
+        """The session's API-price cost in the header, and the per-model estimate column."""
+        if not isinstance(usage, dict):
+            return
+        self.usage = usage
+        self.cost.configure(text=f'API {money(usage["usd"])} so far')
+        for tab in self.tabs.values():
+            if hasattr(tab, 'iids') and getattr(tab, 'models', None):
+                tab.render_models()
 
     def background(self, work, done):
         """Work off the UI thread; its result (or failure) lands on the UI thread."""
@@ -1603,7 +1628,7 @@ class App(tk.Tk):
             selected = name == self.selected
             node.configure(bg=PANEL if selected else BG,
                            fg=FG if selected else DIM,
-                           font=('Segoe UI Semibold', 10) if selected else FONT)
+                           font=BOLD if selected else FONT)
 
     def hover_tab(self, key, inside):
         if key != self.selected:
@@ -1625,7 +1650,7 @@ def session_label():
     launch = os.environ.get('CC_LAUNCH_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
     provider = os.environ.get('CC_MAIN_PROVIDER')
     if not launch:
-        return 'no cc launch'
+        return 'no ccx launch'
     label = f'{provider} · {launch}' if provider else launch
     return label if len(label) <= 46 else label[:45] + '…'
 
@@ -1686,7 +1711,7 @@ def raise_existing():
         return False
     try:
         import ctypes
-        hwnd = ctypes.windll.user32.FindWindowW(None, 'cc model picker')
+        hwnd = ctypes.windll.user32.FindWindowW(None, 'ccx model picker')
         if not hwnd:
             return False
         ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE

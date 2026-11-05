@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ccx"
+version = "1.0.0"
+description = "Claude Code on any provider: launcher, local adapter, /model picker and status line"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/AI-Simulations/cc"
+
+[project.scripts]
+# Copies the runtime into ~/.config/cc and registers the `ccx` shell function.
+ccx-install = "ccx_install:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["ccx_install.py"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cc-switch.py" = "ccx_files/cc-switch.py"
+"cc-switch.ps1" = "ccx_files/cc-switch.ps1"
+"cc-anthropic-proxy.py" = "ccx_files/cc-anthropic-proxy.py"
+"cc-gui.py" = "ccx_files/cc-gui.py"
+"cc.ico" = "ccx_files/cc.ico"
+"statusline.py" = "ccx_files/statusline.py"
+"opencode_key.py" = "ccx_files/opencode_key.py"
+"patch-oauth-quota.py" = "ccx_files/patch-oauth-quota.py"
+"oauth-errors.mjs" = "ccx_files/oauth-errors.mjs"
+"install-resume.py" = "ccx_files/install-resume.py"
+"critic_mock_check.py" = "ccx_files/critic_mock_check.py"
+"README.md" = "ccx_files/README.md"
+"test_cc_switch.py" = "ccx_files/test_cc_switch.py"
+"test_cc_resume.py" = "ccx_files/test_cc_resume.py"
+"test_cc_proxy.py" = "ccx_files/test_cc_proxy.py"
+"test_statusline.py" = "ccx_files/test_statusline.py"
+"test_cc_gui.py" = "ccx_files/test_cc_gui.py"
+"commands" = "ccx_files/commands"
+"subagent-picker" = "ccx_files/subagent-picker"
+"ai_suite" = "ccx_files/ai_suite"

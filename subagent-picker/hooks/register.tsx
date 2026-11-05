@@ -45,8 +45,25 @@ async function sessionEnv($: EngineInterface) {
   return { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: await $.session.id() }
 }
 
+// `python` on Windows, `python3` on macOS and most Linux; whichever starts first is kept.
+let python: string | undefined
+async function py($: EngineInterface, args: string[], init: { timeoutMs?: number; env?: Record<string, string> } = {}) {
+  for (const exe of python ? [python] : ['python', 'python3']) {
+    try {
+      const r = await $.process.run([exe, ...args], init)
+      // 9009: Windows' app-execution alias stub when no real python is installed
+      if (!python && r.exitCode === 9009) continue
+      python = exe
+      return r
+    } catch (err) {
+      if (python) throw err
+    }
+  }
+  throw new Error('No python or python3 on PATH; ccx needs Python 3.10+.')
+}
+
 async function cc($: EngineInterface, args: string[]) {
-  const r = await $.process.run(['python', '-B', '-c', RUN, CC, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
+  const r = await py($, ['-B', '-c', RUN, CC, ...args], { timeoutMs: 60000, env: await sessionEnv($) })
   return { ok: r.exitCode === 0, out: `${r.stdout}\n${r.stderr}`.trim() }
 }
 
@@ -61,11 +78,11 @@ if launch:
 print(json.dumps(agents))`
 
 async function loadProfiles($: EngineInterface) {
-  cachedProfiles = parseProfiles((await $.process.run(['python', '-B', '-c', PROFILES], { env: await sessionEnv($) })).stdout)
+  cachedProfiles = parseProfiles((await py($, ['-B', '-c', PROFILES], { env: await sessionEnv($) })).stdout)
   return cachedProfiles
 }
 
-// `value<TAB>label` rows, as cc prints them for its pickers.
+// `value<TAB>label` rows, as ccx prints them for its pickers.
 function tabRows(out: string): Row[] {
   return out.split(/\r?\n/).flatMap(l => {
     const [value, label] = l.split('\t')
@@ -197,7 +214,7 @@ export function shapeModels(rows: Row[], query: string, sort: Grid['sort']) {
   return filterRows(sort === 'family' ? familySort(rows) : rows, query)
 }
 
-// `cc presets` rows: provider, model, effort and the label the column shows; the value carries all three
+// `ccx presets` rows: provider, model, effort and the label the column shows; the value carries all three
 // as JSON, model ids having their own slashes.
 export function parsePresets(out: string): Row[] {
   return out.split(/\r?\n/).flatMap(line => {
@@ -265,7 +282,7 @@ function effortInfo($: EngineInterface, provider: string, model: string) {
   const key = `${provider}/${model}`
   let info = cachedEfforts.get(key)
   if (!info) {
-    info = $.process.run(['python', '-B', '-c', EFFORT_INFO, CC, provider, model], { timeoutMs: 60000 }).then(r => {
+    info = py($, ['-B', '-c', EFFORT_INFO, CC, provider, model], { timeoutMs: 60000 }).then(r => {
       try {
         return JSON.parse(r.stdout.trim().split(/\r?\n/).pop() ?? '') as { levels: string[] | null; default: string | null }
       } catch {
@@ -298,7 +315,7 @@ let sessionFallback: Target | undefined
 let autoTarget: Target | undefined
 let toolsTarget: Target | undefined
 const helperTab = (t: GridTab) => t.name === 'Auto' || t.name === 'Tools'
-// Set when this session runs on Claude Code's own model (not a cc adapter route): the Main model tab
+// Set when this session runs on Claude Code's own model (not a ccx adapter route): the Main model tab
 // then sets it through the built-in /model and /effort.
 let nativeModel: string | undefined
 let fallbackOk = false
@@ -325,8 +342,8 @@ function targetOf(t: GridTab, who: string | undefined): Target | undefined {
 function nowLine(t: GridTab, who: string | undefined) {
   const now = targetOf(t, who)
   if (helperTab(t)) return `${t.name === 'Auto' ? 'Safety classifier' : 'WebFetch extraction and model-backed hooks'}: ${now ? show(now) : 'inherit session provider'}. ${t.name === 'Tools' ? 'Default: main model, low effort if supported; otherwise inherit. External search backends are separate.' : 'Permission checks remain enabled.'}`
-  if (t.name === 'Model' && nativeModel) return `This session: Claude Code's own ${nativeModel}. Claude models switch now; another provider copies a cc command that resumes this conversation there.`
-  if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return 'A session fallback needs a session started by cc on an adapter route (cc gemini …, cc nvidia …).'
+  if (t.name === 'Model' && nativeModel) return `This session: Claude Code's own ${nativeModel}. Claude models switch now; another provider copies a ccx command that resumes this conversation there.`
+  if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return 'A session fallback needs a session started by ccx on an adapter route (ccx gemini …, ccx nvidia …).'
   if (t.name === 'Model') return `This session:${now ? show(now) : 'its launch route'}. Applies to the next request.`
   if (t.name === 'Subagent') return `Subagent ${who}: ${show(now)}. Applies to its next task.`
   return `${who === 'session' ? 'This session' : `Subagent ${who}`} falls back to ${show(now)} when its provider refuses (429, 402, 5xx).`
@@ -339,14 +356,14 @@ async function providerRows($: EngineInterface, t: GridTab, who: string | undefi
     return [{ value: 'official' }, ...(cachedProviders ?? (await loadProviders($))).filter(p => p.value !== 'official').map(p => ({ value: p.value }))]
   if (t.name === 'Fallback' && who === 'session' && !fallbackOk) return []
   // the session's fallback list leaves out its own provider; shortcut: a subagent's `official` fallback
-  // (a rerun on Claude) is set with `cc fallback subagent`, not listed here
+  // (a rerun on Claude) is set with `ccx fallback subagent`, not listed here
   const routes = tabRows((await cc($, t.name === 'Fallback' && who === 'session' ? ['fallback', 'routes'] : ['route', 'routes'])).out)
   return [{ value: 'off', label: helperTab(t) ? 'inherit session' : t.name === 'Model' ? 'off (launch)' : 'off' }, ...routes.map(r => ({ value: r.value }))]
 }
 
 function modelList($: EngineInterface, t: GridTab, who: string | undefined, provider: string) {
   if (t.name === 'Model' && nativeModel && provider === 'official') return Promise.resolve(CLAUDE_MODELS.includes(nativeModel) ? CLAUDE_MODELS : [nativeModel, ...CLAUDE_MODELS])
-  // cc lists a provider's models through a profile; any one serves
+  // ccx lists a provider's models through a profile; any one serves
   if (t.name === 'Model' && nativeModel) return models($, cachedProfiles?.[0]?.name ?? 'sub', provider)
   if (t.name === 'Model' || helperTab(t)) return routeModels($, provider)
   if (t.name === 'Fallback') return fallbackModels($, provider)
@@ -358,7 +375,7 @@ function setTab($: EngineInterface, ti: number, change: (t: GridTab) => GridTab)
 }
 
 // The model list's view: a family order and a typed search over each column's unfiltered `all`,
-// so either can change without asking cc for the list again.
+// so either can change without asking ccx for the list again.
 let viewQuery = ''
 let viewSort: Grid['sort']
 const viewOf = (rows: Row[]) => shapeModels(rows, viewQuery, viewSort)
@@ -536,7 +553,7 @@ async function buildGrid($: EngineInterface, start: GridTab['name'], who?: strin
       : { name: 'Presets', now: preset.ok ? 'No provider defaults listed.' : preset.out, cols: [] },
     names.length
       ? { name: 'Subagent', now: '', cols: names.length > 1 ? [{ title: 'Subagent', rows: subagents, ...cursor(subagents, who) }, ...cols('Provider', 'Model', 'Effort', 'Compact')] : cols('Provider', 'Model', 'Effort', 'Compact') }
-      : { name: 'Subagent', now: 'No configured cc subagents.', cols: [] },
+      : { name: 'Subagent', now: 'No configured ccx subagents.', cols: [] },
   ]
   tabs.push(
     auto.ok ? { name: 'Auto', now: '', cols: cols('Provider', 'Model', 'Effort') }
@@ -662,7 +679,7 @@ async function onGridKey($: EngineInterface, key: string, shift: boolean) {
   if (key === 'return') return applyGrid($, g)
 }
 
-// The cc command that resumes this conversation on another route.
+// The ccx command that resumes this conversation on another route.
 export function relaunchCommand(provider: string, model: string, effort: string, session: string) {
   return `cc ${provider} ${model}${EFFORTS.includes(effort) ? ` --effort ${effort}` : ''} --resume ${session}`
 }
@@ -686,7 +703,7 @@ async function applyNative($: EngineInterface, g: Grid, provider: string, model:
   })
 }
 
-// Enter: the tab's selection, through the same cc commands the terminal uses; the grid stays for more.
+// Enter: the tab's selection, through the same ccx commands the terminal uses; the grid stays for more.
 async function applyGrid($: EngineInterface, g: Grid) {
   const t = g.tabs[g.tab]!
   // Presets carry their own provider, model and effort: one Enter is the whole pick.
@@ -876,7 +893,7 @@ export const register: Register = on => {
     // The session's API-price cost (main, subagents), drawn at the end of the mode row under the prompt.
     $.ui.status(undefined)  // an earlier load pinned it as a status notice above the status line
     const showCost = async () => {
-      const r = await $.process.run(['python', '-B', '-c', RUN, COST, '--cost', await $.session.id()], { timeoutMs: 30000 })
+      const r = await py($, ['-B', '-c', RUN, COST, '--cost', await $.session.id()], { timeoutMs: 30000 })
       update($, cost, () => r.stdout.trim())
     }
     void showCost().catch(() => undefined)
@@ -1022,7 +1039,7 @@ export const register: Register = on => {
     // `/model <name>` stays Claude Code's; a complete /fallback call stays with cc-switch.py.
     const dialog = command === 'model' ? !words.length : !words.length || (head === 'subagent' && words.length <= 2)
     if (!dialog) return next(e)
-    // The picker is its own window (cc gui) on a cc adapter session; the in-terminal grid stays as
+    // The picker is its own window (ccx gui) on a ccx adapter session; the in-terminal grid stays as
     // the fallback when the window cannot open (no Tk, a missing file, a refused launch). A native
     // session keeps the grid: only it can run Claude Code's own /model and /effort, which its Model
     // tab switches; the window would refuse its Apply.
@@ -1038,7 +1055,7 @@ export const register: Register = on => {
       return next(e)
     }
     void takeGridKeys($).catch(() => undefined)
-    const reason = window ? window.out.split(/\r?\n/).pop() : 'this session has no cc launch'
-    return { text: `/${command}: the picker window is unavailable (${reason ?? 'cc gui failed'}); Tab switches tabs, arrows move, Space picks, Enter sets, Esc closes.` }
+    const reason = window ? window.out.split(/\r?\n/).pop() : 'this session has no ccx launch'
+    return { text: `/${command}: the picker window is unavailable (${reason ?? 'ccx gui failed'}); Tab switches tabs, arrows move, Space picks, Enter sets, Esc closes.` }
   })
 }

@@ -44,7 +44,9 @@ def key_ok(key):
 
 def _chrome():
     for path in (shutil.which("chrome"), os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-                 os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe")):
+                 os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                 shutil.which("google-chrome"), shutil.which("google-chrome-stable"), shutil.which("chromium")):
         if path and os.path.exists(path):
             return path
     raise RuntimeError("Chrome is not installed")

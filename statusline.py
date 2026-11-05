@@ -245,9 +245,9 @@ def plan_name(account):
 
 
 def quota_source():
-    # cc sets ANTHROPIC_BASE_URL per provider; the status line inherits it.
+    # ccx sets ANTHROPIC_BASE_URL per provider; the status line inherits it.
     url = os.environ.get("ANTHROPIC_BASE_URL", "").lower().rstrip("/")
-    # `cc official` passes the claude.ai login through the adapter's /official route
+    # `ccx official` passes the claude.ai login through the adapter's /official route
     if not url or "anthropic.com" in url or url.endswith("/official"):
         return "anthropic"
     if "commandcode" in url:  # API route and the cmdc adapter route share one account
@@ -321,7 +321,7 @@ def openai_quota():
 
 
 def opencode_go_quota():
-    # cc hands the Go key to Claude Code as ANTHROPIC_AUTH_TOKEN; a cc subagent on Go while the
+    # ccx hands the Go key to Claude Code as ANTHROPIC_AUTH_TOKEN; a ccx subagent on Go while the
     # session is elsewhere reads cc's own source instead. 403 without a Go subscription.
     key = os.environ.get("OPENCODE_GO_API_KEY") or cc_key("opencode-go")
     if not key and quota_source() == "opencode-go":
@@ -372,7 +372,7 @@ QUOTA_FETCHERS = {"commandcode": commandcode_quota, "openai": openai_quota,
                   "opencode-go": opencode_go_quota, "hyper": hyper_quota, "openrouter": openrouter_quota}
 QUOTA_TTL = 10  # the usage endpoints are plain account lookups: no model tokens
 QUOTA_RETRY = 60  # after a failed fetch
-# cc provider names (~/.config/cc/agents.json) that share a quota source; the rest have no quota API.
+# ccx provider names (~/.config/cc/agents.json) that share a quota source; the rest have no quota API.
 CC_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "commandcode-cli": "commandcode",
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
@@ -384,7 +384,7 @@ def cc_agents(session_id=None):
             agents = json.load(f)
     except (OSError, ValueError):
         return {}
-    # cc-switch's session_launch: a Claude session not started by cc keys its profiles by session id
+    # cc-switch's session_launch: a Claude session not started by ccx keys its profiles by session id
     launch = os.environ.get("CC_LAUNCH_ID") or (f"claude-{session_id}" if session_id else "")
     if launch:
         try:
@@ -398,7 +398,7 @@ def cc_agents(session_id=None):
 
 
 def subagent_sources(session_id=None):
-    """{quota source: [cc subagent names]} for cc's own-process subagents."""
+    """{quota source: [ccx subagent names]} for cc's own-process subagents."""
     agents = cc_agents(session_id)
     found = {}
     for name, a in agents.items() if isinstance(agents, dict) else ():
@@ -425,7 +425,7 @@ def cc_orphans(session_id):
 
 
 def cc_fallback_jobs(session_id):
-    """{subagent name: route} for this session's workers that cc moved onto their fallback (cc-switch's fallback_jobs)."""
+    """{subagent name: route} for this session's workers that ccx moved onto their fallback (cc-switch's fallback_jobs)."""
     if not isinstance(session_id, str) or not session_id:
         return {}
     try:
@@ -517,7 +517,7 @@ def user_settings():
 
 
 def compact_limit(model_id, size):
-    """Tokens at which this session autocompacts: the cc percentage override, else the settings window."""
+    """Tokens at which this session autocompacts: the ccx percentage override, else the settings window."""
     pct = os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "")
     if pct.isdigit():
         return size * int(pct) // 100
@@ -902,7 +902,7 @@ def provider_week(source, now):
 
 def mode_row(session_id, now):
     """`≈ $2.03 (7d $1,523/$13.5k │ Ultra) · ≈ $0.54 (CmdC $4.05 left)`: per provider
-    this session ran on (main and its cc subagents), the session's API-price cost, then the week's; '' before any reply."""
+    this session ran on (main and its ccx subagents), the session's API-price cost, then the week's; '' before any reply."""
     import glob
     if not re.fullmatch(r"[0-9a-f-]{36}", str(session_id or "")):
         return ""
@@ -915,7 +915,7 @@ def mode_row(session_id, now):
     profiles = cc_profiles(session_id)
     spent = {}  # quota source (or bare provider) -> usd, main first
     runs = [(main, transcript_cost(paths[0]))]
-    # a native subagent (Explore, general-purpose) runs on the main route; a cc profile on its own
+    # a native subagent (Explore, general-purpose) runs on the main route; a ccx profile on its own
     runs += [((profiles.get(name) or {}).get("provider", main) if name in profiles else main, cost)
              for name, cost in subagent_costs(paths[0]).items()]
     for provider, cost in runs:
@@ -940,7 +940,7 @@ def render(d):
     ultra = ultra or effort == "ultracode" or settings_ultracode() or keyword_ultracode(d.get("transcript_path"))
     if effort == "ultracode":
         effort = None
-    # /model's Model tab switched this cc session (cc route): Claude Code still reports the launch model.
+    # /model's Model tab switched this ccx session (ccx route): Claude Code still reports the launch model.
     launch = os.environ.get("CC_LAUNCH_ID")
     route = (load_json(os.path.expanduser("~/.config/cc/routes.json")) if launch else {}).get(launch)
     helper_picks = (route or {}).get("helpers") or {}
@@ -1014,7 +1014,7 @@ def render(d):
         parts += shown or [f"{YELLOW}{q['error']}{suffix}{RESET}"]
     else:
         parts += shown
-    # The session's fallback route (cc fallback); yellow while it served within the last 5 minutes.
+    # The session's fallback route (ccx fallback); yellow while it served within the last 5 minutes.
     fallback = (load_json(os.path.expanduser("~/.config/cc/fallbacks.json")) if launch else {}).get(launch)
     if fallback:
         served = load_json(f"fallback-{launch}.json").get("at") or 0
@@ -1023,7 +1023,7 @@ def render(d):
     # Provider labels are omitted; the picker owns route selection.
 
     # Configured targets are visible even on official Claude and even on the same provider.
-    # Live worker rows separately identify native workers and the real cc relay/worker route.
+    # Live worker rows separately identify native workers and the real ccx relay/worker route.
     sub_lines = []
     if launch:
         helper_rows = []
@@ -1059,7 +1059,7 @@ def render(d):
                       or cc_running_jobs(d.get("session_id")))
         sub_costs = subagent_costs(d.get("transcript_path"))
         for name, profile in cc_profiles(d.get("session_id")).items():
-            # a worker that cc reran on its fallback shows the route it really runs on, not the configured one
+            # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
             provider = profile.get("provider", "official")
             mid = profile.get('model') or 'Claude default'
