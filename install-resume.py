@@ -170,6 +170,20 @@ def drop_legacy(text):
     return text[:match.start()] + rest[2 if rest.startswith('\r\n') else 1 if rest.startswith('\n') else 0:]
 
 
+def migrate(legacy, target):
+    """Copy keys, saved picks, profiles and the OAuth build from a pre-rename install; never overwrite. The old folder stays."""
+    def skip(directory, names):
+        top = Path(directory) == legacy
+        return {n for n in names if n.startswith('backup') or n == '__pycache__' or '.bak' in n or n.endswith(('.pid', '.lock'))
+                or top and (n.startswith(('cc-', 'test_cc_', 'apply.')) or n in ('cc.ico', '~'))}
+    try:
+        shutil.copytree(legacy, target, ignore=skip, dirs_exist_ok=True,
+                        copy_function=lambda src, dst: None if os.path.exists(dst) else shutil.copy2(src, dst))
+    except shutil.Error as exc:
+        print(f'Could not copy {len(exc.args[0])} files from {legacy}; copy them by hand if needed.')
+    print('Copied settings from', legacy, 'to', target)
+
+
 def shell_profiles(home):
     if os.name == 'nt':
         return [home / 'Documents' / shell / 'Microsoft.PowerShell_profile.ps1'
@@ -187,13 +201,8 @@ def main():
     commands = home / '.claude' / 'commands'
     commands.mkdir(parents=True, exist_ok=True)
     legacy, target = home / '.config/cc', home / '.config/ccx'
-    if legacy.is_dir() and not target.exists():
-        # Keys, saved picks, profiles and the OAuth build from before the ccx rename. The old folder stays.
-        try:
-            shutil.copytree(legacy, target, ignore=shutil.ignore_patterns('backup*', '__pycache__', 'apply.*'))
-        except shutil.Error as exc:
-            print(f'Could not copy {len(exc.args[0])} files from {legacy}; copy them by hand if needed.')
-        print('Copied settings from', legacy, 'to', target)
+    if legacy.is_dir() and not (target / 'ccx-switch.py').exists():
+        migrate(legacy, target)
     install(target, shell_profiles(home), commands, home / '.claude')
 
 

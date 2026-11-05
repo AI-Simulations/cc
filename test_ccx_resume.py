@@ -150,6 +150,23 @@ class ResumeTests(unittest.TestCase):
                         text=True, check=True, **ccx.background_process_options())
                     self.assertEqual(result.stdout.splitlines(), ['Function', 'Get-Date', 'False'])
 
+    def test_migrate_copies_pre_rename_data_without_overwriting(self):
+        spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy, target = Path(tmp) / 'cc', Path(tmp) / 'ccx'
+            for name in ('keys.json', 'state.json', 'cc-switch.py', 'backup-1/x', 'logos/a.svg', 'oauth/cc-helper.mjs'):
+                (legacy / name).parent.mkdir(parents=True, exist_ok=True)
+                (legacy / name).write_text('old', encoding='utf-8')
+            target.mkdir()
+            (target / 'state.json').write_text('new', encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                installer.migrate(legacy, target)
+            self.assertEqual(sorted(p.relative_to(target).as_posix() for p in target.rglob('*') if p.is_file()),
+                             ['keys.json', 'logos/a.svg', 'oauth/cc-helper.mjs', 'state.json'])
+            self.assertEqual((target / 'state.json').read_text(encoding='utf-8'), 'new')
+
     def test_install_registers_posix_shell_function_once(self):
         spec = importlib.util.spec_from_file_location('ccx_install', ROOT / 'install-resume.py')
         installer = importlib.util.module_from_spec(spec)
