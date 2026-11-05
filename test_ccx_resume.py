@@ -364,7 +364,7 @@ class AgentRoutingTests(unittest.TestCase):
             base.with_suffix('.meta.json').write_text('{"agentType":"ccx-sub"}', encoding='utf-8')
             base.with_suffix('.jsonl').write_text('{"type":"user","message":{"content":"old"}}\n', encoding='utf-8')
             saved = {'profile': 'sub', 'session_id': SESSION, 'read_only': True}
-            payload = {'tool_name': 'Agent', 'permission_mode': 'auto', 'transcript_path': str(base),
+            payload = {'tool_name': 'Agent', 'permission_mode': 'default', 'transcript_path': str(base),  # auto: resubmit (test_ccx_session)
                        'tool_input': {'subagent_type': 'ccx-sub', 'resume': 'old', 'prompt': 'continue'}}
             with patch.object(ccx, 'load_agents', return_value=self.PROFILES), \
                  patch.object(ccx, '_agent_files', return_value=base), \
@@ -464,7 +464,7 @@ class AgentRoutingTests(unittest.TestCase):
                 self.assertNotIn('updatedInput', result, 'Do not silently discard native role/tool restrictions')
 
     def test_configured_relay_keeps_normal_permissions_and_input(self):
-        payload = {'tool_name': 'Agent', 'permission_mode': 'auto', 'tool_input': {
+        payload = {'tool_name': 'Agent', 'permission_mode': 'default', 'tool_input': {  # auto: resubmit (test_ccx_session)
             'subagent_type': 'ccx-sub', 'prompt': 'complete task', 'description': 'work',
             'isolation': 'worktree', 'run_in_background': True}}
         result = json.loads(self.hook('hook-agent', payload))['hookSpecificOutput']

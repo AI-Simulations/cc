@@ -2688,6 +2688,30 @@ def _recorded_context(transcript, strict=False):
     return record
 
 
+def _rewrite(data, original, updated, deny):
+    """PreToolUse answer that turns `original` into `updated`. Auto mode reviews the call as submitted and refuses a
+    hook-rewritten one, so there the call is denied once with the exact input to resubmit; the resubmitted call is
+    already `updated` and passes through untouched (auto mode's review then covers what runs)."""
+    if updated == original:
+        return {}
+    if data.get("permission_mode") != "auto":
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
+    changes = []
+    if updated.get("subagent_type") != original.get("subagent_type"):
+        changes.append(f'subagent_type "{updated.get("subagent_type")}"')
+    if "resume" in original and "resume" not in updated:
+        changes.append("no resume field")
+    if updated.get("prompt") != original.get("prompt"):
+        p = updated.get("prompt") or ""
+        if p.startswith(CONTEXT_PREFIX):
+            changes.append("a prompt whose first line is exactly:\n" + p.partition("\n")[0]
+                           + "\nfollowed by a newline and the unchanged task text")
+        else:
+            changes.append("the task text alone (drop the " + CONTEXT_PREFIX.strip() + " first line)")
+    return deny("ccx: auto mode cannot review a hook-rewritten Agent call. Resubmit the same Agent call once more "
+                "with " + "; ".join(changes) + ". Keep every other field as it was.")
+
+
 def agent_hook(data):
     """Enforce configured worker types without bypassing native permission rules."""
     if os.environ.get("CCX_AGENT_CHILD") == "1" or data.get("tool_name") not in ("Agent", "Task"):
@@ -2738,8 +2762,7 @@ def agent_hook(data):
             prompt = original.get("prompt") or ""
             if prompt.startswith(CONTEXT_PREFIX):
                 prompt = prompt.partition("\n")[2]
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                    "updatedInput": {**original, "subagent_type": kind + "-live", "prompt": prompt}}}
+            return _rewrite(data, original, {**original, "subagent_type": kind + "-live", "prompt": prompt}, deny)
         if kind not in {"ccx-" + name for name in profiles}:
             return deny(f"Use configured subagent {choices} instead of {kind}. Resubmit the complete task "
                         "with that subagent_type. For an old worker keep its resume id: ccx will hand off its "
@@ -2787,11 +2810,19 @@ def agent_hook(data):
             if isinstance(context.get(key), str):
                 context[key] = context[key].replace("\\", "/")
         prompt = original.get("prompt") or "Continue the assigned task using the previous worker context."
-        # A retried call may already carry an envelope. Always rebuild it from current hook fields.
+        # A retried call may already carry an envelope. Always rebuild it from current hook fields; only its token
+        # (a fresh name for the context record) may be the caller's, so a resubmitted call passes unchanged.
         if prompt.startswith(CONTEXT_PREFIX):
-            prompt = prompt.partition("\n")[2]
+            header, _, prompt = prompt.partition("\n")
+            try:
+                given = json.loads(header[len(CONTEXT_PREFIX):])
+                if (isinstance(given, dict) and set(given) == set(context)
+                        and all(given[k] == context[k] for k in context if k != "token")):
+                    context["token"] = str(uuid.UUID(given["token"]))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
         updated["prompt"] = CONTEXT_PREFIX + json.dumps(context, separators=(",", ":")) + "\n" + prompt
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
+        return _rewrite(data, original, updated, deny)
     except (Exception, SystemExit):
         return deny("Previous worker context or ccx configuration could not be verified. Native delegation "
                     "is blocked; give a configured ccx worker a self-contained task after checking its context.")

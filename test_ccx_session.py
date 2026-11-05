@@ -121,6 +121,28 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(updated["subagent_type"], "ccx-sub", "A direct session relays even a ccx-*-live call")
         self.assertTrue(updated["prompt"].startswith(self.ccx.CONTEXT_PREFIX))
 
+    def test_auto_mode_gets_the_input_to_resubmit_instead_of_a_rewrite(self):
+        # auto mode refuses hook-rewritten calls: the hook denies once with the exact envelope, the resubmitted
+        # call (same envelope, caller's token kept) passes through unchanged
+        main = Path(self.tmp.name) / "main.jsonl"
+        main.write_text("{}\n", encoding="utf-8")
+        call = {"tool_name": "Agent", "transcript_path": str(main), "permission_mode": "auto",
+                "tool_input": {"subagent_type": "ccx-sub", "prompt": "do it", "description": "d"}}
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": ""}):
+            out = self.ccx.agent_hook(call)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+            line = next(x for x in out["permissionDecisionReason"].splitlines() if x.startswith(self.ccx.CONTEXT_PREFIX))
+            again = {**call, "tool_input": {**call["tool_input"], "prompt": line + "\ndo it"}}
+            self.assertEqual(self.ccx.agent_hook(again), {}, "resubmitted call runs as reviewed")
+            forged = json.loads(line[len(self.ccx.CONTEXT_PREFIX):])
+            forged["source"] = str(Path(self.tmp.name) / "other.jsonl")
+            bad = {**call, "tool_input": {**call["tool_input"],
+                                          "prompt": self.ccx.CONTEXT_PREFIX + json.dumps(forged) + "\ndo it"}}
+            self.assertEqual(self.ccx.agent_hook(bad)["hookSpecificOutput"]["permissionDecision"], "deny",
+                             "a caller-made envelope pointing elsewhere is never accepted")
+            plain = self.ccx.agent_hook({**call, "permission_mode": "default"})["hookSpecificOutput"]
+            self.assertTrue(plain["updatedInput"]["prompt"].startswith(self.ccx.CONTEXT_PREFIX), "other modes rewrite")
+
     def test_worker_context_cuts_a_long_unattended_turn_at_a_step(self):
         prompt = {"type": "user", "uuid": "p", "message": {"role": "user", "content": "go"}}
         turn = []
