@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
@@ -204,6 +205,9 @@ def main():
     if legacy.is_dir() and not (target / 'ccx-switch.py').exists():
         migrate(legacy, target)
     install(target, shell_profiles(home), commands, home / '.claude')
+    # Rewrites ~/.claude/agents so the ccx-<name> subagent types exist right after an upgrade.
+    subprocess.run([sys.executable, '-B', '-c', 'import runpy, sys; runpy.run_path(sys.argv[1])["sync_agents"]()',
+                    str(target / 'ccx-switch.py')], check=False)
 
 
 if __name__ == '__main__':
