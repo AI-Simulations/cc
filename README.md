@@ -17,7 +17,7 @@ and Homebrew Python). The `openai-oauth` route also needs Node.js and an
 ## Install
 
 ```sh
-pipx install git+https://github.com/AI-Simulations/cc     # or: uv tool install git+https://github.com/AI-Simulations/cc
+pipx install git+https://github.com/AI-Simulations/ccx     # or: uv tool install git+https://github.com/AI-Simulations/ccx
 ccx-install
 ```
 
@@ -74,6 +74,10 @@ On adapter routes the Model tab switches provider and model live for this sessio
 copy a `ccx … --resume` command that continues the conversation on the new provider. `/model <id>`
 still works the usual way. Without a window (for example, no Tk) the picker falls back to an
 in-terminal grid.
+
+Each provider and model family shows a coloured initials badge. To use a real logo instead, drop a
+24×24 SVG named after the provider or family (`openai.svg`, `deepseek.svg`, …) into
+`~/.config/cc/logos`; it needs Tk 8.7 or newer, which reads SVG.
 
 ![Model tab](docs/picker-model.png)
 ![Presets tab](docs/picker-presets.png)

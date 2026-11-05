@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/AI-Simulations/cc"
+Homepage = "https://github.com/AI-Simulations/ccx"
 
 [project.scripts]
 # Copies the runtime into ~/.config/cc and registers the `ccx` shell function.

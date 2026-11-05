@@ -586,8 +586,6 @@ class PickerTests(unittest.TestCase):
         efforts_done(['low'])
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 
@@ -601,3 +599,19 @@ def test_model_compact_writes_claude_settings(tmp_path, monkeypatch):
     assert json.loads(settings.read_text())['modelSettings']['m'] == {'effortLevel': 'medium', 'autoCompactWindow': 200000}
     assert gui.set_model_compact('m', 'global')[0] and gui.model_compact('m') == 'global'
     assert not gui.set_model_compact('m', '50%')[0] and not gui.set_model_compact('m', '20k')[0]
+
+
+class InitialsTests(unittest.TestCase):
+    def test_initials_take_inner_capitals_else_the_first_two_letters(self):
+        self.assertEqual(gui.initials('DeepSeek'), 'DS')
+        self.assertEqual(gui.initials('commandcode-cli'), 'CM')
+        self.assertEqual(gui.initials('Some'), 'SO')
+        self.assertEqual(gui.initials('GPT'), 'GP')
+        self.assertEqual(gui.initials(''), '?')
+        self.assertTrue(all(len(bits) == 15 for bits in gui.GLYPHS.values()))
+        self.assertEqual(gui.badge_color('official'), gui.BRAND_COLORS['official'])
+        self.assertEqual(gui.badge_color('Kimi'), gui.badge_color('kimi'))
+
+
+if __name__ == '__main__':
+    unittest.main()

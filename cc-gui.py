@@ -104,27 +104,60 @@ FAMILIES = [
     (('phi-',), 'Phi'),
 ]
 
-# A monogram chip per provider, in the provider's own color: the picker's brand marks.
-BRANDS = {
-    'official': ('#d97757', 'C'),      # Claude
-    'commandcode': ('#4f8cff', 'cmdc'),
-    'commandcode-cli': ('#4f8cff', 'cmdc'),
-    'opencode-go': ('#14b8a6', 'OC'),
-    'opencode-zen': ('#14b8a6', 'OC'),
-    'openai-oauth': ('#10a37f', 'AI'),
-    'openrouter': ('#8b5cf6', 'OR'),
-    'nvidia': ('#76b900', 'NV'),
-    'gemini': ('#4285f4', 'G'),
-    'minimax': ('#e64c3c', 'MM'),
-    'ollama-cloud': ('#52525b', 'OL'),
-    'lmstudio': ('#7c3aed', 'LM'),
-    'gpt4free': ('#f59e0b', 'G4'),
+# Badge colours for providers without a mark: each provider's own brand colour.
+BRAND_COLORS = {
+    'official': '#d97757',
+    'commandcode': '#4f8cff',
+    'commandcode-cli': '#4f8cff',
+    'opencode-go': '#14b8a6',
+    'opencode-zen': '#14b8a6',
+    'openai-oauth': '#10a37f',
+    'openrouter': '#8b5cf6',
+    'nvidia': '#76b900',
+    'gemini': '#4285f4',
+    'minimax': '#e64c3c',
+    'ollama-cloud': '#52525b',
+    'lmstudio': '#7c3aed',
+    'gpt4free': '#f59e0b',
 }
 
 
-def brand(name):
-    """A provider's color and monogram; anything unknown gets a neutral tile."""
-    return BRANDS.get(name, (PANEL, (name[:2] or '?').upper()))
+# 3x5 pixel glyphs for initials badges: Tk images cannot draw text, and this needs no font or PIL.
+GLYPHS = dict(zip('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?', (
+    '010101111101101', '110101110101110', '011100100100011', '110101101101110', '111100110100111',
+    '111100110100100', '011100101101011', '101101111101101', '111010010010111', '001001001101010',
+    '101110100110101', '100100100100111', '101111111101101', '110101101101101', '010101101101010',
+    '110101110100100', '010101101111011', '110101110110101', '011100010001110', '111010010010010',
+    '101101101101111', '101101101101010', '101101111111101', '101101010101101', '101101010010010',
+    '111001010100111', '111101101101111', '010110010010111', '110001010100111', '110001010001110',
+    '101101111001001', '111100110001110', '011100110101010', '111001010010010', '010101010101010',
+    '010101011001110', '110001010000010')))
+
+
+# Providers whose names would collide as two letters (opencode, openai, openrouter).
+BADGE_TEXT = {'official': 'C', 'commandcode': 'CM', 'commandcode-cli': 'CM', 'opencode-go': 'OC',
+              'opencode-zen': 'OC', 'openai-oauth': 'AI', 'openrouter': 'OR', 'ollama-cloud': 'OL',
+              'gpt4free': 'G4', 'gemini': 'G', 'minimax': 'MM', 'nvidia': 'NV', 'lmstudio': 'LM',
+              'MiMo': 'XI'}  # Xiaomi's MiMo would read MM, like MiniMax
+
+
+def initials(name):
+    """Two letters for a badge: the capitals of `DeepSeek` (DS), else the first two letters."""
+    if name in BADGE_TEXT:
+        return BADGE_TEXT[name]
+    letters = re.sub(r'[^A-Za-z0-9]', '', name or '')
+    capitals = [c for c in letters[1:] if c.isupper()]
+    return ((letters[:1] + capitals[0]) if capitals else letters[:2]).upper() or '?'
+
+
+def badge_color(name):
+    """A steady, readable hue per name, so a badge keeps its colour between runs."""
+    if name in BRAND_COLORS:
+        return BRAND_COLORS[name]
+    import colorsys
+    import zlib
+    red, green, blue = colorsys.hsv_to_rgb(zlib.crc32((name or '?').lower().encode()) % 360 / 360, 0.45, 0.62)
+    return f'#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}'
 
 
 # Real marks, kept locally in ~/.config/cc/logos (Simple Icons, CC0) and loaded when present.
@@ -844,7 +877,7 @@ class PickerTab(ttk.Frame):
             for model in models:
                 groups.setdefault(model_family(model), []).append(model)
             for family in sorted(groups):
-                logo = self.app.mark(FAMILY_LOGOS.get(family), FAINT)
+                logo = self.app.mark(FAMILY_LOGOS.get(family), family)
                 parent = self.list.insert('', 'end', text=f' {family.upper()}', image=logo,
                                           open=True, tags=('family',))
                 for model in groups[family]:
@@ -894,7 +927,7 @@ class PickerTab(ttk.Frame):
             pass
 
     def insert_model(self, model, parent='', zebra=False):
-        logo = self.app.mark(FAMILY_LOGOS.get(model_family(model)), FAINT)
+        logo = self.app.mark(FAMILY_LOGOS.get(model_family(model)), model_family(model))
         current = bool(self.current and self.current[:2] == [self.provider.get(), model])
         tags = ('zebra',) if zebra else ()
         if current:
@@ -1151,8 +1184,7 @@ class PresetsTab(ttk.Frame):
         self.iids = []
         active = None
         for index, preset in enumerate(self.shown):
-            color, _text = brand(preset['provider'])
-            logo = self.app.mark(PROVIDER_LOGOS.get(preset['provider']), color)
+            logo = self.app.mark(PROVIDER_LOGOS.get(preset['provider']), preset['provider'])
             current = bool(self.current and self.current[:2] == [preset['provider'], preset['model']]
                            and (self.current[2] if len(self.current) > 2 else 'default') == (preset['effort'] or 'default'))
             tags = ('zebra',) if index % 2 else ()
@@ -1597,21 +1629,33 @@ class App(tk.Tk):
         self.logo_cache[key] = image
         return image
 
-    def placeholder(self, color):
-        """A colored dot for a service with no mark, so rows keep their text aligned."""
-        key = f'dot:{color}'
+    def mark(self, slug, name):
+        """The brand mark when ~/.config/cc/logos has one, else an initials badge."""
+        return self.logo(slug) or self.badge(name)
+
+    def badge(self, name):
+        """A round 24px badge with the name's initials, drawn pixel by pixel."""
+        text = initials(name)
+        key = f'badge:{text}:{name}'
         if key in self.logo_cache:
             return self.logo_cache[key]
         image = tk.PhotoImage(width=24, height=24)
+        fill = badge_color(name)
         for y in range(24):
-            for x in range(24):
-                if (x - 11.5) ** 2 + (y - 11.5) ** 2 <= 100:
-                    image.put(color, (x, y))
+            row = [x for x in range(24) if (x - 11.5) ** 2 + (y - 11.5) ** 2 <= 132]
+            if row:
+                image.put(fill, to=(row[0], y, row[-1] + 1, y + 1))
+        # each glyph pixel is 2x2; two glyphs 6px wide with a 2px gap, centred
+        width = len(text) * 6 + (len(text) - 1) * 2
+        left, top = (24 - width) // 2, 7
+        for i, ch in enumerate(text):
+            bits = GLYPHS.get(ch, GLYPHS['?'])
+            for n, bit in enumerate(bits):
+                if bit == '1':
+                    x, y = left + i * 8 + (n % 3) * 2, top + (n // 3) * 2
+                    image.put('white', to=(x, y, x + 2, y + 2))
         self.logo_cache[key] = image
         return image
-
-    def mark(self, slug, color):
-        return self.logo(slug) or self.placeholder(color)
 
     def select(self, key):
         if key not in self.tabs or key == self.selected:
