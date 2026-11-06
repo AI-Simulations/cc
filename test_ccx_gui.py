@@ -508,6 +508,18 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(saved['auto']['model'], 'auto-model')
         editor.close()
 
+    def test_editor_provider_change_loads_the_new_providers_models(self):
+        editor = self.make_editor()
+        fields = editor.fields['subagent']
+        fields['model'].set('first')
+        fields['provider'].set('gamma')
+        editor.change_provider('subagent')
+        self.assertEqual(fields['model'].get(), '')  # the old provider's model never pairs with the new one
+        editor.show_models((True, 'gamma-one\ngamma-two\n'), 'subagent')
+        self.assertEqual(fields['model'].get(), 'gamma-one')
+        self.assertEqual(list(fields['model_box'].cget('values')), ['gamma-one', 'gamma-two'])
+        editor.close()
+
     def test_presets_apply_all_categories_and_stop_on_failure(self):
         tab = self.app.tabs['presets']
         bundle = {key: {'provider': 'beta', 'model': key + '-model', 'effort': 'low'}

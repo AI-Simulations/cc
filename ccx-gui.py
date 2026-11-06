@@ -1332,7 +1332,7 @@ class PresetEditor(tk.Toplevel):
             if key == 'model':
                 # a provider's own preset keeps its provider; a named one may start on any route
                 box.configure(values=[preset['provider']] if preset['name'] == preset['provider'] else helper_providers)
-            box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_models(k))
+            box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.change_provider(k))
             model_box = ttk.Combobox(body, textvariable=fields['model'], width=38)
             model_box.grid(row=row, column=2, padx=(0, 10))
             model_box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_efforts(k))
@@ -1377,6 +1377,14 @@ class PresetEditor(tk.Toplevel):
         if any(fields['loading'] for fields in self.fields.values()):
             self.spinner_job = self.after(90, self.spin_models)
 
+    def change_provider(self, key):
+        """A new provider drops the old provider's model, then fills in the new one's first model."""
+        fields = self.fields[key]
+        fields['model'].set('')
+        fields['effort'].set('default')
+        fields['model_box'].configure(values=[])
+        self.load_models(key)
+
     def load_models(self, key='model'):
         fields = self.fields[key]
         fields['request'] += 1
@@ -1404,6 +1412,9 @@ class PresetEditor(tk.Toplevel):
         ok, out = result
         models = plain_rows(out) if ok else []
         current = fields['model'].get().strip()
+        if not current and models:
+            current = models[0]
+            fields['model'].set(current)
         values = [current, *[m for m in models if m != current]] if current else models
         fields['model_box'].configure(values=values)
         self.status.configure(text=f'{len(models)} models; type any id' if models else 'Type a model id.')
