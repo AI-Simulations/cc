@@ -75,6 +75,35 @@ class CcSessionTests(unittest.TestCase):
         self.assertFalse(self.ccx.subagents_off())
         self.assertEqual(self.ccx.load_agents()["sub"]["effort"], "low")
 
+    def test_router_offers_levels_or_sub_per_session(self):
+        levels = {n: {"provider": "official", "description": f"{n} tasks"} for n in ("easy", "mid", "hard")}
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
+        call = lambda kind: {"tool_name": "Agent", "tool_input": {"subagent_type": kind, "prompt": "x"}}
+        decision = lambda kind: (self.ccx.agent_hook(call(kind)).get("hookSpecificOutput") or {}).get("permissionDecision")
+        self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"], "router on by default")
+        context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("(easy tasks)", context)
+        self.assertIn("cheapest profile", context)
+        self.assertIn("Review every ccx worker", context)
+        self.assertNotIn("ccx-sub:", context)
+        self.assertEqual(decision("ccx-sub"), "deny")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(False)
+        self.assertEqual(list(self.ccx.offered_agents()), ["sub"])
+        self.assertEqual(decision("ccx-easy"), "deny")
+        self.ccx.link_session("sid-r")
+        os.environ["CCX_LAUNCH_ID"] = "launch-b"
+        self.assertTrue(self.ccx.router_on(), "other sessions keep the router")
+        self.ccx.link_session("sid-r")
+        self.assertFalse(self.ccx.router_on(), "a resume keeps the switch")
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps(self.global_agents), encoding="utf-8")
+        self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "no levels: the switch changes nothing")
+
+    def test_review_hook_reminds_only_after_ccx_workers(self):
+        out = self.ccx.review_hook({"tool_name": "Agent", "tool_input": {"subagent_type": "ccx-mid"}})
+        self.assertIn("Review every ccx worker", out["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.ccx.review_hook({"tool_name": "Agent", "tool_input": {"subagent_type": "Explore"}}), {})
+
     def test_new_launch_starts_on_the_saved_provider_preset(self):
         bundle = {"model": {"provider": "official", "model": "claude-opus-5-5", "effort": "medium"},
                   "subagent": {"provider": "official", "model": "claude-haiku-5-5", "effort": "max"},

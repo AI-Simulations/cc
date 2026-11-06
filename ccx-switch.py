@@ -1773,7 +1773,7 @@ def link_session(sid):
     except (OSError, ValueError):
         return
     def kept(e):
-        return isinstance(e, dict) and (isinstance(e.get("agents"), dict) or e.get("off"))
+        return isinstance(e, dict) and (isinstance(e.get("agents"), dict) or e.get("off") or "router" in e)
     entry = data.get(launch)
     if kept(entry):
         if sid in entry.setdefault("sessions", []):
@@ -1784,7 +1784,7 @@ def link_session(sid):
         if not old:
             return
         last = max(old, key=lambda e: e.get("at", 0))
-        data[launch] = {**{k: last[k] for k in ("agents", "off") if k in last}, "sessions": [sid], "at": time.time()}
+        data[launch] = {**{k: last[k] for k in ("agents", "off", "router") if k in last}, "sessions": [sid], "at": time.time()}
     write_json(SESSION_AGENTS_FILE, data, indent=1)
 
 
@@ -1801,22 +1801,66 @@ def subagents_off(launch=None):
     return isinstance(entry, dict) and bool(entry.get("off"))
 
 
-def set_subagents_off(off):
-    """ccx agents off|on: this session only; its profiles stay as they were for when it turns them back on."""
+def _set_session_flag(key, value, command):
+    """One flag in this session's entry; None removes it. The profiles stay as they were."""
     launch = session_launch()
     if not launch:
-        die("ccx agents on|off works only inside a Claude session.")
+        die(f"ccx agents {command} works only inside a Claude session.")
     try:
         with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
         data = {}
     entry = data.get(launch) if isinstance(data.get(launch), dict) else {}
-    entry = {k: v for k, v in entry.items() if k != "off"}
-    data[launch] = {**entry, **({"off": True} if off else {}), "at": time.time()}
+    entry = {k: v for k, v in entry.items() if k != key}
+    data[launch] = {**entry, **({key: value} if value is not None else {}), "at": time.time()}
     write_json(SESSION_AGENTS_FILE, data, indent=1)
+
+
+def set_subagents_off(off):
+    """ccx agents off|on: this session only; its profiles stay as they were for when it turns them back on."""
+    _set_session_flag("off", True if off else None, "on|off")
     print("Subagents off for this session: the main model does all the work." if off
           else "Subagents on for this session.")
+
+
+# The router's levels: with the router on, the main model sends each task to the level that fits its
+# difficulty instead of the default `sub` profile; off, it gets `sub` (and any other profile) only.
+ROUTER_LEVELS = ("easy", "mid", "hard")
+
+
+def router_on(launch=None):
+    """This session's router switch; on unless the session turned it off."""
+    launch = launch or session_launch()
+    try:
+        with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
+            entry = json.load(f).get(launch) if launch else None
+    except (OSError, ValueError, AttributeError):
+        entry = None
+    return not (isinstance(entry, dict) and entry.get("router") is False)
+
+
+def set_router(on):
+    _set_session_flag("router", None if on else False, "router on|off")
+    print(router_text())
+
+
+def router_text():
+    levels = [n for n in ROUTER_LEVELS if n in load_agents()]
+    if not levels:
+        return f"Router: no level profiles ({', '.join(ROUTER_LEVELS)}); add them with `ccx agents set <level> ...`."
+    return (f"Router on: tasks go to {', '.join('ccx-' + n for n in levels)} by difficulty." if router_on()
+            else "Router off: tasks go to ccx-sub.")
+
+
+def offered_agents():
+    """The profiles the main model may call now: the router's levels or `sub`, never both."""
+    profiles = load_agents()
+    if not any(n in ROUTER_LEVELS for n in profiles):
+        return profiles
+    on = router_on()
+    kept = {n: a for n, a in profiles.items() if (n != "sub" if on else n not in ROUTER_LEVELS)}
+    return kept or profiles
 
 
 def all_agent_names():
@@ -2778,7 +2822,7 @@ def agent_hook(data):
         return deny("Subagents are off for this session. Do the work yourself in the main session; "
                     "do not call Agent or Task again. The user can turn them back on in /model's Subagent tab.")
     try:
-        profiles = load_agents()
+        profiles = offered_agents()
         if not profiles:
             return deny("No configured ccx subagents. Configure `ccx agents`; native delegation is blocked.")
         choices = ", ".join("ccx-" + name for name in profiles)
@@ -2944,6 +2988,17 @@ def subagent_stop(data):
     return {}
 
 
+REVIEW_RULE = ("Review every ccx worker's result before you rely on it or report it: at least at a glance, check its "
+               "changes (git diff/status or the files it names) and claims against the task, and fix or redo what is wrong.")
+
+
+def review_hook(data):
+    """PostToolUse on Agent: the main model reviews what a ccx worker did before it builds on it."""
+    if os.environ.get("CCX_AGENT_CHILD") == "1" or not str((data.get("tool_input") or {}).get("subagent_type", "")).startswith("ccx-"):
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": REVIEW_RULE}}
+
+
 def hook_context(data):
     if os.environ.get("CCX_AGENT_CHILD") == "1":
         return {}
@@ -2955,7 +3010,7 @@ def hook_context(data):
                 "additionalContext": "Subagents are off for this session: do all work in the main session "
                 "with your own tools. Do not call Agent or Task; every such call is blocked."
                 + ("\n\n" + orphans if orphans else "")}}
-    profiles = load_agents()
+    profiles = offered_agents()
     choices = "; ".join(f"ccx-{name}: {agent_summary(a)}" + (f" ({a['description']})" if a.get("description") else "")
                         for name, a in profiles.items())
     if len(profiles) > 1:  # several profiles act as a router: the main model picks per task
@@ -2964,7 +3019,7 @@ def hook_context(data):
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
             "additionalContext": "Delegate only through configured ccx subagents: " + (choices or "none configured") +
             ". Native fork/general-purpose/custom worker calls are blocked. Use a ccx-* subagent_type and "
-            "a self-contained task; ccx copies only the recent conversation and project memory. To continue an old worker, "
+            "a self-contained task; ccx copies only the recent conversation and project memory. " + REVIEW_RULE + " To continue an old worker, "
             "use a configured ccx-* type with its resume id; do not restart it as a native fork."
             + ("\n\n" + orphans if orphans else "")}}
 
@@ -3094,7 +3149,7 @@ def agent_statusline(data):
 def main():
     global _STARTUP_LAUNCH
     args = sys.argv[1:]
-    if args[:1] in (["hook-agent"], ["hook-context"], ["hook-command"], ["agent-statusline"]):
+    if args[:1] in (["hook-agent"], ["hook-context"], ["hook-command"], ["hook-review"], ["agent-statusline"]):
         try:
             data = json.load(sys.stdin)
             if not isinstance(data, dict):
@@ -3103,7 +3158,7 @@ def main():
                 for row in agent_statusline(data):
                     print(json.dumps(row))
             else:
-                handler = {"hook-agent": agent_hook, "hook-command": hook_command}.get(args[0], hook_context)
+                handler = {"hook-agent": agent_hook, "hook-command": hook_command, "hook-review": review_hook}.get(args[0], hook_context)
                 print(json.dumps(handler(data)))
         except (Exception, SystemExit):
             if args[0] == "hook-agent":
@@ -3153,6 +3208,12 @@ def main():
         return save_agents(agents)
     if args[:2] == ["agents", "models"] and len(args) in (2, 3, 4):
         return agent_models(args[2].lower() if len(args) >= 3 else None, *args[3:])
+    if args[:2] == ["agents", "router"] and len(args) <= 3:
+        if len(args) == 2:
+            return print(router_text())
+        if args[2] not in ("on", "off"):
+            die("Usage: ccx agents router [on|off]")
+        return set_router(args[2] == "on")
     if args in (["agents", "off"], ["agents", "on"]):
         return set_subagents_off(args[1] == "off")
     if args == ["agents", "providers"]:
@@ -3196,7 +3257,7 @@ def main():
         print("ccx --resume [session-id-or-name] | ccx --continue | ccx status")
         print("ccx agents (edit menu, then write subagents) | ccx agents set <name> [--provider P] [--model M]")
         print("    [--effort E|default] [--autocompact N|default] [--description D] | ccx agents models <name> [provider]")
-        print("    | ccx agents remove <name>")
+        print("    | ccx agents remove <name> | ccx agents router [on|off]")
         print("ccx agent <name> [same options, this run only] [task, else stdin]")
         print("Every launch, resume included, asks for the provider and model unless both are given.")
         return

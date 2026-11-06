@@ -110,6 +110,7 @@ def install(target, profiles, commands=None, claude=None):
                                       ('SessionStart', None, 'hook-context'),
                                       ('UserPromptSubmit', None, 'hook-context'),
                                       ('SubagentStop', '^ccx-.*', 'hook-subagent-stop'),
+                                      ('PostToolUse', 'Agent|Task', 'hook-review'),
                                       ('UserPromptExpansion', 'fallback', 'hook-command')]:
             groups = hooks.setdefault(event, [])
             # Replace only our own entries; preserve every unrelated hook and matcher.

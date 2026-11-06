@@ -77,7 +77,13 @@ test('the ring targets sit around the cursor cell: one each way, the tab ends on
   const top = gridLayout({ ...g, col: 0, tabs: [{ ...g.tabs[0]!, cols: [col('Provider', 3, 0), col('Model', 20, 10), col('Effort', 4, 2)] }, g.tabs[1]!] }, 100, 5)
   expect(top.u.y).toBe(3)
   expect([top.l.x, top.l.label]).toEqual([0, ' '])
-  expect(Object.values(RING_KEYS).map(k => k[0]).sort()).toEqual(['down', 'find', 'left', 'right', 'sort', 'tab', 'tab', 'up'])
+  expect(Object.values(RING_KEYS).map(k => k[0]).sort()).toEqual(['down', 'find', 'left', 'right', 'router', 'sort', 'tab', 'tab', 'up'])
+  // the router switch shows on the Subagent tab only, between the search field and the sort toggle
+  expect(L.router.label).toBe('')
+  const sub = gridLayout({ ...g, router: true, tabs: [{ ...g.tabs[0]!, name: 'Subagent' as const }, g.tabs[1]!] }, 100, 5)
+  expect(sub.router.label).toBe('router: on')
+  expect(sub.router.x).toBeGreaterThan(sub.filter.x + sub.filter.width - 1)
+  expect(sub.router.x + sub.router.label.length).toBeLessThan(sub.sort.x)
 })
 
 test('a pick away from the cursor keeps its mark, and narrow columns leave the Compact column on screen', async () => {

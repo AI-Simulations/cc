@@ -7,7 +7,7 @@ export type GridTab = { name: 'Model' | 'Subagent' | 'Auto' | 'Tools' | 'Fallbac
 // The whole /model menu; `room` is the list rows each column draws.
 // `tick` changes only to redraw the cursor cell's scrolling name. `query` filters the model list by
 // name, `sort` orders it by provider listing or by model family.
-export type Grid = { tab: number; col: number; tabs: GridTab[]; room: number; status?: string; tick?: number; query?: string; sort?: 'family' }
+export type Grid = { tab: number; col: number; tabs: GridTab[]; room: number; status?: string; tick?: number; query?: string; sort?: 'family'; router?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

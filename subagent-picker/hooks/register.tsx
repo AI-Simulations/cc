@@ -527,9 +527,9 @@ async function refill($: EngineInterface, ti: number, changed: number) {
 }
 
 async function buildGrid($: EngineInterface, start: GridTab['name'], who?: string): Promise<Grid> {
-  const [route, fallback, profiles, auto, tools, preset] = await Promise.all([
+  const [route, fallback, profiles, auto, tools, preset, router] = await Promise.all([
     ccx($, ['route']), ccx($, ['fallback']), loadProfiles($), ccx($, ['helper', 'auto']), ccx($, ['helper', 'tools']),
-    ccx($, ['presets']),
+    ccx($, ['presets']), ccx($, ['agents', 'router']),
   ])
   autoTarget = auto.ok ? parseTarget(auto.out, 'Helper') : undefined
   toolsTarget = tools.ok ? parseTarget(tools.out, 'Helper') : undefined
@@ -570,6 +570,8 @@ async function buildGrid($: EngineInterface, start: GridTab['name'], who?: strin
   return {
     tab, col: Math.max(0, colIndex(tabs[tab]!, 'Provider')), tabs, room: 10,
     ...(viewQuery ? { query: viewQuery } : {}), ...(viewSort ? { sort: viewSort } : {}),
+    // the Subagent tab's router switch, drawn only when the level profiles exist
+    ...(router.ok && /^Router o(n|ff)\b/.test(router.out) ? { router: router.out.startsWith('Router on') } : {}),
   }
 }
 
@@ -634,7 +636,7 @@ async function takeGridKeys($: EngineInterface) {
 // between the two tab targets, and one target sits above, below, left and right of it.
 export const RING_KEYS: Record<string, [string, boolean]> = {
   'T-': ['tab', true], 'T+': ['tab', false], U: ['up', false], D: ['down', false], L: ['left', false], R: ['right', false],
-  F: ['find', false], S: ['sort', false],
+  F: ['find', false], S: ['sort', false], X: ['router', false],
 }
 
 // Focus the search field: its typing filters the model list, and arrows then walk the result.
@@ -651,6 +653,12 @@ async function onGridKey($: EngineInterface, key: string, shift: boolean) {
   const t = g.tabs[g.tab]!
   if (key === 'find') return focusFind($)
   if (key === 'sort') return toggleSort($)
+  if (key === 'router') {
+    if (t.name !== 'Subagent' || g.router === undefined) return
+    const { ok, out } = await ccx($, ['agents', 'router', g.router ? 'off' : 'on'])
+    const said = out.split(/\r?\n/).filter(Boolean).pop() ?? out
+    return update($, grid, x => (x ? { ...x, ...(ok ? { router: !g.router } : {}), status: ok ? `✔ ${said}` : said } : x))
+  }
   if (key === 'tab') {
     const tab = (g.tab + (shift ? -1 : 1) + g.tabs.length) % g.tabs.length
     return update($, grid, x => (x ? { ...x, tab, col: Math.max(0, colIndex(x.tabs[tab]!, 'Provider')), status: undefined } : x))
@@ -835,13 +843,15 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   }
   lines.push({ text: '' })
   if (g.status) lines.push({ text: fit(g.status, width), style: { color: g.status.startsWith('✔') ? 'success' : 'warning' } })
-  const help = 'Tab tabs · ←/→ column · ↑/↓ move · Space pick · Enter set · f find · s sort · Esc close'
+  const help = `Tab tabs · ←/→ column · ↑/↓ move · Space pick · Enter set · f find · s sort${t.name === 'Subagent' && g.router !== undefined ? ' · r router' : ''} · Esc close`
   for (let at = 0; at < help.length; at += width) lines.push({ text: help.slice(at, at + width), style: { dimColor: true } })
   // The find field and the sort toggle sit on the blank line, out of the arrows' way.
   const sortLabel = `sort: ${g.sort === 'family' ? 'family' : 'listed'}`
   const sortSpot = { x: Math.max(MARGIN + 24, width - sortLabel.length - 2), y: 2, label: sortLabel }
   const findSpot = { x: MARGIN, y: 2, label: 'find' }
-  const filterSpot = { x: MARGIN + 8, y: 2, width: Math.max(8, sortSpot.x - MARGIN - 10) }
+  const routerLabel = t.name === 'Subagent' && g.router !== undefined ? `router: ${g.router ? 'on' : 'off'}` : ''
+  const routerSpot = { x: routerLabel ? Math.max(MARGIN + 20, sortSpot.x - routerLabel.length - 6) : sortSpot.x, y: 2, label: routerLabel }
+  const filterSpot = { x: MARGIN + 8, y: 2, width: Math.max(8, routerSpot.x - MARGIN - 10) }
   // where an index of column ci is drawn; an empty column's note sits on its first row
   const spot = (ci: number, i: number): Spot => ({ x: x[ci]!, y: first(ci) + Math.max(0, i - tops[ci]!), label: cell(ci, i) })
   const blank = (sx: number, y: number): Spot => ({ x: sx, y, label: ' ' })
@@ -850,7 +860,7 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   // a tab without columns still holds the ring, on its now line
   if (!c) {
     const here = { x: MARGIN, y: 1, label: fit(t.now || ' ', Math.max(1, width - MARGIN - 2)) }
-    return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls: false, c: here, u: blank(MARGIN, 0), d: blank(MARGIN, 2), l: blank(0, 1), r: blank(width - 1, 1), find: findSpot, filter: filterSpot, sort: sortSpot }
+    return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls: false, c: here, u: blank(MARGIN, 0), d: blank(MARGIN, 2), l: blank(0, 1), r: blank(width - 1, 1), find: findSpot, filter: filterSpot, sort: sortSpot, router: routerSpot }
   }
   const at = c.rows.length ? c.at : 0
   const here = spot(col, at)
@@ -862,7 +872,7 @@ export function gridLayout(g: Grid, width: number, room: number, tick = 0) {
   const r = wrapped ? blank(here.x + w[col]!, here.y) : col < t.cols.length - 1 ? side(col + 1) : blank(x[col]! + w[col]! + 1, here.y)
   const cur = c.rows[at]
   const scrolls = !!cur && `${cur.label ?? cur.value}${cur.value === c.current ? ' ✔' : ''}`.length > w[col]! - 2
-  return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls, c: here, u, d, l, r, find: findSpot, filter: filterSpot, sort: sortSpot }
+  return { lines, room, tabEnd: Math.min(strip.length + 1, width - 1), scrolls, c: here, u, d, l, r, find: findSpot, filter: filterSpot, sort: sortSpot, router: routerSpot }
 }
 
 async function warm($: EngineInterface) {
@@ -1006,6 +1016,7 @@ export const register: Register = on => {
         {at('R', L.r.x, L.r.y, L.r.label)}
         {hot('F', L.find.x, L.find.y, L.find.label, 'f')}
         {hot('S', L.sort.x, L.sort.y, L.sort.label, 's')}
+        {L.router.label && hot('X', L.router.x, L.router.y, L.router.label, 'r')}
         {Input !== undefined && (
           <Box key="at:Q" position="absolute" left={L.filter.x} top={L.filter.y} width={L.filter.width} height={1} flexShrink={0} overflow="hidden">
             <Input key="Q" placeholder="search models" value={g.query ?? ''}

@@ -588,6 +588,11 @@ class PickerTab(ttk.Frame):
             ttk.Checkbutton(bar, text='Use subagents in this session', variable=self.use_agents,
                             command=self.toggle_agents,
                             state='normal' if session_launch_id() else 'disabled').pack(side='right')
+            # Router: each task goes to the easy/mid/hard profile that fits it, instead of `sub`.
+            self.use_router = tk.BooleanVar(value=session_entry().get('router') is not False)
+            ttk.Checkbutton(bar, text='Route by difficulty (easy/mid/hard)', variable=self.use_router,
+                            command=self.toggle_router,
+                            state='normal' if session_launch_id() else 'disabled').pack(side='right', padx=(0, 16))
 
         pick = ttk.Frame(self)
         pick.pack(fill='x', padx=18, pady=(2, 10))
@@ -663,6 +668,12 @@ class PickerTab(ttk.Frame):
 
         self.now = ttk.Label(self, text='', style='Faint.TLabel')
         self.now.pack(fill='x', padx=18, pady=(0, 12))
+
+    def toggle_router(self):
+        ok, out = run_ccx('agents', 'router', 'on' if self.use_router.get() else 'off')
+        if not ok:
+            self.use_router.set(not self.use_router.get())
+        self.status.configure(text=out)
 
     def toggle_agents(self):
         ok, out = run_ccx('agents', 'on' if self.use_agents.get() else 'off')

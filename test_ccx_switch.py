@@ -24,6 +24,8 @@ ccx = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ccx)
 # Never write the real effort cache: the fake catalogs below would replace it for a day.
 ccx.EFFORTS_FILE = os.path.join(tempfile.mkdtemp(), 'efforts.json')
+# Tests that set no routes file of their own once wrote helper rows into the real ~/.config/ccx/routes.json.
+ccx.ROUTES_FILE = os.path.join(tempfile.mkdtemp(), 'routes.json')
 # Keep real credentials out of mock failure output, and make runs inside Claude Code match plain runs.
 for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN|SECRET|PASSWORD', k.upper())]:
     del os.environ[_name]
