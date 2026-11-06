@@ -912,19 +912,22 @@ def mode_row(session_id, now):
     main = route.get("provider") if route.get("model") else ccx_main_provider(quota_source())
     profiles = ccx_profiles(session_id)
     # a fresh session (no transcript or reply yet) still shows $0.00 and the week on its main route
-    spent = {CCX_QUOTA_SOURCES.get(main) or ("hyper" if main == "hyper" else main or "?"): 0.0}
-    runs = [(main, transcript_cost(paths[0]))] if paths else []
+    spent = {CCX_QUOTA_SOURCES.get(main) or ("hyper" if main == "hyper" else main or "?"): [0.0, 0.0]}  # [total, subagents]
+    runs = [(main, transcript_cost(paths[0]), False)] if paths else []
     # a native subagent (Explore, general-purpose) runs on the main route; a ccx profile on its own
-    runs += [((profiles.get(name) or {}).get("provider", main) if name in profiles else main, cost)
+    runs += [((profiles.get(name) or {}).get("provider", main) if name in profiles else main, cost, True)
              for name, cost in subagent_costs(paths[0]).items()] if paths else []
-    for provider, cost in runs:
+    for provider, cost, sub in runs:
         if cost.get("sent") or cost.get("priced"):
             key = CCX_QUOTA_SOURCES.get(provider) or ("hyper" if provider == "hyper" else provider or "?")
-            spent[key] = spent.get(key, 0.0) + cost.get("usd", 0.0)
+            row = spent.setdefault(key, [0.0, 0.0])
+            row[0] += cost.get("usd", 0.0)
+            row[1] += cost.get("usd", 0.0) if sub else 0.0
     parts = []
-    for key, usd in spent.items():
+    for key, (usd, sub) in spent.items():
         label, week = provider_week(key, now) if key in QUOTA_FETCHERS or key == "anthropic" else (key, "")
-        parts.append(f"≈ ${usd:,.2f} ({week or label})")
+        # the picker draws everything after the total dim, so the subagents' share reads as a dimmed aside
+        parts.append(f"≈ ${usd:,.2f}{f' · sub {money(sub)}' if sub >= 0.005 else ''} ({week or label})")
     return " · ".join(parts)
 
 
@@ -1083,7 +1086,8 @@ def render(d):
                    + (f" {YELLOW}↪ fallback active{RESET}" if name in moved else "")]
             if used.get("ctx"):
                 # shortcut: the window is the main session's; a subagent model with another window misreads it
-                seg.append(f"{DIM}{k(used['ctx'])}/{k(size)}{RESET}{ac}{cached_text(used)}")
+                seg.append(f"{DIM}{k(used['ctx'])}/{k(size)}{RESET}{ac}{cached_text(used)}"
+                           + (f" {DIM}{money(used['usd'])}{RESET}" if used.get("priced") else ""))
             sub_source = CCX_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:
                 if sub_source == 'anthropic':

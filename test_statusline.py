@@ -618,3 +618,18 @@ class FreshSessionModeRowTests(unittest.TestCase):
                 patch.object(statusline, "provider_week", lambda key, now: ("Ultra", "7d $9.00/$90 │ Ultra")):
             row = statusline.mode_row("00000000-0000-0000-0000-000000000000", time.time())
         self.assertEqual(row, "≈ $0.00 (7d $9.00/$90 │ Ultra)")
+
+    def test_mode_row_splits_out_subagent_share(self):
+        sid = "00000000-0000-0000-0000-000000000001"
+        priced = lambda usd: {"usd": usd, "sent": 1, "read": 0, "priced": True}
+        with tempfile.TemporaryDirectory() as home, \
+                patch.object(statusline.os.path, "expanduser", lambda p: p.replace("~", home)), \
+                patch.dict(os.environ, {"CCX_LAUNCH_ID": ""}), \
+                patch.object(statusline, "ccx_main_provider", lambda source: "official"), \
+                patch.object(statusline, "transcript_cost", lambda path: priced(9.0)), \
+                patch.object(statusline, "subagent_costs", lambda path: {"sub": priced(3.5), "Explore": priced(0.5)}), \
+                patch.object(statusline, "provider_week", lambda key, now: ("Ultra", "7d $9.00/$90 │ Ultra")):
+            os.makedirs(os.path.join(home, ".claude", "projects", "p"))
+            open(os.path.join(home, ".claude", "projects", "p", sid + ".jsonl"), "w").close()
+            row = statusline.mode_row(sid, time.time())
+        self.assertEqual(row, "≈ $13.00 · sub $4.00 (7d $9.00/$90 │ Ultra)")

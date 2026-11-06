@@ -873,8 +873,9 @@ def _arrow_menu(title: str, rows: list[tuple[str, str]], default: str, footer: s
 
     def redraw(lines: list[str]) -> None:
         nonlocal drawn
-        # Back to the title line, clear everything below it, draw again.
-        print((f"\033[{drawn}A" if drawn else "") + "\r\033[J" + "\n".join(lines), flush=True)
+        # Back to the title line, clear everything below it, draw again. Auto-wrap is off while drawing
+        # (?7l/?7h): a row wider than the window is cut instead of taking two rows the cursor-up misses.
+        print((f"\033[{drawn}A" if drawn else "") + "\r\033[J\033[?7l" + "\n".join(lines) + "\033[?7h", flush=True)
         drawn = len(lines)
 
     def done(picked: str) -> str:
