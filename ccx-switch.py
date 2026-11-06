@@ -1089,6 +1089,51 @@ def _ensure_anthropic_proxy():
 # ---------------- menu ----------------
 # Same arrow menus, colors and model facts as book writer (ai_suite.providers).
 
+def _target_text(t):
+    if not t or t.get("provider") in (None, "off"):
+        return "off"
+    return f'{t["provider"]}/{t.get("model", "")}' + (f' · {t["effort"]}' if t.get("effort") else "")
+
+
+def preset_menu():
+    """The launch's first screen: a saved preset launches at once; "edit" and "manual" lead on.
+    None (the manual menus) off a console or with no saved preset."""
+    saved = [n for n in load_presets() if n in PROVIDERS and saved_bundle(n)]
+    if not saved:
+        return None  # nothing saved yet: straight to the manual menus
+    width = max(map(len, saved or [""]))
+    rows = [(n, f"{n:<{width}}  {_target_text(saved_bundle(n)['model'])}  "
+                + catalog._color(f"sub {_target_text(saved_bundle(n)['subagent'])}  fallback {_target_text(saved_bundle(n)['fallback'])}", "2"))
+            for n in saved]
+    rows += [("edit", "edit a preset…"), ("manual", "select manually…")]
+    last = load_state().get("provider")
+    return catalog._arrow_menu("Preset", rows, last if last in saved else rows[0][0], name="Preset", back=True)
+
+
+def edit_preset():
+    """Main model, effort, fallback and subagent menus for one provider, saved as its preset (auto/tools kept)."""
+    name = provider_menu(load_state().get("provider"), "preset")
+    if name not in PROVIDERS:
+        return
+    cur = saved_bundle(name) or {}
+    main_t = cur.get("model") or {}
+    model = model_menu(name, main_t.get("model"))
+    effort = effort_menu(main_t.get("effort") or default_effort(name, model) or "")
+    fallback = fallback_menu(name, preset_fallback(name)) if name in FALLBACK_ROUTES else None
+    sub_t = cur.get("subagent") or {}
+    sub_p = provider_menu(sub_t.get("provider") or name, "subagent")
+    sub_m = model_menu(sub_p, sub_t.get("model") if sub_t.get("provider") == sub_p else None, "subagent")
+    sub_e = effort_menu(sub_t.get("effort") or default_effort(sub_p, sub_m) or "")
+    bundle = preset_bundle({"provider": name, "model": model, "effort": effort or None})
+    target = lambda p, m, e: {"provider": p, "model": m, **({"effort": e} if e else {})}
+    saved = load_presets()
+    saved[name] = {"model": model, **({"effort": effort} if effort else {}), "settings": {
+        "model": target(name, model, effort), "subagent": target(sub_p, sub_m, sub_e),
+        "fallback": fallback or {"provider": "off"}, "auto": bundle["auto"], "tools": bundle["tools"]}}
+    save_presets(saved)
+    print(f"Preset saved: {name}")
+
+
 def provider_menu(default=None, role="", skip="", only=None):
     """skip: label of a leading "skip" row (returned as "skip"); only: the providers offered."""
     state = load_state()
@@ -3181,7 +3226,7 @@ def main():
         # Asked with the menus only; a typed `ccx <provider> <model>` passes --effort itself.
         menus = len(pos) < 2 and not no_run
         effort = None
-        steps = ([] if pos else ["provider"]) + (["model"] if len(pos) < 2 else [])
+        steps = ([] if pos else ["preset", "provider"]) + (["model"] if len(pos) < 2 else [])
         if menus and not any(a == "--effort" or a.startswith("--effort=") for a in claude_args):
             steps.append("effort")
         if menus and autocompact is None:
@@ -3197,7 +3242,25 @@ def main():
         step = 0
         while step < len(steps):
             try:
-                if steps[step] == "provider":
+                if steps[step] == "preset":
+                    picked = preset_menu()
+                    if picked is None and backing:
+                        raise catalog.MenuBack  # no preset screen was shown: Esc leaves the launch
+                    if picked == "edit":
+                        try:
+                            edit_preset()
+                        except catalog.MenuBack:
+                            pass  # Esc inside the editor: back to the preset list
+                        continue
+                    if picked not in (None, "manual"):
+                        bundle = saved_bundle(picked)
+                        name, model_id = picked, bundle["model"]["model"]
+                        effort = bundle["model"].get("effort") or default_effort(name, model_id)
+                        fallback = preset_fallback(name)
+                        if autocompact is None:
+                            autocompact = load_state().get("autocompact") or None
+                        break  # subagents/helpers come from the preset in apply()
+                elif steps[step] == "provider":
                     picked = provider_menu(name)
                     if picked not in PROVIDERS:
                         die(f"Unknown provider '{picked}'. Valid: {', '.join(sorted(PROVIDERS))}, status")

@@ -620,3 +620,28 @@ with tempfile.TemporaryDirectory() as tmp:
                 raise AssertionError('missing picker script accepted')
         assert not popen.called
 print('gui launcher ok')
+
+# `ccx` with no provider opens on the preset list: a preset launches at once, edit saves one, manual walks the menus.
+_bundle = {'model': {'provider': 'official', 'model': 'claude-opus-5-5', 'effort': 'medium'},
+           'subagent': {'provider': 'official', 'model': 'claude-haiku-5-5', 'effort': 'xhigh'},
+           'fallback': {'provider': 'off'}, 'auto': {'provider': 'off'}, 'tools': {'provider': 'off'}}
+with tempfile.TemporaryDirectory() as _d, patch.object(ccx, 'presets_path', return_value=os.path.join(_d, 'p.json')), \
+     patch.object(ccx, 'load_state', return_value={}), patch.object(ccx, 'apply') as _apply, \
+     patch.object(ccx.sys, 'argv', ['ccx']), contextlib.redirect_stdout(io.StringIO()):
+    ccx.save_presets({'official': {'model': 'claude-opus-5-5', 'settings': _bundle}})
+    with patch.object(ccx, 'preset_menu', return_value='official'), patch.object(ccx, 'provider_menu') as _pm:
+        ccx.main()
+    assert not _pm.called and _apply.call_args.args[:2] == ('official', 'claude-opus-5-5') \
+        and _apply.call_args.kwargs['effort'] == 'medium', 'A preset pick launches without the other menus'
+    with patch.object(ccx, 'preset_menu', side_effect=['edit', 'official']), \
+         patch.object(ccx, 'provider_menu', side_effect=['official', 'official']), \
+         patch.object(ccx, 'model_menu', side_effect=['claude-sonnet-5-5', 'claude-haiku-5-5']), \
+         patch.object(ccx, 'effort_menu', side_effect=['high', 'low']):
+        ccx.main()
+    saved = ccx.saved_bundle('official')
+    assert saved['model'] == {'provider': 'official', 'model': 'claude-sonnet-5-5', 'effort': 'high'} \
+        and saved['subagent']['effort'] == 'low' and _apply.call_args.args[1] == 'claude-sonnet-5-5', 'Edit saves, then the edited preset launches'
+    with patch.object(ccx, 'preset_menu', return_value='manual'), patch.object(ccx, 'provider_menu', side_effect=ccx.catalog.MenuBack):
+        with patch.object(ccx, 'preset_menu', side_effect=['manual', ccx.catalog.MenuBack]):
+            ccx.main()
+print('preset launch menu ok')

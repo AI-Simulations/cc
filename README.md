@@ -40,7 +40,8 @@ has no key, `ccx` asks once and saves it to `keys.json`, readable only by you.
 ## Usage
 
 ```sh
-ccx                                   # menus: provider, model, effort, auto-compact, subagent, fallback
+ccx                                   # saved presets (Enter launches), edit one, or manual menus:
+                                      # provider, model, effort, auto-compact, subagent, fallback
 ccx official                          # normal Claude login
 ccx openai-oauth gpt-6.1-sol          # ChatGPT account through the adapter
 ccx commandcode-cli deepseek/deepseek-v4.1-flash
