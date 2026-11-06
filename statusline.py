@@ -994,7 +994,16 @@ def render(d):
         account = stored.get("oauthAccount") or {}
         uuid = account.get("accountUuid")
         if limits:
+            before = ((load_json("quota.json").get("rate_limits") or {}).get("seven_day") or {}).get("used_percentage")
             save_json("quota.json", {"rate_limits": limits, "at": now, "account": uuid})
+            week = (limits.get("seven_day") or {}).get("used_percentage")
+            if week != before:
+                # each step of the weekly %, to fit per-model quota cost against transcript spend later
+                try:
+                    with open(os.path.join(STATE_DIR, "pct-log.jsonl"), "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"at": now, "account": uuid, "seven_day": week}) + "\n")
+                except OSError:
+                    pass
         elif not on_api:
             saved = load_json("quota.json")
             limits, cached_at = saved.get("rate_limits"), saved.get("at")
