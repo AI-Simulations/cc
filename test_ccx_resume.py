@@ -598,6 +598,8 @@ class NavigationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(ccx, 'APPLY_FILE', str(Path(tmp) / 'apply.ps1')))
             stack.enter_context(patch.object(ccx, 'load_state', return_value={}))
+            # never the real presets.json: an Enter on the preset screen's edit row would overwrite it
+            stack.enter_context(patch.object(ccx, 'presets_path', return_value=str(Path(tmp) / 'presets.json')))
             stack.enter_context(patch.object(ccx, 'load_agents', return_value=agents or {}))
             stack.enter_context(patch.object(ccx, '_latest_session_agents', return_value=None))
             save = stack.enter_context(patch.object(ccx, 'save_agents'))

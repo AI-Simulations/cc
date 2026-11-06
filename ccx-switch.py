@@ -1095,7 +1095,7 @@ def _target_text(t):
     return f'{t["provider"]}/{t.get("model", "")}' + (f' · {t["effort"]}' if t.get("effort") else "")
 
 
-def preset_menu():
+def preset_menu(default=None):
     """The launch's first screen: a saved preset launches at once; "edit" and "manual" lead on.
     None (the manual menus) off a console or with no saved preset."""
     saved = [n for n in load_presets() if n in PROVIDERS and saved_bundle(n)]
@@ -1106,8 +1106,8 @@ def preset_menu():
                 + catalog._color(f"sub {_target_text(saved_bundle(n)['subagent'])}  fallback {_target_text(saved_bundle(n)['fallback'])}", "2"))
             for n in saved]
     rows += [("edit", "edit a preset…"), ("manual", "select manually…")]
-    last = load_state().get("provider")
-    return catalog._arrow_menu("Preset", rows, last if last in saved else rows[0][0], name="Preset", back=True)
+    default = default if default in saved else load_state().get("provider")
+    return catalog._arrow_menu("Preset", rows, default if default in saved else rows[0][0], name="Preset", back=True)
 
 
 def edit_preset():
@@ -3226,7 +3226,8 @@ def main():
         # Asked with the menus only; a typed `ccx <provider> <model>` passes --effort itself.
         menus = len(pos) < 2 and not no_run
         effort = None
-        steps = ([] if pos else ["preset", "provider"]) + (["model"] if len(pos) < 2 else [])
+        # `claude` runs `ccx official`: it opens on the presets too, with the cursor on that provider's
+        steps = (["preset"] if menus else []) + ([] if pos else ["provider"]) + (["model"] if len(pos) < 2 else [])
         if menus and not any(a == "--effort" or a.startswith("--effort=") for a in claude_args):
             steps.append("effort")
         if menus and autocompact is None:
@@ -3243,7 +3244,7 @@ def main():
         while step < len(steps):
             try:
                 if steps[step] == "preset":
-                    picked = preset_menu()
+                    picked = preset_menu(name)
                     if picked is None and backing:
                         raise catalog.MenuBack  # no preset screen was shown: Esc leaves the launch
                     if picked == "edit":

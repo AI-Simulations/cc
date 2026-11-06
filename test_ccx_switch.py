@@ -633,6 +633,9 @@ with tempfile.TemporaryDirectory() as _d, patch.object(ccx, 'presets_path', retu
         ccx.main()
     assert not _pm.called and _apply.call_args.args[:2] == ('official', 'claude-opus-5-5') \
         and _apply.call_args.kwargs['effort'] == 'medium', 'A preset pick launches without the other menus'
+    with patch.object(ccx, 'preset_menu', return_value='official') as _menu, patch.object(ccx.sys, 'argv', ['ccx', 'official']):
+        ccx.main()
+    assert _menu.call_args.args == ('official',), '`claude` (ccx official) opens on the presets too'
     with patch.object(ccx, 'preset_menu', side_effect=['edit', 'official']), \
          patch.object(ccx, 'provider_menu', side_effect=['official', 'official']), \
          patch.object(ccx, 'model_menu', side_effect=['claude-sonnet-5-5', 'claude-haiku-5-5']), \
