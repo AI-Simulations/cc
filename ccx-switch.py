@@ -2956,7 +2956,11 @@ def hook_context(data):
                 "with your own tools. Do not call Agent or Task; every such call is blocked."
                 + ("\n\n" + orphans if orphans else "")}}
     profiles = load_agents()
-    choices = "; ".join(f"ccx-{name}: {agent_summary(a)}" for name, a in profiles.items())
+    choices = "; ".join(f"ccx-{name}: {agent_summary(a)}" + (f" ({a['description']})" if a.get("description") else "")
+                        for name, a in profiles.items())
+    if len(profiles) > 1:  # several profiles act as a router: the main model picks per task
+        choices += (". Route each task to the cheapest profile whose description fits its difficulty; "
+                    "split mixed work into separate calls")
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
             "additionalContext": "Delegate only through configured ccx subagents: " + (choices or "none configured") +
             ". Native fork/general-purpose/custom worker calls are blocked. Use a ccx-* subagent_type and "

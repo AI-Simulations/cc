@@ -21,6 +21,19 @@ statusline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(statusline)
 
 
+class WatchdogTests(unittest.TestCase):
+    def test_hung_render_exits(self):
+        # 2026-11-06: renders blocked on stdin piled up for 13 h once the watchdog was lost.
+        import subprocess, sys
+        p = subprocess.Popen([sys.executable, "-B", str(Path(__file__).with_name("statusline.py"))],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+        try:
+            self.assertEqual(p.wait(30), 0)
+        finally:
+            p.kill()
+            p.stdin.close()
+
+
 class PlanValueTests(unittest.TestCase):
     def test_weekly_value_from_window_spend_and_share(self):
         now = 2000000000

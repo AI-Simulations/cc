@@ -1159,6 +1159,11 @@ def render(d):
 
 
 if __name__ == "__main__":
+    # A hung render (stdin, network, file lock) must never outlive its refresh: Claude Code starts a new one every 2 s.
+    import threading
+    watchdog = threading.Timer(30 if sys.argv[1:2] == ["--quota"] else 8, os._exit, (0,))
+    watchdog.daemon = True  # a normal render must not wait for it
+    watchdog.start()
     if sys.argv[1:2] == ["--quota"]:
         fetch_quota(sys.argv[2], time.time())
         sys.exit()
