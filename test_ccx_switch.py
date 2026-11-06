@@ -495,6 +495,22 @@ with tempfile.TemporaryDirectory() as tmp:
         assert Path(tmp, 'presets.json').read_bytes() == before
         ccx.presets_command(['set', 'nvidia', 'deepseek-ai/new'])
         assert ccx.preset_bundle(ccx.preset_targets()[0])['auto'] == bundle['auto']
+        # a named preset lists beside the provider rows, keeps its own bundle, and deletes cleanly
+        named = {**bundle, 'model': {'provider': 'nvidia', 'model': 'named-main'}}
+        ccx.presets_command(['set-bundle', 'Fast', json.dumps(named)])
+        row = next(r for r in ccx.preset_targets() if r.get('name') == 'fast')
+        assert (row['provider'], row['model'], row['custom']) == ('nvidia', 'named-main', True)
+        assert ccx.preset_bundle(row) == named
+        assert ccx.preset_targets()[0]['model'] == 'deepseek-ai/new'  # the provider row is untouched
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                ccx.presets_command(['set-bundle', 'bad name!', json.dumps(named)])
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError('invalid preset name accepted')
+        ccx.presets_command(['reset', 'fast'])
+        assert not any(r.get('name') == 'fast' for r in ccx.preset_targets())
 print('preset bundles ok')
 
 with tempfile.TemporaryDirectory() as tmp:

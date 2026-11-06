@@ -478,9 +478,13 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(tab.chosen(), 'model-b')
 
     def test_target_tabs_explain_which_profile_they_edit(self):
-        for key in ('subagent', 'fallback'):
-            labels = [w.cget('text') for w in self.app.tabs[key].winfo_children() if isinstance(w, ttk.Label)]
-            self.assertTrue(any('profile' in text for text in labels), labels)
+        labels = [w.cget('text') for w in self.app.tabs['fallback'].winfo_children() if isinstance(w, ttk.Label)]
+        self.assertTrue(any('profile' in text for text in labels), labels)
+        # the Subagent tab shows Target (and its hint) only when there is more than one profile to pick
+        tab = self.app.tabs['subagent']
+        labels = [w.cget('text') for w in tab.winfo_children() if isinstance(w, ttk.Label)]
+        self.assertEqual(any('profile' in text for text in labels), len(gui.load_profiles()) > 1, labels)
+        self.assertEqual(bool(tab.target_box.winfo_manager()), len(gui.load_profiles()) > 1)
         model = [w.cget('text') for w in self.app.tabs['model'].winfo_children() if isinstance(w, ttk.Label)]
         self.assertFalse(any('profile' in text for text in model), model)
 

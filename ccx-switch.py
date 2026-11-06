@@ -475,6 +475,13 @@ def preset_targets():
             continue
         effort = default.get("effort") if name != "official" and default.get("effort") in EFFORTS else None
         rows.append({"provider": name, "model": model, "effort": effort})
+    for name, custom in saved.items():
+        # a named preset the person created: its main model may be on any reachable provider
+        main = saved_bundle(name, saved)
+        main = main and main["model"]
+        if name not in PROVIDERS and main and main.get("provider") in names:
+            rows.append({"name": name, "provider": main["provider"], "model": main["model"],
+                         "effort": main.get("effort"), "custom": True})
     return rows
 
 
@@ -497,6 +504,7 @@ def save_presets(data):
 
 
 PRESET_CATEGORIES = ("model", "subagent", "fallback", "auto", "tools")
+PRESET_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 
 
 def preset_bundle(row):
@@ -511,7 +519,7 @@ def preset_bundle(row):
         level = lowest_effort(row["provider"], row["model"])
         if level:
             settings["tools"]["effort"] = level
-    custom = load_presets().get(row["provider"])
+    custom = load_presets().get(row.get("name") or row["provider"])
     overrides = custom.get("settings") if isinstance(custom, dict) else None
     if isinstance(overrides, dict):
         for key in PRESET_CATEGORIES[1:]:
@@ -526,9 +534,9 @@ def preset_bundle(row):
     return settings
 
 
-def saved_bundle(name):
-    """The five-category preset saved for this provider in /model's Presets tab, or None."""
-    custom = load_presets().get(name)
+def saved_bundle(name, saved=None):
+    """The five-category preset saved under this provider or name in /model's Presets tab, or None."""
+    custom = (load_presets() if saved is None else saved).get(name)
     settings = custom.get("settings") if isinstance(custom, dict) else None
     if not (isinstance(settings, dict) and set(PRESET_CATEGORIES) <= set(settings)
             and all(isinstance(settings[k], dict) for k in PRESET_CATEGORIES)):
@@ -575,12 +583,12 @@ def seed_launch_from_preset(name, launch, adapter, providers):
 def presets_command(words):
     """List main-model picks or edit a complete five-category preset bundle."""
     if words == ["bundles"]:
-        print(json.dumps([{**row, "settings": preset_bundle(row)} for row in preset_targets()]))
+        print(json.dumps([{"name": row["provider"], **row, "settings": preset_bundle(row)} for row in preset_targets()]))
         return
     if words[:1] == ["set-bundle"] and len(words) == 3:
-        name = words[1].lower()
-        if name not in PROVIDERS:
-            die(f"Unknown provider '{name}'.")
+        name = words[1].strip().lower()
+        if name not in PROVIDERS and not PRESET_NAME.fullmatch(name):
+            die("A preset name is 1-32 letters, digits, '-' or '_'.")
         try:
             settings = json.loads(words[2])
         except ValueError:
@@ -608,7 +616,7 @@ def presets_command(words):
                 if levels is not None and effort not in levels:
                     die(f"{provider}/{model} does not support effort {effort}.")
             cleaned[key] = {"provider": provider, "model": model, **({"effort": effort} if effort != "default" else {})}
-        if cleaned["model"]["provider"] != name:
+        if name in PROVIDERS and cleaned["model"]["provider"] != name:
             die("The main model must use the preset's provider.")
         saved = load_presets()
         saved[name] = {"model": cleaned["model"]["model"],
@@ -646,9 +654,9 @@ def presets_command(words):
         if saved.pop(name, None) is None:
             die(f"No custom preset for '{name}'.")
         save_presets(saved)
-        print(f"Preset reset: {name}")
+        print(f"Preset {'reset' if name in PROVIDERS else 'deleted'}: {name}")
         return
-    die("Usage: ccx presets [list | set <provider> <model> [effort] | reset <provider>]")
+    die("Usage: ccx presets [list | bundles | set <provider> <model> [effort] | set-bundle <provider|name> <json> | reset <provider|name>]")
 
 
 def models_command(words):

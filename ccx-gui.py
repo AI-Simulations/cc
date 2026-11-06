@@ -16,7 +16,7 @@ import traceback
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import simpledialog, ttk
 
 CCX = Path(__file__).with_name('ccx-switch.py')
 TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
@@ -594,15 +594,14 @@ class PickerTab(ttk.Frame):
         self.target_label = ttk.Label(pick, text='Target', style='Dim.TLabel')
         self.target = tk.StringVar()
         self.target_box = ttk.Combobox(pick, textvariable=self.target, state='readonly', width=15)
-        if key in TARGET_TABS:
+        # One subagent profile leaves nothing to choose: the Target box would only show 'sub'.
+        if key == 'fallback' or (key == 'subagent' and len(load_profiles()) > 1):
             self.target_label.pack(side='left')
             self.target_box.pack(side='left', padx=(8, 18))
             self.target_box.bind('<<ComboboxSelected>>', lambda _e: self.load())
             # Say why the picker exists: one route per profile, not one route per tab.
-            hint = ('Target chooses the subagent profile this tab edits: each profile keeps its own provider, '
-                    'model, effort and auto-compact.') if key == 'subagent' else (
-                    'Target chooses whose fallback this tab edits: this session, or one subagent profile. '
-                    'A session fallback needs a ccx adapter launch.')
+            hint = 'Target: the subagent profile this tab edits.' if key == 'subagent' else (
+                    'Target: this session or one subagent profile (a session fallback needs a ccx adapter launch).')
             ttk.Label(self, text=hint, style='Faint.TLabel', wraplength=900).pack(fill='x', padx=18, pady=(0, 8))
         ttk.Label(pick, text='Provider', style='Dim.TLabel').pack(side='left')
         self.provider = tk.StringVar()
@@ -1061,6 +1060,7 @@ class PresetsTab(ttk.Frame):
         self.shown = []
         self.iids = []  # (tree item, preset)
         self.current = None
+        self.wanted = None  # the preset to select after the next reload, e.g. one just created
         self.busy_job = None
         self.busy_text = ''
         self.busy_i = 0
@@ -1079,10 +1079,10 @@ class PresetsTab(ttk.Frame):
         self.list = ttk.Treeview(inner, columns=('model', 'effort', 'source', 'state'),
                                  show='tree headings', style='Picker.Treeview', selectmode='browse',
                                  height=6)
-        self.list.heading('#0', text='Provider', anchor='w')
+        self.list.heading('#0', text='Preset', anchor='w')
         self.list.column('#0', width=170, minwidth=100, stretch=True, anchor='w')
         for column, title, width in [('model', 'Model', 300), ('effort', 'Effort', 80),
-                                     ('source', 'Preset', 90), ('state', 'Session', 80)]:
+                                     ('source', 'Saved', 90), ('state', 'Session', 80)]:
             self.list.heading(column, text=title, anchor='w')
             self.list.column(column, width=width, minwidth=65, stretch=column == 'model', anchor='w')
         self.list.tag_configure('current', background=CURRENT, foreground='#a8ebcf')
@@ -1106,9 +1106,8 @@ class PresetsTab(ttk.Frame):
         self.status.pack(side='left')
         ttk.Button(foot, text='Close', command=self.app.destroy).pack(side='right', padx=(8, 0))
         ttk.Button(foot, text='Use in this session', style='Accent.TButton', command=self.apply).pack(side='right')
-        ttk.Button(foot, text='Edit preset…', command=self.edit).pack(side='right', padx=(0, 8))
-        ttk.Label(self, text='Use = this session only  ·  Edit = save the preset  ·  Double-click edits  ·  Enter uses',
-                  style='Faint.TLabel').pack(fill='x', padx=18, pady=(0, 8))
+        ttk.Button(foot, text='Edit…', command=self.edit).pack(side='right', padx=(0, 8))
+        ttk.Button(foot, text='New…', command=self.create).pack(side='right', padx=(0, 8))
         self.render()
 
     def busy(self, text):
@@ -1160,7 +1159,8 @@ class PresetsTab(ttk.Frame):
             try:
                 self.presets = json.loads(out)
                 for preset in self.presets:
-                    preset['label'] = f'{preset["provider"]} · {preset["model"]}'
+                    preset.setdefault('name', preset['provider'])
+                    preset['label'] = f'{preset["name"]} · {preset["model"]}'
             except (ValueError, KeyError, TypeError):
                 self.presets = []
         else:
@@ -1168,19 +1168,19 @@ class PresetsTab(ttk.Frame):
                 parts = line.split('\t')
                 if len(parts) >= 4:
                     provider, model, effort, label = parts[:4]
-                    self.presets.append({'provider': provider, 'model': model, 'effort': effort or None,
+                    self.presets.append({'name': provider, 'provider': provider, 'model': model, 'effort': effort or None,
                                          'label': label, 'custom': len(parts) >= 5 and parts[4].strip() == '1'})
         self.render()
         self.settle(f'{len(self.presets)} presets' if self.presets else 'No presets listed.')
 
     def render(self):
         picked = self.picked()
-        wanted = picked['provider'] if picked else None
+        wanted, self.wanted = self.wanted or (picked['name'] if picked else None), None
         needle = self.query.get().strip().lower()
         self.hover.reset()
         self.list.delete(*self.list.get_children())
         self.shown = [p for p in self.presets if not needle or needle in
-                      ' '.join(str(p.get(k) or '') for k in ('label', 'provider', 'model', 'effort')).lower()]
+                      ' '.join(str(p.get(k) or '') for k in ('name', 'provider', 'model', 'effort')).lower()]
         self.iids = []
         active = None
         for index, preset in enumerate(self.shown):
@@ -1190,7 +1190,7 @@ class PresetsTab(ttk.Frame):
             tags = ('zebra',) if index % 2 else ()
             if current:
                 tags += ('current',)
-            iid = self.list.insert('', 'end', text=' ' + preset['provider'], image=logo,
+            iid = self.list.insert('', 'end', text=' ' + preset['name'], image=logo,
                                    values=(preset['model'], preset['effort'] or 'default',
                                            'Custom' if preset.get('custom') else 'Default',
                                            'Current' if current else ''),
@@ -1199,7 +1199,7 @@ class PresetsTab(ttk.Frame):
             if current:
                 active = iid
         if self.iids:
-            iid = next((iid for iid, p in self.iids if p['provider'] == wanted), active or self.iids[0][0])
+            iid = next((iid for iid, p in self.iids if p['name'] == wanted), active or self.iids[0][0])
             self.list.selection_set(iid)
             self.list.focus(iid)
             self.list.see(iid)
@@ -1217,6 +1217,24 @@ class PresetsTab(ttk.Frame):
             self.status.configure(text='Pick a preset first.')
             return
         PresetEditor(self.app, preset, self.load)
+
+    def create(self):
+        """A new named preset, started from the picked one."""
+        base = self.picked() or (self.presets[0] if self.presets else None)
+        if base is None:
+            self.status.configure(text='No preset to start from.')
+            return
+        name = (simpledialog.askstring('New preset', 'Name (letters, digits, - or _):', parent=self) or '').strip().lower()
+        if not name:
+            return
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,31}', name):
+            self.status.configure(text='A preset name is 1-32 letters, digits, - or _.')
+            return
+        if any(p['name'] == name for p in self.presets):
+            self.status.configure(text=f'A preset named {name} already exists.')
+            return
+        self.wanted = name
+        PresetEditor(self.app, {**base, 'name': name, 'custom': True, 'new': True}, self.load)
 
     def apply(self):
         preset = self.picked()
@@ -1278,9 +1296,9 @@ class PresetEditor(tk.Toplevel):
     def __init__(self, app, preset, saved):
         super().__init__(app)
         self.app = app
-        self.preset = preset
+        preset = self.preset = {'name': preset['provider'], **preset}
         self.saved = saved
-        self.title(f'Edit preset · {preset["provider"]}')
+        self.title(f'Preset · {preset["name"]}')
         self.configure(bg=BG)
         self.resizable(False, False)
         self.protocol('WM_DELETE_WINDOW', self.close)
@@ -1288,7 +1306,7 @@ class PresetEditor(tk.Toplevel):
         body.pack(fill='both', expand=True, padx=20, pady=18)
         head = ttk.Frame(body)
         head.grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 14))
-        ttk.Label(head, text=preset['provider'], style='Title.TLabel').pack(side='left')
+        ttk.Label(head, text=preset['name'], style='Title.TLabel').pack(side='left')
         self.fields = {}
         main = {'provider': preset['provider'], 'model': preset['model'], 'effort': preset.get('effort') or 'default'}
         settings = preset.get('settings') or {key: dict(main) for key, _ in TABS[:-1]}
@@ -1298,7 +1316,7 @@ class PresetEditor(tk.Toplevel):
         providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] != 'off']]))
         fallback_providers = [value for value, _ in tab_rows(run_ccx('fallback', 'routes')[1])]
         helper_providers = [value for value, _ in tab_rows(run_ccx('route', 'routes')[1])]
-        for column, title in enumerate(('Category', 'Provider', 'Model', 'Effort')):
+        for column, title in enumerate(('', 'Provider', 'Model', 'Effort')):
             ttk.Label(body, text=title, style='Dim.TLabel').grid(row=1, column=column, sticky='w', padx=(0, 10))
         for row, (key, label) in enumerate(TABS[:-1], 2):
             target = settings[key]
@@ -1312,7 +1330,8 @@ class PresetEditor(tk.Toplevel):
             fields['provider_box'] = box
             box.grid(row=row, column=1, padx=(0, 10))
             if key == 'model':
-                box.configure(values=[preset['provider']])
+                # a provider's own preset keeps its provider; a named one may start on any route
+                box.configure(values=[preset['provider']] if preset['name'] == preset['provider'] else helper_providers)
             box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_models(k))
             model_box = ttk.Combobox(body, textvariable=fields['model'], width=38)
             model_box.grid(row=row, column=2, padx=(0, 10))
@@ -1334,7 +1353,9 @@ class PresetEditor(tk.Toplevel):
                   style='Faint.TLabel').grid(row=8, column=0, columnspan=4, sticky='w')
         foot = ttk.Frame(body)
         foot.grid(row=9, column=0, columnspan=4, sticky='we', pady=(16, 0))
-        ttk.Button(foot, text='Restore default', command=self.reset).pack(side='left')
+        named = preset['name'] != preset['provider']
+        if not preset.get('new') and (preset.get('custom') or not named):
+            ttk.Button(foot, text='Delete' if named else 'Restore default', command=self.reset).pack(side='left')
         ttk.Button(foot, text='Cancel', command=self.close).pack(side='right', padx=(8, 0))
         ttk.Button(foot, text='Save', style='Accent.TButton', command=self.save).pack(side='right')
         self.bind('<Escape>', lambda _e: self.close())
@@ -1419,13 +1440,13 @@ class PresetEditor(tk.Toplevel):
             effort = fields['effort'].get()
             settings[key] = {'provider': provider, 'model': model,
                              **({'effort': effort} if effort not in ('', 'default') else {})}
-        args = ['presets', 'set-bundle', self.preset['provider'], json.dumps(settings)]
+        args = ['presets', 'set-bundle', self.preset['name'], json.dumps(settings)]
         self.status.configure(text='Saving…')
         self.app.background(lambda: run_ccx(*args), self.done)
 
     def reset(self):
         self.status.configure(text='Restoring default…')
-        self.app.background(lambda: run_ccx('presets', 'reset', self.preset['provider']), self.done)
+        self.app.background(lambda: run_ccx('presets', 'reset', self.preset['name']), self.done)
 
     def done(self, result):
         if not self.winfo_exists():
