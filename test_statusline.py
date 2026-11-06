@@ -608,3 +608,13 @@ class BarTests(unittest.TestCase):
     def test_empty_bar_outlines_green_and_partial_bar_dim(self):
         self.assertTrue(statusline.bar(9).startswith(statusline.DIM + statusline.color(0) + "▱" * 10))
         self.assertIn(statusline.DIM + "▱" * 9, statusline.bar(10))
+
+
+class FreshSessionModeRowTests(unittest.TestCase):
+    def test_mode_row_shows_zero_and_week_before_any_transcript(self):
+        with tempfile.TemporaryDirectory() as home, \
+                patch.object(statusline.os.path, "expanduser", lambda p: p.replace("~", home)), \
+                patch.dict(os.environ, {"CCX_LAUNCH_ID": ""}), \
+                patch.object(statusline, "provider_week", lambda key, now: ("Ultra", "7d $9.00/$90 │ Ultra")):
+            row = statusline.mode_row("00000000-0000-0000-0000-000000000000", time.time())
+        self.assertEqual(row, "≈ $0.00 (7d $9.00/$90 │ Ultra)")

@@ -902,22 +902,21 @@ def provider_week(source, now):
 
 def mode_row(session_id, now):
     """`≈ $2.03 (7d $1,523/$13.5k │ Ultra) · ≈ $0.54 (CmdC $4.05 left)`: per provider
-    this session ran on (main and its ccx subagents), the session's API-price cost, then the week's; '' before any reply."""
+    this session ran on (main and its ccx subagents), the session's API-price cost (from $0.00 at start), then the week's."""
     import glob
     if not re.fullmatch(r"[0-9a-f-]{36}", str(session_id or "")):
         return ""
     paths = glob.glob(os.path.join(os.path.expanduser("~/.claude/projects"), "*", session_id + ".jsonl"))
-    if not paths:
-        return ""
     launch = os.environ.get("CCX_LAUNCH_ID")
     route = (load_json(os.path.expanduser("~/.config/ccx/routes.json")) if launch else {}).get(launch) or {}
     main = route.get("provider") if route.get("model") else ccx_main_provider(quota_source())
     profiles = ccx_profiles(session_id)
-    spent = {}  # quota source (or bare provider) -> usd, main first
-    runs = [(main, transcript_cost(paths[0]))]
+    # a fresh session (no transcript or reply yet) still shows $0.00 and the week on its main route
+    spent = {CCX_QUOTA_SOURCES.get(main) or ("hyper" if main == "hyper" else main or "?"): 0.0}
+    runs = [(main, transcript_cost(paths[0]))] if paths else []
     # a native subagent (Explore, general-purpose) runs on the main route; a ccx profile on its own
     runs += [((profiles.get(name) or {}).get("provider", main) if name in profiles else main, cost)
-             for name, cost in subagent_costs(paths[0]).items()]
+             for name, cost in subagent_costs(paths[0]).items()] if paths else []
     for provider, cost in runs:
         if cost.get("sent") or cost.get("priced"):
             key = CCX_QUOTA_SOURCES.get(provider) or ("hyper" if provider == "hyper" else provider or "?")
