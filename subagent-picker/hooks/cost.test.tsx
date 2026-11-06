@@ -21,7 +21,7 @@ test('without the reminder the engine keeps its line (live pills) and the cost r
   const ui = await $.ui.mount({ plugin: 'subagent-picker', component: 'PromptHint', surface: 'terminal',
                                 props: { isDraft: false, isWorking: false, hint: '⏵⏵ auto mode on · 4 shells, 2 monitors' } })
   expect(drawn?.hint).toBe('⏵⏵ auto mode on · 4 shells, 2 monitors')
-  expect(drawn?.tail).toBe(' · ≈ $13.48 · sub $6.27 (7d $1,738/$7.6k Ultra)')
+  expect(drawn?.tail).toBe('≈ $13.48 · sub $6.27 (7d $1,738/$7.6k Ultra)')
   await ui.unmount()
 })
 

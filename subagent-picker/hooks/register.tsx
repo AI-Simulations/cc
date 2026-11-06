@@ -909,8 +909,8 @@ export const register: Register = on => {
     const raw = String(e.props.hint ?? '')
     if (!reminder.test(raw)) {
       // Keep the engine's own line so its pills (shells, monitors) stay live and coloured; the cost rides
-      // as `tail`, which the engine always draws dim, so the total loses its colour here.
-      return part ? next({ ...e, props: { ...e.props, tail: ` · ${part[0].trim()}` } }) : next(e)
+      // as `tail`, which the engine always draws dim after its own ` · `, so the total loses its colour here.
+      return part ? next({ ...e, props: { ...e.props, tail: part[0].trim() } }) : next(e)
     }
     // The engine's own line fills its row (a tree beside it wraps below) and its `tail` is always dim, so the
     // row is drawn here from its text: the hint dim, then the total coloured by how much it is.
