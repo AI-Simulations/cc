@@ -907,7 +907,11 @@ export const register: Register = on => {
     // The shift+tab reminder is dropped always, cost or not: the person knows the key. The mode badge stays.
     const reminder = /\s*·?\s*\(?shift\+tab to cycle\)?/i
     const raw = String(e.props.hint ?? '')
-    if (!part && !reminder.test(raw)) return next(e)
+    if (!reminder.test(raw)) {
+      // Keep the engine's own line so its pills (shells, monitors) stay live and coloured; the cost rides
+      // as `tail`, which the engine always draws dim, so the total loses its colour here.
+      return part ? next({ ...e, props: { ...e.props, tail: ` · ${part[0].trim()}` } }) : next(e)
+    }
     // The engine's own line fills its row (a tree beside it wraps below) and its `tail` is always dim, so the
     // row is drawn here from its text: the hint dim, then the total coloured by how much it is.
     // One Text with inline children, cut at the edge: side-by-side boxes each wrapped on their own and split the row.
