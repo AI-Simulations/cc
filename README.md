@@ -120,6 +120,21 @@ types. A worker resumes an isolated copy of the parent conversation, plus projec
 memory, and never rewrites the original transcript. In adapter sessions the worker runs in-process,
 so its tab shows the full chat.
 
+### Router
+
+The `easy`, `mid` and `hard` profiles form a difficulty router. With it on, the main model scores each
+task from 0 to 100, sends it to the level whose range holds the score, and reruns a task that fails its
+review one level up. The switch is per session and applies from the next prompt.
+
+```sh
+ccx agents router on|off                      # this session
+ccx agents router ranges 60 80                # easy 0-60, mid 61-80, hard 81-100
+ccx agents router calibrate 60 20             # tops from logged scores: 60% easy, 20% mid, rest hard
+```
+
+Each routed call's score lands in `~/.config/ccx/router-log.jsonl`. `calibrate` needs 20 scores and uses the
+last 500. It sets the cutoffs from the scores your main model actually gives, rather than from round numbers.
+
 ## Fallbacks and limits
 
 - **Fallback route:** an adapter session can name a second route, used once when the first answers

@@ -2030,6 +2030,66 @@ def set_ranges(cuts):
     print("Difficulty ranges: " + range_text(level_ranges(agents)))
 
 
+def router_log():
+    return os.path.join(CFG_DIR, "router-log.jsonl")
+
+
+def log_route(level, description):
+    """Keep the main model's score for a router call ("[35] ..." description): `router calibrate` reads them."""
+    m = re.match(r"\s*\[(\d{1,3})\]", str(description or ""))
+    if not m or int(m.group(1)) > 100:
+        return
+    try:
+        with open(router_log(), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": round(time.time()), "launch": session_launch(), "level": level,
+                                "score": int(m.group(1))}) + "\n")
+    except OSError:
+        pass
+
+
+CALIBRATE_MIN = 20  # scored calls needed before shares mean anything
+CALIBRATE_LAST = 500  # recent calls only: the score habits of older main models fade out
+
+
+def calibrate_ranges(shares):
+    """ccx agents router calibrate <easy %> <mid %>: tops chosen so those shares of the logged scores
+    fall in each level (RouteLLM-style: pick how much goes to the strong model, derive the cutoff)."""
+    levels = [n for n in ROUTER_LEVELS if n in load_agents()]
+    usage = f"Usage: ccx agents router calibrate {' '.join(f'<{n} %>' for n in levels[:-1])} (whole numbers, sum under 100)"
+    try:
+        pcts = [int(x) for x in shares]
+    except ValueError:
+        die(usage)
+    if len(levels) < 2 or len(pcts) != len(levels) - 1 or min(pcts) <= 0 or sum(pcts) >= 100:
+        die(usage)
+    scores = []
+    try:
+        with open(router_log(), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    scores.append(int(json.loads(line)["score"]))
+                except (ValueError, KeyError, TypeError):
+                    pass
+    except OSError:
+        pass
+    scores = sorted(scores[-CALIBRATE_LAST:])
+    if len(scores) < CALIBRATE_MIN:
+        die(f"Only {len(scores)} scored router calls logged; calibrate needs {CALIBRATE_MIN}. "
+            "Use the router a while (ccx agents router on), or set tops by hand with `router ranges`.")
+    tops, cum, prev = [], 0, -1
+    for i, pct in enumerate(pcts):
+        cum += pct
+        q = scores[max(0, -(-len(scores) * cum // 100) - 1)]
+        prev = min(max(q, prev + 1), 99 - (len(pcts) - 1 - i))  # rising, and room left for the levels above
+        tops.append(prev)
+    set_ranges([str(t) for t in tops])
+    low, got = -1, []
+    for n, top in zip(levels, [*tops, 100]):
+        got.append(f"{n} {round(100 * sum(low < x <= top for x in scores) / len(scores))}%")
+        low = top
+    print(f"From {len(scores)} logged scores: " + ", ".join(got) + " (ties keep shares inexact).")
+
+
 def offered_agents():
     """The profiles the main model may call now: the router's levels or `sub`, never both."""
     profiles = load_agents()
@@ -2995,6 +3055,17 @@ def _rewrite(data, original, updated, deny):
 
 def agent_hook(data):
     """Enforce configured worker types without bypassing native permission rules."""
+    result = _agent_decision(data)
+    call = data.get("tool_input") or {}
+    level = str(call.get("subagent_type") or "").removeprefix("ccx-").removesuffix("-live")
+    # only calls that run: auto mode's deny-and-resubmit would log every call twice
+    if (level in ROUTER_LEVELS and not call.get("resume") and os.environ.get("CCX_AGENT_CHILD") != "1"
+            and (result.get("hookSpecificOutput") or {}).get("permissionDecision") != "deny"):
+        log_route(level, call.get("description"))
+    return result
+
+
+def _agent_decision(data):
     if os.environ.get("CCX_AGENT_CHILD") == "1" or data.get("tool_name") not in ("Agent", "Task"):
         return {}
 
@@ -3200,7 +3271,9 @@ def hook_context(data):
     ranges = level_ranges(profiles)
     if len(ranges) > 1:  # the router: the main model scores each task and the score picks the level
         choices += (". Rate each task's difficulty from 0 (trivial) to 100 (hardest) and send it to the level whose "
-                    f"range holds that score: {range_text(ranges)}; split mixed work into separate calls")
+                    f"range holds that score: {range_text(ranges)}; start each call's description with that score in "
+                    "brackets, like \"[35] rename helper\"; split mixed work into separate calls; when a worker's "
+                    "result fails your review, rerun that task once on the next level up before fixing it yourself")
     elif len(profiles) > 1:  # several profiles act as a router: the main model picks per task
         choices += (". Route each task to the cheapest profile whose description fits its difficulty; "
                     "split mixed work into separate calls")
@@ -3400,6 +3473,8 @@ def main():
         if len(args) == 3:
             return print("Difficulty ranges: " + (range_text(level_ranges(load_agents())) or "no router levels"))
         return set_ranges(args[3:])
+    if args[:3] == ["agents", "router", "calibrate"]:
+        return calibrate_ranges(args[3:])
     if args[:3] == ["agents", "router", "best"] and len(args) <= 4:
         return set_best_levels(args[3] if len(args) == 4 else None)
     if args[:2] == ["agents", "router"] and len(args) <= 3:

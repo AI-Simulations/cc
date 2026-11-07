@@ -118,6 +118,38 @@ class CcSessionTests(unittest.TestCase):
             self.ccx.set_router(True)
         self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "no levels: the switch changes nothing")
 
+    def test_router_logs_scores_and_calibrates_ranges(self):
+        levels = {n: {"provider": "official"} for n in ("easy", "mid", "hard")}
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
+        self.assertIn("[35] rename helper", self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"])
+        call = lambda kind, desc, mode="default": self.ccx.agent_hook(
+            {"tool_name": "Agent", "transcript_path": self.tmp.name + "/t.jsonl", "permission_mode": mode,
+             "tool_input": {"subagent_type": kind, "description": desc, "prompt": "x"}})
+        for score in range(0, 100, 4):  # 25 calls: 0, 4, ..., 96
+            call("ccx-easy", f"[{score}] task")
+        call("ccx-easy", "no score")
+        call("ccx-easy", "[150] out of range")
+        self.assertEqual(call("ccx-easy", "[50] denied once", "auto")["hookSpecificOutput"]["permissionDecision"], "deny")
+        call("ccx-sub", "[50] not a router level")
+        logged = [json.loads(line) for line in Path(self.ccx.router_log()).read_text().splitlines()]
+        self.assertEqual(len(logged), 25, "only valid scores are kept")
+        self.assertEqual(logged[1]["level"], "easy")
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            self.ccx.calibrate_ranges(["60", "20"])
+        self.assertEqual(self.ccx.level_ranges(self.ccx.load_agents()), {"easy": (0, 56), "mid": (57, 76), "hard": (77, 100)})
+        self.assertIn("easy 60%, mid 20%, hard 20%", out.getvalue())
+        for bad in (["60"], ["60", "40"], ["x", "1"], ["0", "20"]):
+            with self.assertRaises(SystemExit):
+                self.ccx.calibrate_ranges(bad)
+        Path(self.ccx.router_log()).write_text('{"score": 5}\n' * 3)
+        with self.assertRaises(SystemExit):  # too few scores
+            self.ccx.calibrate_ranges(["60", "20"])
+        Path(self.ccx.router_log()).write_text('{"score": 100}\n' * 30)  # all ties at the top still give rising tops
+        with patch("sys.stdout", io.StringIO()):
+            self.ccx.calibrate_ranges(["60", "20"])
+        self.assertEqual(self.ccx.level_ranges(self.ccx.load_agents())["mid"], (99, 99))
+
     def test_router_levels_survive_presets_and_reach_old_sessions(self):
         levels = {"easy": {"provider": "official", "model": "claude-haiku-5-5"},
                   "hard": {"provider": "official", "model": "claude-opus-5-5"}}
