@@ -211,11 +211,12 @@ class ApiBillingTests(unittest.TestCase):
         rendered = self.render(payload, {"primaryApiKey": "sk-ant-api03-x"}, {}, {"claudeAiOauth": {"accessToken": "x"}})
         self.assertNotIn("api $", rendered)
 
-    def test_replayed_window_is_marked_approximate(self):
+    def test_replayed_window_is_marked_by_a_dim_label(self):
         # Payload carries no rate_limits, so the window below comes from the cache, not live data.
         payload = {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"}}
         rendered = self.render(payload, {}, {})
-        self.assertIn("~7d", rendered)
+        self.assertIn(f"{statusline.DIM}7d{statusline.RESET}", rendered)
+        self.assertNotIn("~7d", rendered)  # a "~" read as "about 7 days"
         self.assertNotIn("old", rendered)  # the cache age is not worth the width
 
     def test_reset_countdown_has_a_space(self):

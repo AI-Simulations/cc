@@ -587,8 +587,9 @@ def quota_parts(plan, extra, limits, cached_at, now):
         pct, resets = lim["used_percentage"], lim.get("resets_at")
         if cached_at and resets and resets < now:
             pct, resets = 0, None  # window rolled over since the cache was written
-        # A window replayed from the cache is the last figure Claude Code sent, not a live one.
-        seg = f"{'~' if cached_at else ''}{label} {bar(pct)}"
+        # A window replayed from the cache is the last figure Claude Code sent, not a live one: its label is
+        # dim (a "~" prefix read as "about 7d").
+        seg = f"{DIM + label + RESET if cached_at else label} {bar(pct)}"
         if resets:
             seg += f" {DIM}{span(resets - now)}{RESET}"
         parts.append(seg)
