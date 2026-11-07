@@ -1152,7 +1152,7 @@ def render(d):
             if folded is not None:
                 # shortest form that still tells the levels apart: "v-easy haiku · mid sonnet $100"
                 short = name.replace("very-", "v-")
-                folded.append(f"{DIM if not used.get('ctx') else ''}{short} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target.split()[0]}{RESET}"
+                folded.append(f"{DIM if not used.get('ctx') else ''}{short} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target.split()[0]}{RESET} {dots}"
                               + (f" {DIM}{money(used['usd'])}{RESET}" if used.get("priced") else ""))
                 continue
             seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots}{'' if used.get('ctx') else ac}{route}"

@@ -325,7 +325,7 @@ class ConfiguredAgentLineTests(unittest.TestCase):
         with patch.object(statusline.time, 'time', return_value=1000.0):
             open_panel = self.render('official', profiles, stored={'panel-s1.json': {'at': 995.0, 'rows': 3}})
             stale = self.render('official', profiles, stored={'panel-s1.json': {'at': 900.0, 'rows': 3}})
-        self.assertEqual(open_panel.splitlines()[-1], '↳ easy haiku · mid sonnet')
+        self.assertEqual(open_panel.splitlines()[-1], '↳ easy haiku ●●● · mid sonnet ●●●')
         self.assertEqual(stale.count('no runs yet'), 2)  # a panel not refreshed for 15 s is closed
 
     def test_configured_worker_line_has_short_labels_and_keeps_quota_bars(self):
