@@ -215,8 +215,10 @@ class ApiBillingTests(unittest.TestCase):
         # Payload carries no rate_limits, so the window below comes from the cache, not live data.
         payload = {"model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"}}
         rendered = self.render(payload, {}, {})
-        self.assertIn(f"{statusline.DIM}7d{statusline.RESET}", rendered)
+        self.assertIn("7d ▰", rendered)  # render() drops colours; the dim label is in quota_parts
         self.assertNotIn("~7d", rendered)  # a "~" read as "about 7 days"
+        dim = statusline.quota_parts("", "", {"seven_day": {"used_percentage": 40}}, cached_at=1, now=2)
+        self.assertTrue(dim[0].startswith(statusline.DIM), dim)
         self.assertNotIn("old", rendered)  # the cache age is not worth the width
 
     def test_reset_countdown_has_a_space(self):
