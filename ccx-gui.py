@@ -16,7 +16,7 @@ import traceback
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import simpledialog, ttk
+from tkinter import font as tkfont, simpledialog, ttk
 
 CCX = Path(__file__).with_name('ccx-switch.py')
 TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
@@ -453,6 +453,42 @@ def session_entry():
     return entry if isinstance(entry, dict) else {}
 
 
+class StatusLabel(ttk.Label):
+    """A one-line status that never pushes its row's buttons away: it takes the room left
+    and cuts a longer text to it with an ellipsis. cget('text') still gives the whole text."""
+
+    def __init__(self, master, text='', **kw):
+        super().__init__(master, text='', width=1, **kw)
+        self.full = ''
+        self.bind('<Configure>', lambda _e: self.fit())
+        self.configure(text=text)
+
+    def configure(self, cnf=None, **kw):
+        if 'text' in kw:
+            self.full = str(kw.pop('text'))
+            super().configure(text=self.full)
+            self.fit()
+        return super().configure(cnf, **kw) if cnf or kw else None
+
+    config = configure
+
+    def cget(self, key):
+        return self.full if key == 'text' else super().cget(key)
+
+    def fit(self):
+        room = self.winfo_width()
+        text = ' '.join(self.full.split())  # one line: a multi-line message would grow the row
+        if room > 1:
+            measure = tkfont.Font(font=FONT).measure
+            if measure(text) > room:
+                low, high = 0, len(text)
+                while low < high:  # the longest start that fits with its ellipsis
+                    mid = (low + high + 1) // 2
+                    low, high = (mid, high) if measure(text[:mid] + '…') <= room else (low, mid - 1)
+                text = text[:low].rstrip() + '…'
+        ttk.Label.configure(self, text=text)
+
+
 def short_model(model):
     """'claude-haiku-5-5' -> 'Haiku 5.5', 'deepseek-ai/deepseek-v4.1-flash' -> 'deepseek-v4.1-flash'."""
     name = re.sub(r'^claude-', '', str(model).rsplit('/', 1)[-1])
@@ -695,15 +731,16 @@ class PickerTab(ttk.Frame):
         self.empty = ttk.Label(inner, text='', style='Empty.TLabel')
         self.empty.place(relx=0.5, rely=0.5, anchor='center')
 
+        # The footer and the Current line sit at the bottom ahead of the list: a small window shrinks
+        # the list, never the buttons. Buttons pack before the status, which gets only the room left.
+        self.now = StatusLabel(self, text='', style='Faint.TLabel')
+        self.now.pack(side='bottom', fill='x', padx=18, pady=(0, 12), before=card)
         foot = ttk.Frame(self)
-        foot.pack(fill='x', padx=18, pady=(0, 14))
-        self.status = ttk.Label(foot, text='', style='Dim.TLabel')
-        self.status.pack(side='left')
+        foot.pack(side='bottom', fill='x', padx=18, pady=(0, 14), before=card)
         ttk.Button(foot, text='Close', command=self.app.destroy).pack(side='right', padx=(8, 0))
         ttk.Button(foot, text='Apply', style='Accent.TButton', command=self.apply).pack(side='right')
-
-        self.now = ttk.Label(self, text='', style='Faint.TLabel')
-        self.now.pack(fill='x', padx=18, pady=(0, 12))
+        self.status = StatusLabel(foot, text='', style='Dim.TLabel')
+        self.status.pack(side='left', fill='x', expand=True, padx=(0, 12))
         if key == 'subagent':
             self.show_mode()
 
@@ -1119,7 +1156,11 @@ class PickerTab(ttk.Frame):
 
     def show_result(self, result):
         ok, out = result
-        self.settle(out.splitlines()[-1] if out else ('Applied.' if ok else 'Failed.'))
+        lines = out.splitlines() if out else []
+        # a subagent edit prints every profile, then a long note: say only what this edit set
+        mine = next((l.strip() for l in lines if l.strip().startswith(f'ccx-{self.target.get().lower()}:')), None)
+        self.settle(('✔ ' + mine[4:]) if ok and self.key == 'subagent' and mine
+                    else lines[-1] if lines else ('Applied.' if ok else 'Failed.'))
         if not ok:
             return
         if self.key == 'subagent':
@@ -1186,13 +1227,13 @@ class PresetsTab(ttk.Frame):
         self.empty.place(relx=0.5, rely=0.5, anchor='center')
 
         foot = ttk.Frame(self)
-        foot.pack(fill='x', padx=18, pady=(0, 14))
-        self.status = ttk.Label(foot, text='', style='Dim.TLabel')
-        self.status.pack(side='left')
+        foot.pack(side='bottom', fill='x', padx=18, pady=(0, 14), before=card)
         ttk.Button(foot, text='Close', command=self.app.destroy).pack(side='right', padx=(8, 0))
         ttk.Button(foot, text='Use in this session', style='Accent.TButton', command=self.apply).pack(side='right')
         ttk.Button(foot, text='Edit…', command=self.edit).pack(side='right', padx=(0, 8))
         ttk.Button(foot, text='New…', command=self.create).pack(side='right', padx=(0, 8))
+        self.status = StatusLabel(foot, text='', style='Dim.TLabel')
+        self.status.pack(side='left', fill='x', expand=True, padx=(0, 12))
         self.render()
 
     def busy(self, text):
@@ -1432,8 +1473,8 @@ class PresetEditor(tk.Toplevel):
         self.spinner_frame = 0
         self.model, self.effort = self.fields['model']['model'], self.fields['model']['effort']
         self.model_box, self.effort_box = self.fields['model']['model_box'], self.fields['model']['effort_box']
-        self.status = ttk.Label(body, text='Loading models…', style='Faint.TLabel')
-        self.status.grid(row=7, column=0, columnspan=4, sticky='w', pady=(10, 0))
+        self.status = StatusLabel(body, text='Loading models…', style='Faint.TLabel')
+        self.status.grid(row=7, column=0, columnspan=4, sticky='we', pady=(10, 0))
         ttk.Label(body, text='Off = disable fallback / inherit helper. Subagent sets the one-model subagent; router levels keep their own.',
                   style='Faint.TLabel').grid(row=8, column=0, columnspan=4, sticky='w')
         foot = ttk.Frame(body)

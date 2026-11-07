@@ -485,6 +485,19 @@ class PickerTests(unittest.TestCase):
         tab.show_models((True, '  model-b\n  model-a'))
         self.assertEqual(tab.chosen(), 'model-b')
 
+    def test_long_status_never_pushes_the_buttons_away(self):
+        # 2026-11-06: a long ccx note in the footer pushed Apply and Close past the window's edge
+        self.app.geometry('760x520')
+        tab = self.app.tabs['subagent']
+        long = 'x' * 400
+        tab.settle(long)
+        self.app.update()
+        self.assertEqual(tab.status.cget('text'), long, 'cget keeps the whole text')
+        foot = tab.status.master
+        for button in (w for w in foot.winfo_children() if isinstance(w, ttk.Button)):
+            self.assertLessEqual(button.winfo_x() + button.winfo_width(), foot.winfo_width())
+        self.assertTrue(str(ttk.Label.cget(tab.status, 'text')).endswith('…'))
+
     def test_target_tabs_explain_which_profile_they_edit(self):
         labels = [w.cget('text') for w in self.app.tabs['fallback'].winfo_children() if isinstance(w, ttk.Label)]
         self.assertTrue(any('profile' in text for text in labels), labels)
