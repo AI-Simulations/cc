@@ -879,7 +879,7 @@ class PickerTab(ttk.Frame):
                                  height=6)
         self.list.heading('#0', text='Model', anchor='w')
         self.list.column('#0', width=360, stretch=True, anchor='w')
-        for column, title, width in (('context', 'Context', 80), ('price', 'Price $/M', 110),
+        for column, title, width in (('context', 'Context', 80), ('price', 'Price $/M', 132),
                                      ('intelligence', 'AA', 76), ('score', 'Score', 60),
                                      ('session', 'This session', 110)):
             self.list.heading(column, text=title, anchor='e')
@@ -1419,7 +1419,7 @@ class PresetsTab(ttk.Frame):
                                  height=6)
         self.list.heading('#0', text='Preset', anchor='w')
         self.list.column('#0', width=170, minwidth=100, stretch=True, anchor='w')
-        for column, title, width in [('model', 'Model', 260), ('effort', 'Effort', 76), ('subagent', 'Subagents', 160),
+        for column, title, width in [('model', 'Model', 260), ('effort', 'Effort', 76), ('subagent', 'Subagents', 190),
                                      ('source', 'Saved', 80), ('state', 'Session', 76)]:
             self.list.heading(column, text=title, anchor='w')
             self.list.column(column, width=width, minwidth=65, stretch=column == 'model', anchor='w')

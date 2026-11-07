@@ -97,7 +97,8 @@ directly.
 
 The first line shows the model, its effort dots (one per step of that model's own ladder), context
 use with the auto-compact point, and quota windows with time to reset. The second line shows the
-Auto and Tools helper models. The `sub:` line shows each configured subagent's route. The last line
+Auto and Tools helper models. Below come the subagent rows: one per router level, with its score range,
+model, effort dots and compact window, then its context, cache share and cost once it has run. The last line
 is the session's API-price cost, then the week's spend against the plan's equivalent quota. Quotas
 come from the provider's usage endpoint or from the adapter's last rate-limit headers. A failed fetch
 names its cause (`key expired`, `auth failed`) instead of hiding the bar.
@@ -143,8 +144,15 @@ Artificial Analysis score (very easy 50%, easy 65%, mid 80%, hard 90%; very hard
 each reasoning effort separately; `ccx facts <provider>` lists them as `aa_efforts`, and the `/model` window's
 AA column follows its Effort box. Higher efforts count as dearer (an estimate: AA prices tokens, not efforts).
 
+![Subagent tab with the router's difficulty bar](docs/picker-router.png)
+
 In `/model`'s Subagent tab the Difficulty bar shows each level's range, model, effort and compact window in its colour: drag a
-boundary to move a range, click a level to pick its model, effort and Compact (Apply keeps the model when only those change). Preset levels store a compact window each; none means inherit.
+boundary to move a range, click a level to pick its model, effort and Compact (Apply keeps the model when only those change). Preset levels store a compact window each; none means inherit. Presets start
+with the router on; **Best picks** fills the levels from `best`.
+
+In auto mode Claude Code refuses an Agent call that a hook rewrote, so there the hint asks the main model to
+name the level's in-process worker (`ccx-easy-live`) directly; a call ccx still has to remap is denied once
+with the exact call to resubmit.
 
 Each routed call's score lands in `~/.config/ccx/router-log.jsonl`. `calibrate` needs 20 scores and uses the
 last 500.
