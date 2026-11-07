@@ -489,7 +489,7 @@ class StatusLabel(ttk.Label):
         ttk.Label.configure(self, text=text)
 
 
-LEVEL_TOPS = {'easy': 75, 'mid': 88}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {'easy': 75, 'mid': 89}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):

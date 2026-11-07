@@ -125,11 +125,11 @@ so its tab shows the full chat.
 The `easy`, `mid` and `hard` profiles form a difficulty router. With it on, the main model starts each
 call's description with a 0-100 score (`[35] rename helper`); ccx runs the call on the level whose range
 holds it, whichever level was named, and a task that fails review reruns one range up. Defaults: easy 0-75,
-mid 76-88, hard 89-100. The switch is per session and applies from the next prompt.
+mid 76-89, hard 90-100. The switch is per session and applies from the next prompt.
 
 ```sh
 ccx agents router on|off                      # this session
-ccx agents router ranges 75 88                # easy 0-75, mid 76-88, hard 89-100
+ccx agents router ranges 75 89                # easy 0-75, mid 76-89, hard 90-100
 ccx agents router calibrate 60 20             # tops from logged scores: 60% easy, 20% mid, rest hard
 ```
 

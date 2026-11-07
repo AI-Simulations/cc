@@ -8,7 +8,8 @@
 # Only affects the current shell: env vars are applied by the shell's `ccx` function
 # sourcing apply.ps1 (PowerShell) or apply.sh (bash/zsh), since a child process cannot set them.
 
-import contextlib, itertools, json, os, re, subprocess, sys, tempfile, time, urllib.request, uuid
+# tempfile and urllib.request load where used: hooks and agent-statusline run often and never need them
+import contextlib, itertools, json, os, re, subprocess, sys, time, uuid
 from pathlib import Path
 
 sys.path.insert(0, os.environ.get("AI_SUITE_DIR") or str(Path(__file__).resolve().parents[1] / "ai-suite"))
@@ -285,6 +286,7 @@ def quit_on_ctrl_c():
 
 
 def fetch(url, headers=None, timeout=15):
+    import urllib.request
     h = {"User-Agent": "Mozilla/5.0 ccx-switch"}
     if headers:
         h.update(headers)
@@ -1990,9 +1992,9 @@ def router_text():
 
 
 # Where each level's difficulty range ends by default: most work is easy, so the strong (costly)
-# model only takes what is really hard. Easy 0-75, mid 76-88, hard 89-100 (main models score high: at
+# model only takes what is really hard. Easy 0-75, mid 76-89, hard 90-100 (main models score high: at
 # 60/80 real tasks scored 66-85 and Haiku got none).
-LEVEL_TOPS = {"easy": 75, "mid": 88}
+LEVEL_TOPS = {"easy": 75, "mid": 89}
 
 
 def level_ranges(profiles):
@@ -2399,6 +2401,7 @@ def _restorable_context(source):
         yield source
         return
     # Always snapshot the source: a live parent may append records during restoration.
+    import tempfile
     with tempfile.TemporaryDirectory(prefix="ccx-worker-context-") as directory:
         restored = Path(directory) / "context.jsonl"
         with restored.open("w", encoding="utf-8") as handle:

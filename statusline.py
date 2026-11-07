@@ -9,7 +9,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.request
 import zlib
 from datetime import datetime
 
@@ -50,20 +49,42 @@ def span(seconds):
 
 
 def last_usage(path):
-    # Fallback when context_window is absent: newest assistant usage in the transcript.
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-    except (OSError, TypeError):
-        return {}
-    for line in reversed(lines):
+    # Fallback when context_window is absent: newest assistant usage in the transcript's tail
+    # (not the whole file: transcripts reach 70 MB and this runs every 2 s).
+    for tail in (1 << 20, 8 << 20):
         try:
-            usage = json.loads(line).get("message", {}).get("usage")
-        except (ValueError, AttributeError):
-            continue
-        if isinstance(usage, dict):
-            return usage
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(max(0, size - tail))
+                lines = f.read().splitlines()
+        except (OSError, TypeError):
+            return {}
+        for line in reversed(lines):
+            if b'"usage"' not in line:
+                continue
+            try:
+                usage = json.loads(line).get("message", {}).get("usage")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(usage, dict):
+                return usage
+        if tail >= size:
+            break
     return {}
+
+
+def new_lines(path, offset):
+    """Complete lines after `offset`, streamed rather than read at once (a first scan covers whole
+    transcripts); a line still being written waits for the next render."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            for line in f:
+                if not line.endswith(b"\n"):
+                    return
+                yield line
+    except OSError:
+        return
 
 
 STATE_DIR = os.path.expanduser("~/.claude/statusline")
@@ -264,6 +285,7 @@ def quota_source():
 
 
 def fetch_json(url, headers):
+    import urllib.request  # here, not at the top: http/email/ssl cost ~10 MB on every 2 s render
     req = urllib.request.Request(url, headers={"User-Agent": "ccx-statusline", **headers})
     with urllib.request.urlopen(req, timeout=3) as r:
         return json.load(r)
@@ -378,7 +400,7 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
 
 
 ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
-LEVEL_TOPS = {"easy": 75, "mid": 88}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {"easy": 75, "mid": 89}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):
@@ -518,6 +540,7 @@ def fetch_quota(source, now):
         if resets:
             q['last_reset_at'] = max(resets)
     except Exception as e:
+        import urllib.error
         # Keep why it failed: an expired key otherwise just makes the bars vanish.
         body = e.read().decode("utf-8", "replace") if isinstance(e, urllib.error.HTTPError) else ""
         error = ("key expired" if "api_key_expired" in body else f"auth failed (HTTP {e.code})" if getattr(e, "code", None) in (401, 403)
@@ -715,14 +738,9 @@ def transcript_cost(path):
     offset, last = saved.get("offset", 0), saved.get("last")
     if offset == size:
         return total
-    try:
-        with open(path, "rb") as f:
-            f.seek(offset)
-            chunk = f.read()
-    except OSError:
-        return total
-    chunk = chunk[:chunk.rfind(b"\n") + 1]  # a line still being written waits for the next render
-    for line in chunk.splitlines():
+    read = 0
+    for line in new_lines(path, offset):
+        read += len(line)
         if b'"usage"' not in line:
             continue
         try:
@@ -742,7 +760,7 @@ def transcript_cost(path):
         if usd is not None:
             total["usd"] += usd
             total["priced"] = True
-    save_json(name, {"path": path, "offset": offset + len(chunk), "last": last, "total": total, "prices": PRICES_VERSION})
+    save_json(name, {"path": path, "offset": offset + read, "last": last, "total": total, "prices": PRICES_VERSION})
     return total
 
 
@@ -821,14 +839,9 @@ def index_spend(now):
             offset = 0  # rewritten transcript
         if offset == size:
             continue
-        try:
-            with open(path, "rb") as f:
-                f.seek(offset)
-                chunk = f.read()
-        except OSError:
-            continue
-        chunk = chunk[:chunk.rfind(b"\n") + 1]
-        for line in chunk.splitlines():
+        read = 0
+        for line in new_lines(path, offset):
+            read += len(line)
             if b'"usage"' not in line:
                 continue
             try:
@@ -845,7 +858,7 @@ def index_spend(now):
                 sent = sum(usage.get(f) or 0 for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                 # the last line of a reply carries its final usage
                 replies[message["id"]] = [at, source, usd, sent, usage.get("cache_read_input_tokens") or 0]
-        files[path] = {"offset": offset + len(chunk)}
+        files[path] = {"offset": offset + read}
     replies = {mid: r for mid, r in replies.items() if r[0] >= now - SPEND_KEEP}
     buckets = {}
     for at, source, *row in replies.values():  # bucket: [usd, sent input tokens, cache-read tokens]

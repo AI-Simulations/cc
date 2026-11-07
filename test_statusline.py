@@ -274,7 +274,7 @@ class SubagentLineTests(unittest.TestCase):
 class QuotaErrorTests(unittest.TestCase):
     def test_an_expired_key_is_named_instead_of_hiding_the_bars(self):
         body = io.BytesIO(b'{"error":{"code":"api_key_expired"}}')
-        expired = statusline.urllib.error.HTTPError("https://x", 401, "Unauthorized", {}, body)
+        expired = __import__("urllib.error").error.HTTPError("https://x", 401, "Unauthorized", {}, body)
         with patch.dict(statusline.QUOTA_FETCHERS, {"opencode-go": lambda: (_ for _ in ()).throw(expired)}), \
              patch.object(statusline, "load_json", return_value={}), patch.object(statusline, "save_json") as saved:
             q, _ = statusline.provider_quota("opencode-go", 1000.0)

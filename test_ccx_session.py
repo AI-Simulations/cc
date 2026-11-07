@@ -85,7 +85,7 @@ class CcSessionTests(unittest.TestCase):
         context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(easy tasks)", context)
         self.assertIn("0 (trivial) to 100", context)
-        self.assertIn("ccx-easy 0-75, ccx-mid 76-88, ccx-hard 89-100", context)
+        self.assertIn("ccx-easy 0-75, ccx-mid 76-89, ccx-hard 90-100", context)
         with patch("sys.stdout", new_callable=io.StringIO):
             self.ccx.set_ranges(["20", "90"])
         self.assertIn("ccx-easy 0-20, ccx-mid 21-90, ccx-hard 91-100",
