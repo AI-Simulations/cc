@@ -63,7 +63,6 @@ OPENCODE_AUTH = os.path.expanduser(r"~\.local\share\opencode\auth.json")
 OPENCODE_CONFIG = os.path.join(os.path.expanduser("~"), ".config", "opencode", "opencode.jsonc")
 OAUTH_PORT = 10531
 ADAPTER_PORT = 10532
-G4F_PORT = 1337
 
 CCX_VARS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
            "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -99,8 +98,110 @@ PROVIDERS = {
     "gemini":       {"label": "Google Gemini API (OpenAI-format; opencode's google key)", "format": "openai", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "key": "google"},
     "ollama-cloud": {"label": "Ollama Cloud (OpenAI-format)", "format": "openai", "base": "https://ollama.com/v1", "key": "ollama-cloud"},
     "lmstudio":     {"label": "LM Studio local server (:1234, start it first)", "format": "openai", "base": "http://127.0.0.1:1234/v1", "key": "lmstudio"},
-    "gpt4free":     {"label": "gpt4free local API (free, best-effort; starts g4f on :1337)", "format": "openai", "base": f"http://127.0.0.1:{G4F_PORT}/v1", "key": "gpt4free"},
 }
+
+BUILTIN_PROVIDERS = frozenset(PROVIDERS)
+# Your own endpoints: {"name": {"base": url, "format": "openai"|"anthropic", "key": key id ("" = none),
+# "header": "x-api-key" (anthropic only), "label": text}}. `ccx providers add` writes it.
+CUSTOM_PROVIDERS_FILE = os.path.join(CFG_DIR, "providers.json")
+_CUSTOM_SEEN = [None, {}]  # (mtime, entries) of the last read
+
+
+def check_custom_provider(name, entry):
+    """A cleaned custom provider entry; ValueError says what is wrong."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", name or "") or name in BUILTIN_PROVIDERS:
+        raise ValueError(f"'{name}': use lowercase letters, digits and hyphens, not a built-in provider name")
+    if not isinstance(entry, dict) or not re.fullmatch(r"https?://[^\s]+", str(entry.get("base") or "")):
+        raise ValueError(f"{name}: base must be an http(s) URL")
+    fmt = entry.get("format", "openai")
+    if fmt not in ("openai", "anthropic"):
+        raise ValueError(f"{name}: format must be openai or anthropic")
+    key = entry.get("key", name)
+    if not isinstance(key, str) or (key and not re.fullmatch(r"[a-z0-9-]+", key)) or key in ("oauth", "cli"):
+        raise ValueError(f"{name}: key must be a key id (lowercase, digits, hyphens) or empty for none")
+    clean = {"label": str(entry.get("label") or f"{name} (custom, {fmt}-format)"), "format": fmt,
+             "base": entry["base"].rstrip("/"), "key": key, "custom": True}
+    if fmt == "anthropic" and entry.get("header") == "x-api-key":
+        clean["header"] = "x-api-key"
+    return clean
+
+
+def custom_providers():
+    """The valid entries of providers.json, also merged into PROVIDERS (reread when the file changes)."""
+    try:
+        mtime = os.path.getmtime(CUSTOM_PROVIDERS_FILE)
+    except OSError:
+        mtime = None
+    if mtime != _CUSTOM_SEEN[0]:
+        entries = {}
+        try:
+            with open(CUSTOM_PROVIDERS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            for name, entry in (data.items() if isinstance(data, dict) else ()):
+                try:
+                    entries[name] = check_custom_provider(name, entry)
+                except ValueError as exc:
+                    print(f"ccx: providers.json: {exc}", file=sys.stderr)  # one bad entry must not hide the rest
+        except (OSError, ValueError):
+            pass
+        for name in set(PROVIDERS) - BUILTIN_PROVIDERS - set(entries):
+            del PROVIDERS[name]
+        PROVIDERS.update(entries)
+        _CUSTOM_SEEN[:] = [mtime, entries]
+    return _CUSTOM_SEEN[1]
+
+
+def providers_command(args):
+    """ccx providers [add <name> <base> [--format openai|anthropic] [--key <id>|--no-key] [--x-api-key] [--label text] | remove <name>]"""
+    add = ("ccx providers add <name> <base-url> [--format openai|anthropic] [--key <key id>|--no-key] "
+           "[--x-api-key] [--label <text>]")
+    usage = f"Usage: {add}\n       ccx providers remove <name>"
+    try:
+        with open(CUSTOM_PROVIDERS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    if not args:
+        for name, entry in custom_providers().items():
+            key = entry["key"] or "none"
+            print(f"  {name:<16} {entry['format']:<9} {entry['base']}  key: {key}")
+        if not data:
+            print("No custom providers. " + add)
+        return
+    if args[0] == "remove" and len(args) == 2:
+        if data.pop(args[1], None) is None:
+            die(f"No custom provider '{args[1]}'.")
+        write_json(CUSTOM_PROVIDERS_FILE, data, indent=1)
+        _CUSTOM_SEEN[0] = "stale"  # the mtime may not tick within the same instant
+        custom_providers()
+        return print(f"Removed {args[1]}.")
+    if args[0] != "add" or len(args) < 3:
+        die(usage)
+    entry, rest = {"base": args[2]}, args[3:]
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--no-key":
+            entry["key"] = ""
+        elif flag == "--x-api-key":
+            entry["header"] = "x-api-key"
+        elif flag in ("--format", "--key", "--label") and rest:
+            entry[flag[2:]] = rest.pop(0)
+        else:
+            die(usage)
+    try:
+        clean = check_custom_provider(args[1], entry)
+    except ValueError as exc:
+        die(str(exc))
+    data[args[1]] = entry
+    write_json(CUSTOM_PROVIDERS_FILE, data, indent=1)
+    _CUSTOM_SEEN[0] = "stale"
+    custom_providers()
+    hint = f" Key: set {key_env_name(clean['key'])} or run `ccx` and pick it to be asked." if clean["key"] else ""
+    print(f"Added {args[1]} ({clean['format']}-format, {clean['base']}).{hint}")
+
+
+custom_providers()
 
 # Routes the adapter serves, so a session on one can fall back to another (ccx fallback).
 FALLBACK_ROUTES = sorted(n for n, p in PROVIDERS.items() if p["format"] == "openai" and p.get("key") != "cli")
@@ -121,7 +222,6 @@ FALLBACK_MODELS = {
     "nvidia":       [("deepseek-ai/deepseek-v4.1-flash", ""), ("z-ai/glm-5.3", ""), ("moonshotai/kimi-k2.6", "")],
     "openai-oauth": [("gpt-6.1-sol", ""), ("gpt-6.1-terra", ""), ("gpt-6-sol", ""), ("gpt-6-luna", "")],
     "minimax":      [("MiniMax-M3", ""), ("MiniMax-M2.7", "")],
-    "gpt4free":     [("deepseek-v4-pro", ""), ("deepseek-v4.1-flash", ""), ("glm-5.3", ""), ("kimi-k3", "")],
 }
 
 
@@ -149,7 +249,7 @@ def user_env(name):
 
 def auth_key(name):
     # Only read this provider's credentials; never send another provider's key.
-    env_name = {"commandcode": "CMD_API_KEY", "gpt4free": "G4F_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
+    env_name = {"commandcode": "CMD_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
     key = os.environ.get(env_name) or user_env(env_name)
     if key:
         return key
@@ -179,7 +279,7 @@ def auth_key(name):
 
 
 def key_env_name(name):
-    return {"commandcode": "CMD_API_KEY", "gpt4free": "G4F_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
+    return {"commandcode": "CMD_API_KEY"}.get(name) or name.upper().replace("-", "_") + "_API_KEY"
 
 
 def save_key(name, value):
@@ -220,7 +320,7 @@ def ensure_key(name):
     """Ask for a missing provider key once, so the model menu can list its models."""
     p = PROVIDERS.get(name, {})
     key_id = p.get("key")
-    if not key_id or key_id in ("oauth", "cli", "gpt4free") or name == "lmstudio":
+    if not key_id or key_id in ("oauth", "cli") or name == "lmstudio":
         return
     key = auth_key(key_id)
     if key and key_id in ("opencode", "opencode-go") and key_id not in _OPENCODE_CHECKED:
@@ -1132,20 +1232,17 @@ def fetch_models(name):
                 if re.search(r"image|tts|embed", m["id"]):
                     continue
                 models.append({"id": m["id"], "name": "", "context": m.get("context_window") or m.get("context_length"), "output": None})
-        elif name in ("gemini", "ollama-cloud", "lmstudio"):
-            live = fetch(PROVIDERS[name]["base"] + "/models", {"Authorization": f"Bearer {auth_key(PROVIDERS[name]['key'])}"})
+        elif name in ("gemini", "ollama-cloud", "lmstudio") or PROVIDERS[name].get("custom"):
+            p = PROVIDERS[name]
+            key = auth_key(p["key"]) if p["key"] else ""
+            headers = ({"x-api-key": key, "anthropic-version": "2023-06-01"} if p["format"] == "anthropic" and p.get("header")
+                       else {"Authorization": f"Bearer {key}"} if key else {})
+            live = fetch(p["base"] + ("/v1/models" if p["format"] == "anthropic" else "/models"), headers)
             for m in live["data"]:
                 if re.search(r"image|tts|embed|imagen|veo|aqa", m["id"]):
                     continue
                 # Gemini lists ids as models/<id>; its chat endpoint takes the bare id.
                 models.append({"id": m["id"].removeprefix("models/"), "name": "", "context": m.get("context_length"), "output": None})
-        elif name == "gpt4free":
-            ensure_g4f()
-            live = fetch(f"http://127.0.0.1:{G4F_PORT}/v1/models", timeout=10)
-            for m in live["data"]:
-                if m.get("image") or m.get("audio") or m.get("video") or re.search(r"image|tts|embed|flux|dall-e|whisper", m["id"]):
-                    continue
-                models.append({"id": m["id"], "name": "", "context": None, "output": None})
         elif name == "openai-oauth":
             ensure_oauth_proxy()
             live = fetch(f"http://127.0.0.1:{OAUTH_PORT}/v1/models", timeout=10)
@@ -1176,30 +1273,6 @@ def ensure_oauth_proxy():
         ensure_openai_oauth_proxy()
     except RuntimeError as exc:
         die(str(exc))
-
-
-def ensure_g4f():
-    # gpt4free's OpenAI-compatible server (pip install -U "g4f[api]"); started hidden on first use.
-    url = f"http://127.0.0.1:{G4F_PORT}/v1/models"
-    try:
-        fetch(url, timeout=2)
-        return
-    except (OSError, ValueError):
-        pass
-    try:
-        import g4f  # noqa: F401
-    except ImportError:
-        die('gpt4free is not installed: pip install -U "g4f[api]"')
-    subprocess.Popen([sys.executable, "-m", "g4f.cli", "--port", str(G4F_PORT), "--no-gui"],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     **background_process_options())
-    for _ in range(120):  # g4f imports its providers on startup; allow ~30 s
-        try:
-            fetch(url, timeout=1)
-            return
-        except (OSError, ValueError):
-            time.sleep(0.25)
-    die(f"gpt4free did not start on port {G4F_PORT}; run 'python -m g4f.cli --port {G4F_PORT}' to see why.")
 
 
 def stop_port_owner(port):
@@ -1288,7 +1361,7 @@ def ensure_anthropic_proxy():
 
 def _ensure_anthropic_proxy():
     url = f"http://127.0.0.1:{ADAPTER_PORT}/health"
-    expected = {"service": "ccx-anthropic-proxy", "version": 35}
+    expected = {"service": "ccx-anthropic-proxy", "version": 35}  # unchanged: a bump restarts every session's adapter
     try:
         running = fetch(url, timeout=1)
     except (OSError, ValueError):
@@ -1851,14 +1924,12 @@ def route_env(name, model_id, passthrough=False):
         if name == "openrouter" and not model_id.startswith("anthropic/"):
             warn("Non-Claude models are experimental in Claude Code; usage is billed to OpenRouter, not your ChatGPT subscription.")
     else:
-        key ="" if p["key"] in ("oauth", "cli") else auth_key(p["key"])
+        key = "" if not p["key"] or p["key"] in ("oauth", "cli") else auth_key(p["key"])
         if name == "openai-oauth":
             ensure_oauth_proxy()
         elif name == "commandcode-cli":
             pass  # the adapter posts to /alpha/generate on the CLI's login (CCX_CMDC_TEXT=1: one cmdc run per request)
-        elif name == "gpt4free":
-            ensure_g4f()  # the key is optional: only needed when g4f runs with --g4f-api-key
-        elif not key and name != "lmstudio":  # LM Studio runs keyless unless auth is on
+        elif not key and p["key"] and name != "lmstudio":  # LM Studio runs keyless unless auth is on
             die(f"No API key configured for {name}.")
         ensure_anthropic_proxy()
         env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{ADAPTER_PORT}/{name}"
@@ -3679,6 +3750,8 @@ def main():
         return helper_command(args[1:])
     if args[:1] == ["presets"]:
         return presets_command(args[1:])
+    if args[:1] == ["providers"]:
+        return providers_command(args[1:])
     if args[:1] == ["models"]:
         return models_command(args[1:])
     if args[:1] == ["facts"]:

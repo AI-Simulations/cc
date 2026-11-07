@@ -40,7 +40,6 @@ PROVIDER_CONFIG_MAP = {
     "hyper": str(PACKAGE_ROOT / "config" / "ai_config_hyper.json"),
     "grok": str(PACKAGE_ROOT / "config" / "ai_config_grok.json"),
     "nvidia": str(PACKAGE_ROOT / "config" / "ai_config_nvidia.json"),
-    "gpt4free": str(PACKAGE_ROOT / "config" / "ai_config_gpt4free.json"),
     "cerebras": str(PACKAGE_ROOT / "config" / "ai_config_cerebras.json"),
     "mistral": str(PACKAGE_ROOT / "config" / "ai_config_mistral.json"),
     "cloudflare": str(PACKAGE_ROOT / "config" / "ai_config_cloudflare.json"),
@@ -51,7 +50,7 @@ PROVIDER_CONFIG_MAP = {
     "lmstudio": str(PACKAGE_ROOT / "config" / "ai_config_lmstudio.json"),
 }
 # Providers whose model list lives in their config file and is picked at runtime.
-CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok", "nvidia", "gpt4free",
+CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok", "nvidia",
                        "cerebras", "mistral", "cloudflare", "sambanova", "chutes", "pollinations",
                        "ollama", "lmstudio")
 # Local servers: the menu offers whatever they have loaded, whatever models.dev knows.
@@ -85,11 +84,6 @@ MODELS_DEV_SOURCES = {
     "hyper": ("hyper",),
     "grok": ("xai",),
     "nvidia": ("nvidia",),
-    # gpt4free names models its own way ("qwen-3-235b"), so _gpt4free_facts matches
-    # them to any models.dev entry by name shape; these makers' own listings win ties.
-    "gpt4free": ("openai", "anthropic", "google", "deepseek", "xai", "mistral", "alibaba",
-                 "moonshotai", "zai", "minimax", "meta", "cohere", "perplexity", "nvidia",
-                 "stepfun", "thinkingmachines", "openrouter"),
     "cerebras": ("cerebras",),
     "mistral": ("mistral",),
     "cloudflare": ("cloudflare-workers-ai",),
@@ -292,44 +286,7 @@ def _model_facts(provider: str, mid: str) -> dict:
     return {**info, "intelligence": max(efforts.values()), "intelligence_efforts": efforts}
 
 
-@lru_cache(maxsize=None)
-def _models_dev_index() -> dict:
-    """Every models.dev entry by _name_key numbers: [(words, source rank, info)]."""
-    rank = {source: i for i, source in enumerate(MODELS_DEV_SOURCES["gpt4free"])}
-    index: dict = {}
-    for source, data in _models_dev().items():
-        for key, info in ((data or {}).get("models") or {}).items():
-            numbers, words = _name_key(key.rsplit("/", 1)[-1])
-            index.setdefault(numbers, []).append((words, rank.get(source, len(rank)), info))
-    return index
-
-
-def _gpt4free_facts(mid: str) -> dict:
-    """models.dev facts for a g4f name, priced free: g4f bills nothing.
-
-    Matches like _intelligence: same version numbers, the g4f words all present, and
-    extras only variant words, "instruct"/"it" or parameter counts. Fewest extras win,
-    then the maker's own listing.
-    """
-    numbers, words = _name_key(mid.rsplit("/", 1)[-1])
-    best = None
-    for e_words, rank, info in _models_dev_index().get(numbers, ()):
-        extra = e_words - words
-        if not words <= e_words or not all(
-                w in AA_VARIANT_WORDS or w in ("instruct", "it") or re.fullmatch(r"a?\d+[be]", w)
-                for w in extra):
-            continue
-        key = (len(extra), rank)
-        if best is None or key < best[0]:
-            best = (key, info)
-    if best is None:
-        return {}
-    return {**best[1], "cost": {"input": 0, "output": 0}}
-
-
 def _models_dev_facts(provider: str, mid: str) -> dict:
-    if provider == "gpt4free":
-        return _gpt4free_facts(mid)
     mid = mid.lower()
     tail = mid.rsplit("/", 1)[-1]
     for source in MODELS_DEV_SOURCES.get(provider, ()):
@@ -520,7 +477,7 @@ def _live_model_ids(provider: str) -> set[str] | None:
         if key:
             req.add_header("Authorization", f"Bearer {key}")
         with urlopen(req, timeout=5) as resp:
-            # gpt4free also lists each backend (provider: true) and image models.
+            # some servers also list each backend (provider: true) and image models.
             return {str(m["id"]).lower() for m in json.load(resp)["data"]
                     if not m.get("provider") and not m.get("image")}
     except Exception:
@@ -1048,7 +1005,6 @@ PROVIDER_LABELS = {
     "commandcode": "Command Code (your subscription, no API key)",
     "hyper": "hyper.charm.land",
     "grok": "xAI Grok",
-    "gpt4free": "gpt4free (local `g4f api` server, free)",
     "cerebras": "Cerebras (free tier)",
     "mistral": "Mistral La Plateforme (free Experiment tier)",
     "cloudflare": "Cloudflare Workers AI (free daily allowance)",
@@ -1071,10 +1027,6 @@ def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -
 def _effort_levels(provider: str, mid: str) -> list[str]:
     """Reasoning efforts models.dev lists for the model; [] when it lists none or the
     provider's transport cannot send one."""
-    if provider == "gpt4free":
-        # ponytail: its facts are a fuzzy name match and whether the g4f server forwards
-        # an effort is unchecked; offer levels once a live request confirms it.
-        return []
     with open(provider_config_path(provider), "r", encoding="utf-8") as f:
         if str(json.load(f).get("provider", "")).lower() not in EFFORT_PROVIDERS:
             return []

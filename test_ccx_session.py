@@ -375,6 +375,27 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(sub["provider"], "router")
         self.assertEqual({n: v.get("upto") for n, v in sub["levels"].items()}, {"easy": 40, "mid": 80, "hard": None})
 
+    def test_custom_providers_join_the_routes_and_leave_again(self):
+        ccx = self.ccx
+        ccx.CUSTOM_PROVIDERS_FILE = str(Path(self.tmp.name) / "providers.json")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            ccx.providers_command(["add", "local", "http://127.0.0.1:9000/v1", "--no-key"])
+            ccx.providers_command(["add", "gate", "https://gate.example/anthropic", "--format", "anthropic", "--x-api-key"])
+        self.assertEqual(ccx.PROVIDERS["local"]["format"], "openai")
+        with patch.object(ccx, "ensure_anthropic_proxy"):
+            env = ccx.route_env("local", "some-model")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], f"http://127.0.0.1:{ccx.ADAPTER_PORT}/local", "keyless: no key demanded")
+        with patch.object(ccx, "auth_key", return_value="k"):
+            env = ccx.route_env("gate", "m")
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_CUSTOM_HEADERS"]), ("https://gate.example/anthropic", "x-api-key: k"))
+        for bad in (["add", "nvidia", "http://x"], ["add", "ok", "ftp://x"], ["add", "ok", "http://x", "--format", "soap"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), patch("sys.stderr", new_callable=io.StringIO):
+                ccx.providers_command(bad)
+        with patch("sys.stdout", new_callable=io.StringIO):
+            ccx.providers_command(["remove", "local"])
+        self.assertNotIn("local", ccx.PROVIDERS)
+        self.assertIn("gate", ccx.PROVIDERS)
+
     def test_fallback_refuses_a_session_that_connects_directly(self):
         with patch.dict(os.environ, {"CCX_MAIN_PROVIDER": "nvidia"}), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.ccx.fallback_command(["nvidia", "deepseek-ai/x"])

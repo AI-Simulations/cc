@@ -1,7 +1,7 @@
 # ccx — Claude Code on any provider
 
 `ccx` launches Claude Code on Anthropic or on a dozen other providers (Command Code, OpenAI OAuth,
-OpenRouter, NVIDIA, Gemini, OpenCode, MiniMax, Ollama Cloud, LM Studio, gpt4free). It includes a local
+OpenRouter, NVIDIA, Gemini, OpenCode, MiniMax, Ollama Cloud, LM Studio). It includes a local
 adapter that turns Claude's Messages API into OpenAI Chat Completions. It also adds a `/model` picker
 window with per-model cost estimates, a status line with quotas and API cost, subagents that run on
 other providers, and fallback routes.
@@ -55,8 +55,29 @@ ccx status
 |---|---|
 | `official` | Through the adapter, untouched until `/model` or a fallback reroutes it (`CCX_OFFICIAL_DIRECT=1` connects directly) |
 | `commandcode`, `minimax`, `opencode-*`, `openrouter` | Anthropic-format endpoint, direct; models the endpoint doesn't serve go through the adapter |
-| `openai-oauth`, `nvidia`, `gemini`, `ollama-cloud`, `lmstudio`, `gpt4free` | Local adapter on `127.0.0.1:10532` |
+| `openai-oauth`, `nvidia`, `gemini`, `ollama-cloud`, `lmstudio` | Local adapter on `127.0.0.1:10532` |
 | `commandcode-cli` | Adapter runs `cmdc` once per request (Command Code subscription, Go plan included) |
+| your own | OpenAI-format through the adapter, Anthropic-format direct (see below) |
+
+### Custom providers
+
+Any OpenAI- or Anthropic-compatible endpoint can be added as a route of its own:
+
+```sh
+ccx providers add myllm http://127.0.0.1:8000/v1 --no-key            # OpenAI-format, keyless local server
+ccx providers add gateway https://example.com/anthropic --format anthropic --key gateway --x-api-key
+ccx providers                                                         # list
+ccx providers remove myllm
+```
+
+Entries live in `~/.config/ccx/providers.json`. A key id `gateway` reads `GATEWAY_API_KEY` or `keys.json`
+(ccx asks once on first use). The adapter picks up new routes without a restart once it runs this version.
+
+### Unofficial routes
+
+`openai-oauth` uses a ChatGPT login outside OpenAI's own apps, `commandcode-cli` drives the Command Code
+CLI, and the OpenCode key renewal automates a signed-in browser. None of these are endorsed by the
+providers; check their terms and use them at your own risk. API-key routes are the supported way.
 
 The adapter passes through streaming text, thinking, tools, images, usage and effort. It stores no
 keys and logs no prompts. Each model gets its declared context window

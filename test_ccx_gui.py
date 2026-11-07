@@ -626,8 +626,8 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(self.run_ccx.call_count, 2)
 
     def test_editor_restricts_known_efforts_and_uses_actual_providers(self):
-        self.run_ccx.side_effect = lambda *args: (True, 'nvidia\tNVIDIA\ngpt4free\tFree' if args == ('fallback', 'routes')
-                                                else 'commandcode\tCommand Code\ncommandcode-cli\tCommand Code CLI\ngpt4free\tFree\nnvidia\tNVIDIA')
+        self.run_ccx.side_effect = lambda *args: (True, 'nvidia\tNVIDIA\nlmstudio\tLM Studio' if args == ('fallback', 'routes')
+                                                else 'commandcode\tCommand Code\ncommandcode-cli\tCommand Code CLI\nlmstudio\tLM Studio\nnvidia\tNVIDIA')
         editor = self.make_editor()
         fields = editor.fields['tools']
         fields['effort'].set('max')

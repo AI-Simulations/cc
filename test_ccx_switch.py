@@ -169,9 +169,9 @@ with tempfile.TemporaryDirectory(prefix='ccx-check-') as directory:
         assert len(ccx.get_models('openrouter')) == 20, 'Typed models beyond menu shortlist need limits too'
 
     fake_key = "test'$(throw 'must not execute')`secret"
-    for provider, model in [('commandcode', 'claude-sonnet-4-6'), ('openrouter', 'openai/gpt-5.3-codex'), ('official', None), ('openai-oauth', 'gpt-6-astra'), ('nvidia', 'test/model'), ('gpt4free', 'deepseek-v4-pro'), ('openai-oauth', "model'$(throw 'must not execute')`id")]:
+    for provider, model in [('commandcode', 'claude-sonnet-4-6'), ('openrouter', 'openai/gpt-5.3-codex'), ('official', None), ('openai-oauth', 'gpt-6-astra'), ('nvidia', 'test/model'), ('openai-oauth', "model'$(throw 'must not execute')`id")]:
         context = 872000 if provider == 'openai-oauth' and model == 'gpt-6-astra' else 131072 if provider == 'nvidia' else None
-        with patch.object(ccx, 'get_models', return_value=[{'id': model, 'context': context}]), patch.object(ccx, 'auth_key', return_value=fake_key), patch.object(ccx, 'ensure_oauth_proxy'), patch.object(ccx, 'ensure_g4f'), patch.object(ccx, 'ensure_anthropic_proxy'), patch.object(ccx.catalog, '_models_dev_facts', return_value={}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with patch.object(ccx, 'get_models', return_value=[{'id': model, 'context': context}]), patch.object(ccx, 'auth_key', return_value=fake_key), patch.object(ccx, 'ensure_oauth_proxy'), patch.object(ccx, 'ensure_anthropic_proxy'), patch.object(ccx.catalog, '_models_dev_facts', return_value={}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             ccx.apply(provider, model)
         script = temp / 'check.ps1'
         script.write_text('''$ErrorActionPreference = 'Stop'
@@ -213,7 +213,7 @@ function codex { $script:codexLaunched = $true; claude @args }
         assert data['opusCapabilities'] == 'thinking,adaptive_thinking,interleaved_thinking,effort,xhigh_effort,max_effort' if provider == 'commandcode' else not data['opusCapabilities']
         assert data['headers'] == 'x-ccx-launch: ' + data['launch'] and len(data['launch']) == 32 if provider in (*ccx.FALLBACK_ROUTES, 'official') else not data['headers'], 'Adapter routes (and official, passed through) name their launch for /fallback and /model'
         assert data['firstParty'] == ('1' if provider == 'official' else None), 'Only official runs as first party; other routes clear it'
-        assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else not data['toolSearch']
+        assert data['toolSearch'] == 'false' if provider in ('openai-oauth', 'nvidia') else not data['toolSearch']
         assert data['autoModeServer'] == '0' if provider != 'official' else not data['autoModeServer']
         assert data['gateway'] == '1' if provider not in ('official', 'commandcode') else not data['gateway'], 'The /model picker sees the gateway list'
         assert data['connectors'] == 'false' if provider != 'official' else not data['connectors']
@@ -227,7 +227,7 @@ function codex { $script:codexLaunched = $true; claude @args }
             assert all(not data[k] for k in ['key', 'token', 'model', 'fable', 'sonnet', 'subagent'])
             assert data['launchArgs'] == []
         else:
-            assert data['base'] == (f'http://127.0.0.1:{ccx.ADAPTER_PORT}/{provider}' if provider in ('openai-oauth', 'nvidia', 'gpt4free') else ccx.PROVIDERS[provider]['base'])
+            assert data['base'] == (f'http://127.0.0.1:{ccx.ADAPTER_PORT}/{provider}' if provider in ('openai-oauth', 'nvidia') else ccx.PROVIDERS[provider]['base'])
             assert data['model'] == data['haiku'] == data['subagent'] == model
             # /model offers the provider's other models; Command Code keeps Claude ids on their route.
             picks = ccx.picker_models(provider, model, [{'id': model, 'context': context}])

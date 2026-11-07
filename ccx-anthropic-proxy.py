@@ -30,7 +30,6 @@ UPSTREAMS = {
     "commandcode": "https://api.commandcode.ai/provider/v1",
     # Go serves most models (MiMo, GLM, Kimi, DeepSeek) only over /chat/completions.
     "opencode-go": "https://opencode.ai/zen/go/v1",
-    "gpt4free": "http://127.0.0.1:1337/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "ollama-cloud": "https://ollama.com/v1",
     "lmstudio": "http://127.0.0.1:1234/v1",
@@ -181,7 +180,7 @@ def usage(value):
 
 
 def reasoning(message):
-    """Chat Completions reasoning text: `reasoning_content` (DeepSeek, NVIDIA, g4f) or
+    """Chat Completions reasoning text: `reasoning_content` (DeepSeek, NVIDIA) or
     `reasoning` (OpenRouter-style proxies). Claude Code shows it as a thinking block."""
     value = message.get("reasoning_content") or message.get("reasoning")
     return value if isinstance(value, str) else ""
@@ -1013,7 +1012,7 @@ def provider_target(provider, model, effort):
     ccx = _load_ccx_switch()
     p = ccx.PROVIDERS[provider]
     key_id = p.get("key")
-    key = ccx.auth_key(key_id) if key_id and key_id not in ("oauth", "cli", "gpt4free", "lmstudio") else ""
+    key = ccx.auth_key(key_id) if key_id and key_id not in ("oauth", "cli", "lmstudio") else ""
     # route_env's split: Command Code serves non-Claude models, and OpenCode Go most models, over chat completions.
     chat = (p["format"] == "openai" or (provider == "commandcode" and not model.startswith("claude-"))
             or (provider == "opencode-go" and not ccx.go_messages(model)))
@@ -1062,6 +1061,22 @@ def _load_ccx_switch():
         module._ccx_loaded_mtime = mtime
         _ccx_switch = module
     return _ccx_switch
+
+
+_CUSTOM_ROUTES = set()
+
+
+def refresh_upstreams():
+    """Custom OpenAI-format providers (ccx providers.json) join the routes without an adapter restart."""
+    try:
+        custom = {n: p["base"] for n, p in _load_ccx_switch().custom_providers().items() if p["format"] == "openai"}
+    except Exception:
+        return  # a standalone adapter has only the built-in routes
+    for name in _CUSTOM_ROUTES - set(custom):
+        UPSTREAMS.pop(name, None)
+    UPSTREAMS.update({n: b for n, b in custom.items() if n not in UPSTREAMS or n in _CUSTOM_ROUTES})
+    _CUSTOM_ROUTES.clear()
+    _CUSTOM_ROUTES.update(custom)
 
 
 def ccx_models(provider):
@@ -1259,6 +1274,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_GET(self):
+        refresh_upstreams()
         path = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
         if path[0] == OFFICIAL_ROUTE:
             if path[1:] == ["v1", "models"] and route_for(self.headers.get("x-ccx-launch")):
@@ -1306,6 +1322,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"data": models, "has_more": False})
 
     def do_POST(self):
+        refresh_upstreams()
         streaming = False
         try:
             route = urllib.parse.urlsplit(self.path).path.strip("/").split("/")

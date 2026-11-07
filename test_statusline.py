@@ -472,7 +472,7 @@ class ModelSwitchTests(unittest.TestCase):
                 self.assertFalse(saved)
 
     def test_switch_to_provider_without_quota_never_reuses_claude_quota(self):
-        for provider in ('nvidia', 'minimax', 'opencode-zen', 'gpt4free', 'gemini', 'ollama-cloud', 'lmstudio'):
+        for provider in ('nvidia', 'minimax', 'opencode-zen', 'gemini', 'ollama-cloud', 'lmstudio'):
             with self.subTest(provider=provider):
                 text, fetched, _, _ = self.render({'provider': provider, 'model': 'claude-test'})
                 self.assertNotIn('99%', text)
