@@ -399,8 +399,8 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
-ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
-LEVEL_TOPS = {"easy": 75, "mid": 89}  # ccx-switch.py's default range tops
+ROUTER_LEVELS = ("very-easy", "easy", "mid", "hard", "very-hard")  # ccx-switch.py's router levels
+LEVEL_TOPS = {"very-easy": 30, "easy": 75, "mid": 89, "hard": 95}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):

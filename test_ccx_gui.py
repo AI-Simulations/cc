@@ -498,13 +498,37 @@ class PickerTests(unittest.TestCase):
             self.assertLessEqual(button.winfo_x() + button.winfo_width(), foot.winfo_width())
         self.assertTrue(str(ttk.Label.cget(tab.status, 'text')).endswith('…'))
 
+    def test_range_bar_drags_boundaries_and_picks_levels(self):
+        changed, picked = mock.Mock(), mock.Mock()
+        bar = gui.RangeBar(self.app, changed, picked)
+        bar.place(x=0, y=0, width=800, height=50)
+        self.app.update()
+        bar.set(list(gui.ROUTER_LEVELS), [30, 75, 89, 95], {'mid': 'Sonnet 5.5 · high'}, 'mid')
+        event = lambda x: mock.Mock(x=x)
+        least, density = bar.layout()
+        # dragging the first boundary to where score 40 ends moves very easy's top to 40
+        bar.press(event(bar.edge(0)))
+        bar.move(event((1 * least) + density * 41))
+        bar.release(event(0))
+        changed.assert_called_once_with([40, 75, 89, 95])
+        # a boundary cannot pass its neighbour
+        bar.press(event(bar.edge(1)))
+        bar.move(event(0))
+        bar.release(event(0))
+        self.assertEqual(changed.call_args.args[0], [40, 41, 89, 95])
+        # every level stays wide enough to read, and a click inside one picks it
+        self.assertTrue(all(bar.edge(i) - bar.edge(i - 1) >= least for i in range(5)))
+        bar.press(event((bar.edge(3) + bar.edge(4)) / 2))
+        picked.assert_called_once_with('very-hard')
+        bar.destroy()
+
     def test_target_tabs_explain_which_profile_they_edit(self):
         labels = [w.cget('text') for w in self.app.tabs['fallback'].winfo_children() if isinstance(w, ttk.Label)]
         self.assertTrue(any('profile' in text for text in labels), labels)
         # the Subagent tab has no Target box: router levels, or the one `sub` model, and a subline per mode
         tab = self.app.tabs['subagent']
         self.assertFalse(tab.target_box.winfo_manager())
-        for mode, word in (('off', 'main model'), ('one', 'one model'), ('router', 'Easy, Mid or Hard')):
+        for mode, word in (('off', 'main model'), ('one', 'one model'), ('router', '0-100')):
             tab.mode.set(mode)
             tab.show_mode()
             self.assertIn(word, tab.mode_hint.cget('text'))
@@ -545,12 +569,13 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(str(editor.fields['subagent']['model_box'].cget('state')), 'disabled')
         editor.fields['easy']['upto'].set('30')
         editor.fields['hard']['model'].set('h2')
+        editor.fields['hard']['autocompact'].set('70%')
         editor.save()
         self.background.call_args.args[1]()
         saved = json.loads(self.run_ccx.call_args.args[3])['subagent']
         self.assertEqual(saved['provider'], 'router')
         self.assertEqual(saved['levels']['easy'], {'provider': 'beta', 'model': 'e', 'upto': 30})
-        self.assertEqual(saved['levels']['hard'], {'provider': 'beta', 'model': 'h2', 'effort': 'low'})
+        self.assertEqual(saved['levels']['hard'], {'provider': 'beta', 'model': 'h2', 'effort': 'low', 'autocompact': 70})
         editor.fields['subagent']['provider'].set('beta')  # back to one model: the levels hide
         editor.change_provider('subagent')
         self.assertFalse(editor.fields['easy']['model_box'].winfo_manager())

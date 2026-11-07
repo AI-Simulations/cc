@@ -210,14 +210,52 @@ class CcSessionTests(unittest.TestCase):
         row = lambda id, aa, price, score: {"id": id, "aa": aa, "in": price, "out": price * 5, "score": score}
         rows = [row("opus", 59, 4, 75), row("sonnet", 54, 2, 74), row("fable", 50, 10, 53),
                 row("haiku", 36, 0.1, 67), row("tiny", 20, 0.01, 60), {"id": "alias", "aa": None, "in": 1, "out": 1}]
-        # hard: top AA; easy: cheapest within half of it (tiny is too weak); mid: best score of the rest
-        self.assertEqual(self.ccx.best_levels(rows), {"easy": "haiku", "mid": "sonnet", "hard": "opus"})
+        # very hard: top AA; every other level: the cheapest pick reaching its share of that AA (tiny is too weak)
+        self.assertEqual(self.ccx.best_levels(rows), {"very-easy": ("haiku", None), "easy": ("sonnet", None),
+                                                      "mid": ("sonnet", None), "hard": ("sonnet", None),
+                                                      "very-hard": ("opus", None)})
         self.assertEqual(self.ccx.best_levels([{"id": "x", "aa": None}]), {})
+        # per-effort AA scores make (model, effort) pairs; a higher effort costs more (EFFORT_COST)
+        rows = [{"id": "opus", "aa": 59, "in": 4, "out": 20, "aa_efforts": {"max": 59, "high": 52, "low": 35}},
+                {"id": "haiku", "aa": 36.5, "in": 0.1, "out": 0.5, "aa_efforts": {"max": 36.5, "xhigh": 34.6}}]
+        self.assertEqual(self.ccx.best_levels(rows), {"very-easy": ("haiku", "xhigh"), "easy": ("opus", "high"),
+                                                      "mid": ("opus", "high"), "hard": ("opus", "max"),
+                                                      "very-hard": ("opus", "max")})
+        # efforts a model does not take on this provider are skipped
+        only = lambda model: ["low", "high"] if model == "opus" else None
+        self.assertEqual(self.ccx.best_levels(rows, only)["very-hard"], ("opus", "high"))
         # each pick's effort comes from that model's own ladder
-        effort = lambda levels: [self.ccx.level_effort(l, levels) for l in ("easy", "mid", "hard")]
-        self.assertEqual(effort(["low", "medium", "high", "xhigh", "max"]), ["xhigh", "high", "medium"])
-        self.assertEqual(effort(["low", "medium", "high", "xhigh", "max", "ultra"]), ["xhigh", "high", "medium"])
-        self.assertEqual(effort(["low", "high"]), ["low", "high", "high"])
+        effort = lambda levels: [self.ccx.level_effort(l, levels) for l in self.ccx.ROUTER_LEVELS]
+        self.assertEqual(effort(["low", "medium", "high", "xhigh", "max"]), ["xhigh", "xhigh", "high", "medium", "high"])
+        self.assertEqual(effort(["low", "high"]), ["low", "low", "high", "high", "high"])
+
+    def test_router_preset_levels_own_their_compact_window(self):
+        old = {"sub": {}, "easy": {"provider": "official", "autocompact": "100k", "description": "mine"},
+               "hard": {"provider": "official", "autocompact": 50}}
+        target = {"provider": "router", "levels": {"easy": {"provider": "official", "model": "h"},
+                                                    "hard": {"provider": "official", "model": "o", "autocompact": "200k"}}}
+        profiles = self.ccx.preset_profiles(target, old)
+        self.assertNotIn("autocompact", profiles["easy"], "a level without one inherits, not the old window")
+        self.assertEqual(profiles["easy"]["description"], "mine")
+        self.assertEqual(profiles["hard"]["autocompact"], "200k")
+
+    def test_router_falls_back_to_a_level_the_session_knows(self):
+        ranges = {"very-easy": (0, 30), "easy": (31, 75), "mid": (76, 89), "hard": (90, 95), "very-hard": (96, 100)}
+        known = {"ccx-easy", "ccx-easy-live", "ccx-mid-live", "ccx-hard"}
+        self.assertEqual(self.ccx.usable_level("very-easy", ranges, known), "easy")
+        self.assertEqual(self.ccx.usable_level("very-hard", ranges, known), "hard")
+        self.assertEqual(self.ccx.usable_level("mid", ranges, known), "mid")
+        self.assertEqual(self.ccx.usable_level("very-easy", ranges, None), "very-easy", "no listing: trust the pick")
+        transcript = Path(self.tmp.name) / "t.jsonl"
+        listing = lambda added, removed=(): json.dumps({"type": "attachment", "attachment": {
+            "type": "agent_listing_delta", "addedTypes": list(added), "removedTypes": list(removed)}})
+        transcript.write_text("\n".join([listing(["ccx-easy", "ccx-sub"]), listing(["ccx-hard"], ["ccx-sub"])]) + "\n")
+        self.assertEqual(self.ccx.listed_types(str(transcript)), {"ccx-easy", "ccx-hard"})
+        levels = {n: {"provider": "official"} for n in ranges}
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
+        result = self.ccx.agent_hook({"tool_name": "Agent", "transcript_path": str(transcript),
+                                      "tool_input": {"subagent_type": "ccx-mid", "description": "[10] x", "prompt": "x"}})
+        self.assertEqual(result["hookSpecificOutput"]["updatedInput"]["subagent_type"], "ccx-easy")
 
     def test_review_hook_reminds_only_after_ccx_workers(self):
         out = self.ccx.review_hook({"tool_name": "Agent", "tool_input": {"subagent_type": "ccx-mid"}})

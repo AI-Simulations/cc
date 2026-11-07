@@ -224,19 +224,35 @@ def _name_key(name: str) -> tuple[tuple[str, ...], frozenset[str]]:
 
 
 def _intelligence(mid: str) -> float | None:
-    """Artificial Analysis Intelligence Index for a model id, or None if unmatched."""
+    """Artificial Analysis Intelligence Index for a model id (its best reasoning setting), or None if unmatched."""
+    efforts = _intelligence_efforts(mid)
+    return max(efforts.values()) if efforts else None
+
+
+# AA slug words per reasoning setting; a slug with none of them is the model's top setting.
+AA_EFFORT_WORDS = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
+                   "minimal": "minimal", "non": "off", "nonreasoning": "off"}
+
+
+def _intelligence_efforts(mid: str) -> dict:
+    """{effort: AA Intelligence Index} for a model id, one per reasoning setting AA lists ("max" for
+    the plain slug when it has others, else "default"); {} if unmatched."""
     tail = mid.lower().rsplit("/", 1)[-1]
     numbers, words = _name_key(AA_ALIASES.get(tail, tail))
     words -= {"preview", "exp"}  # not "max": gpt-5.1-codex-max is its own model
     for key in dict.fromkeys((words, words - AA_SERVING_WORDS)):
-        best = _intelligence_match(numbers, key)
-        if best is not None:
-            return best
-    return None
+        found = _intelligence_match(numbers, key)
+        if found:
+            if "" in found:
+                plain = "max" if len(found) > 1 and "max" not in found else "default"
+                found[plain] = max(found.get(plain, 0.0), found.pop(""))
+            return found
+    return {}
 
 
-def _intelligence_match(numbers: tuple, words: frozenset) -> float | None:
-    best = None
+def _intelligence_match(numbers: tuple, words: frozenset) -> dict:
+    """{effort word or "": best score} of the AA entries matching this name."""
+    best = {}
     for entry in _artificial_analysis():
         score = (entry.get("evaluations") or {}).get("artificial_analysis_intelligence_index")
         if not isinstance(score, (int, float)):
@@ -251,17 +267,20 @@ def _intelligence_match(numbers: tuple, words: frozenset) -> float | None:
         # AA slugs may add the maker and parameter count: nvidia-nemotron-3-ultra-550b-a55b.
         maker = str((entry.get("model_creator") or {}).get("slug") or "").lower()
         extra = {w for w in e_words - words if w != maker and not re.fullmatch(r"a?\d+b", w)}
-        # ponytail: AA lists one entry per reasoning setting; best one wins.
+        # AA lists one entry per reasoning setting; per setting the best one wins.
         if extra <= AA_VARIANT_WORDS:
-            best = max(best or 0.0, float(score))
+            effort = next((AA_EFFORT_WORDS[w] for w in extra if w in AA_EFFORT_WORDS), "")
+            best[effort] = max(best.get(effort, 0.0), float(score))
     return best
 
 
 def _model_facts(provider: str, mid: str) -> dict:
     """models.dev entry ({"limit": ..., "cost": ...}) plus AA "intelligence", or {}."""
     info = _models_dev_facts(provider, mid)
-    score = _intelligence(mid)
-    return {**info, "intelligence": score} if score is not None else info
+    efforts = _intelligence_efforts(mid)
+    if not efforts:
+        return info
+    return {**info, "intelligence": max(efforts.values()), "intelligence_efforts": efforts}
 
 
 @lru_cache(maxsize=None)

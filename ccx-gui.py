@@ -22,7 +22,9 @@ CCX = Path(__file__).with_name('ccx-switch.py')
 TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
         ('auto', 'Auto'), ('tools', 'Tools'), ('presets', 'Presets')]
 TARGET_TABS = ('subagent', 'fallback')
-ROUTER_LEVELS = ('easy', 'mid', 'hard')  # ccx-switch.py's router levels, in the Subagent tab's order
+ROUTER_LEVELS = ('very-easy', 'easy', 'mid', 'hard', 'very-hard')  # ccx-switch.py's router levels, in order
+# the difficulty bar's colours, cool to hot
+LEVEL_COLORS = {'very-easy': '#2f9e77', 'easy': '#3f8fd2', 'mid': '#c99a2e', 'hard': '#d9722e', 'very-hard': '#d6453d'}
 
 # Dark by default, independent of the desktop's light/dark setting.
 BG, PANEL, FIELD, HOVER = '#0d1117', '#141a22', '#19202a', '#243042'
@@ -295,8 +297,9 @@ def session_cost(info, usage):
             + usage['output'] * price_out) / 1e6
 
 
-def fact_values(info, usage=None):
-    """One value per fact column; a fact the provider does not publish reads '?'."""
+def fact_values(info, usage=None, effort=None):
+    """One value per fact column; a fact the provider does not publish reads '?'. AA is the picked
+    effort's score where Artificial Analysis rates that effort, else the model's best."""
     if not info:
         return ('?', '?', '?', '?', '')
     context = info.get('ctx')
@@ -306,7 +309,7 @@ def fact_values(info, usage=None):
     else:
         price = '?'
     return (tokens(context) if context else '?', price,
-            f'{info["aa"]:.0f}' if info.get('aa') is not None else '?',
+            f'{aa:.0f}' if (aa := (info.get('aa_efforts') or {}).get(effort, info.get('aa'))) is not None else '?',
             f'{info["score"]:.0f}' if info.get('score') is not None else '?',
             '' if (cost := session_cost(info, usage)) is None else '≈' + money(cost))
 
@@ -489,7 +492,11 @@ class StatusLabel(ttk.Label):
         ttk.Label.configure(self, text=text)
 
 
-LEVEL_TOPS = {'easy': 75, 'mid': 89}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {'very-easy': 30, 'easy': 75, 'mid': 89, 'hard': 95}  # ccx-switch.py's default range tops
+
+
+def level_name(name):
+    return name.replace('-', ' ').capitalize()
 
 
 def level_ranges(profiles):
@@ -524,6 +531,102 @@ def load_profiles():
         # router levels added after this session saved its profiles reach it as set globally
         return {**own, **{n: a for n, a in shared.items() if n in ROUTER_LEVELS and n not in own}}
     return shared
+
+
+class RangeBar(tk.Canvas):
+    """The 0-100 difficulty scale cut into the router's levels. Each segment, in its level's colour, names
+    its range, model and effort; drag a boundary to move where a level ends, click a segment to pick it."""
+    HEIGHT = 50
+    GRAB = 6  # px either side of a boundary that starts a drag
+
+    def __init__(self, master, on_change, on_pick):
+        super().__init__(master, height=self.HEIGHT, bg=BG, highlightthickness=0)
+        self.on_change, self.on_pick = on_change, on_pick
+        self.levels, self.tops, self.labels, self.selected, self.drag = [], [], {}, None, None
+        self.bind('<Configure>', lambda _e: self.draw())
+        self.bind('<Motion>', self.hover)
+        self.bind('<ButtonPress-1>', self.press)
+        self.bind('<B1-Motion>', self.move)
+        self.bind('<ButtonRelease-1>', self.release)
+
+    def set(self, levels, tops, labels, selected=None):
+        """levels in order, one top per level but the last, {level: 'model · effort'}."""
+        self.levels, self.tops, self.labels, self.selected = list(levels), list(tops), dict(labels), selected
+        self.draw()
+
+    # Every segment gets MIN_WIDTH px (a 5-point level stays readable); only the rest is proportional,
+    # so a boundary sits at (i + 1) * min + density * (top + 1) and a drag inverts that exactly.
+    MIN_WIDTH = 120
+
+    def layout(self):
+        width = max(self.winfo_width(), 2)
+        least = min(self.MIN_WIDTH, width / max(1, 2 * len(self.levels)))
+        return least, (width - least * len(self.levels)) / 101
+
+    def edge(self, i):
+        """x of the boundary after the i-th level (-1: the left end)."""
+        least, density = self.layout()
+        return 0 if i < 0 else (i + 1) * least + density * ((self.tops + [100])[i] + 1)
+
+    def spans(self):
+        lows = [0] + [t + 1 for t in self.tops]
+        return list(zip(self.levels, lows, [*self.tops, 100]))
+
+    def boundary(self, x):
+        near = [(abs(x - self.edge(i)), i) for i in range(len(self.tops))]
+        hit = min(near, default=None)
+        return hit[1] if hit and hit[0] <= self.GRAB else None
+
+    @staticmethod
+    def dim(color):
+        """The colour a third of the way to the background: levels not being edited."""
+        a, b = (tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in (color, BG))
+        return '#' + ''.join(f'{round(x + (y - x) * 0.45):02x}' for x, y in zip(a, b))
+
+    def draw(self):
+        self.delete('all')
+        h = self.HEIGHT
+        for i, (level, low, high) in enumerate(self.spans()):
+            x0, x1 = self.edge(i - 1), self.edge(i)
+            picked = level == self.selected
+            color = LEVEL_COLORS.get(level, ACCENT)
+            self.create_rectangle(x0, 2, x1, h - 2, fill=color if picked or self.selected is None else self.dim(color),
+                                  width=2 if picked else 0, outline=FG if picked else '')
+            room = x1 - x0
+            title = f'{level_name(level)} {low}–{high}' if room > 130 else f'{low}–{high}'
+            self.create_text((x0 + x1) / 2, h * 0.32, text=title, fill=FG, font=SMALL_BOLD, width=room - 6)
+            self.create_text((x0 + x1) / 2, h * 0.68, text=self.labels.get(level, ''), fill=FG, font=(UI, 8),
+                             width=room - 6)
+        for i in range(len(self.tops)):
+            x = self.edge(i)
+            self.create_line(x, 0, x, h, fill=BG, width=3)
+
+    def hover(self, e):
+        self.configure(cursor='sb_h_double_arrow' if self.boundary(e.x) is not None else 'hand2')
+
+    def press(self, e):
+        self.drag = self.boundary(e.x)
+        if self.drag is None:
+            level = next((lv for i, (lv, _, _) in enumerate(self.spans()) if e.x < self.edge(i)),
+                         self.levels[-1] if self.levels else None)
+            if level:
+                self.on_pick(level)
+
+    def move(self, e):
+        if self.drag is None:
+            return
+        i = self.drag
+        least, density = self.layout()
+        top = round((e.x - (i + 1) * least) / max(density, 1e-6)) - 1
+        lowest = self.tops[i - 1] + 1 if i else 0
+        highest = self.tops[i + 1] - 1 if i + 1 < len(self.tops) else 99
+        self.tops[i] = max(lowest, min(top, highest))
+        self.draw()
+
+    def release(self, _e):
+        if self.drag is not None:
+            self.drag = None
+            self.on_change(list(self.tops))
 
 
 class ThinScrollbar(tk.Canvas):
@@ -650,7 +753,7 @@ class PickerTab(ttk.Frame):
                                 state='normal' if session_launch_id() and (value != 'router' or self.levels)
                                 else 'disabled').pack(side='left', padx=(0, 2))
             # the subline under the switch says what the chosen mode does
-            self.mode_hint = ttk.Label(self, text='', style='Faint.TLabel')
+            self.mode_hint = ttk.Label(self, text='', style='Faint.TLabel', wraplength=1000)
             self.mode_hint.pack(fill='x', padx=18, pady=(6, 0))
 
         bar = ttk.Frame(self)
@@ -677,29 +780,20 @@ class PickerTab(ttk.Frame):
             ttk.Label(self.level_bar, text='Level', style='Dim.TLabel').pack(side='left', padx=(0, 8))
             self.level_buttons = {}
             for name in self.levels:
-                self.level_buttons[name] = ttk.Radiobutton(self.level_bar, text=name.capitalize(), value=name,
-                                                           variable=self.target, style='Seg.Toolbutton', command=self.load)
+                self.level_buttons[name] = ttk.Radiobutton(self.level_bar, text=level_name(name), value=name,
+                                                           variable=self.target, style='Seg.Toolbutton',
+                                                           command=lambda: self.pick_level(self.target.get()))
                 self.level_buttons[name].pack(side='left', padx=(0, 2))
             # fills every level from the picked provider: top AA for hard, cheapest close one for easy
             self.best_button = ttk.Button(self.level_bar, text='Best picks', command=self.best_picks)
             self.best_button.pack(side='left', padx=(8, 0))
             self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=pick)
-            # Difficulty: the 0-100 scale the main model rates each task on, cut into the levels' ranges.
-            # Each box is where a level's range ends; the last level always runs to 100.
+            # Difficulty: the 0-100 scale the main model rates each task on, cut into the levels' ranges;
+            # the last level always runs to 100.
             self.range_bar = ttk.Frame(self)
             ttk.Label(self.range_bar, text='Difficulty', style='Dim.TLabel').pack(side='left', padx=(0, 8))
-            self.tops, self.range_labels = {}, {}
-            for i, name in enumerate(self.levels):
-                last = i == len(self.levels) - 1
-                self.range_labels[name] = ttk.Label(self.range_bar, text='', style='Dim.TLabel')
-                self.range_labels[name].pack(side='left', padx=(12 if i else 0, 4))
-                if not last:
-                    self.tops[name] = tk.StringVar()
-                    box = ttk.Spinbox(self.range_bar, from_=0, to=99, width=4, textvariable=self.tops[name],
-                                      command=self.save_ranges)
-                    box.bind('<Return>', lambda _e: self.save_ranges())
-                    box.bind('<FocusOut>', lambda _e: self.save_ranges())
-                    box.pack(side='left')
+            self.range_canvas = RangeBar(self.range_bar, self.save_ranges, self.pick_level)
+            self.range_canvas.pack(side='left', fill='x', expand=True)
             self.range_bar.pack(fill='x', padx=18, pady=(0, 8), before=pick)
         elif key == 'fallback':
             self.target_label.pack(side='left')
@@ -721,7 +815,7 @@ class PickerTab(ttk.Frame):
         self.effort = tk.StringVar(value=self.view.get('effort') or 'default')
         self.effort_box = ttk.Combobox(pick, textvariable=self.effort, state='readonly', width=10)
         self.effort_box.pack(side='left', padx=(8, 0))
-        self.effort.trace_add('write', lambda *_: self.remember())
+        self.effort.trace_add('write', lambda *_: (self.remember(), self.show_effort_aa()))
         self.compact = tk.StringVar(value='inherit')
         if key in ('subagent', 'model'):
             # Typed values work too: a token window such as 150k, or (subagents) a 1-100 percentage.
@@ -741,7 +835,7 @@ class PickerTab(ttk.Frame):
         self.list.heading('#0', text='Model', anchor='w')
         self.list.column('#0', width=360, stretch=True, anchor='w')
         for column, title, width in (('context', 'Context', 80), ('price', 'Price $/M', 110),
-                                     ('intelligence', 'AA', 50), ('score', 'Score', 60),
+                                     ('intelligence', 'AA', 76), ('score', 'Score', 60),
                                      ('session', 'This session', 110)):
             self.list.heading(column, text=title, anchor='e')
             self.list.column(column, width=width, stretch=False, anchor='e')
@@ -791,20 +885,29 @@ class PickerTab(ttk.Frame):
         """Each level button names its difficulty range and the model it runs on now."""
         profiles = load_profiles()
         ranges = level_ranges(profiles)
+        labels = {}
         for name, button in self.level_buttons.items():
-            model = (profiles.get(name) or {}).get('model')
+            profile = profiles.get(name) or {}
             low, high = ranges.get(name, (0, 100))
-            button.configure(text=f'{name.capitalize()} {low}–{high}' + (f' · {short_model(model)}' if model else ''))
-            self.range_labels[name].configure(text=f'{name.capitalize()} {low}–' + ('' if name in self.tops else '100'))
-            if name in self.tops:
-                self.tops[name].set(str(high))
+            button.configure(text=f'{level_name(name)} {low}–{high}')
+            compact = profile.get('autocompact')
+            labels[name] = ' · '.join(filter(None, [short_model(profile['model']) if profile.get('model') else '',
+                                                    profile.get('effort') or '',
+                                                    f'ac {compact}%' if type(compact) is int else f'ac {compact}' if compact else '']))
+        shown = [n for n in self.levels if n in ranges]
+        self.range_canvas.set(shown, [ranges[n][1] for n in shown[:-1]], labels, self.target.get() or None)
 
-    def save_ranges(self):
-        tops = [self.tops[n].get().strip() for n in self.levels if n in self.tops]
-        current = [str(level_ranges(load_profiles())[n][1]) for n in self.levels if n in self.tops]
+    def pick_level(self, level):
+        """A level button or a click on its segment: its models load below, and the bar marks it."""
+        self.target.set(level)
+        self.load()
+        self.show_levels()
+
+    def save_ranges(self, tops):
+        current = [level_ranges(load_profiles())[n][1] for n in self.levels[:-1]]
         if tops == current:
-            return  # a focus change with nothing edited
-        ok, out = run_ccx('agents', 'router', 'ranges', *tops)
+            return  # a click with nothing moved
+        ok, out = run_ccx('agents', 'router', 'ranges', *map(str, tops))
         self.settle(out.strip().splitlines()[-1] if out.strip() else ('Saved.' if ok else 'Failed.'))
         self.show_levels()  # a rejected pair snaps back to the saved ranges
 
@@ -825,7 +928,8 @@ class PickerTab(ttk.Frame):
         self.mode_hint.configure(text={
             'off': 'No subagents: the main model does all the work itself.',
             'one': 'Every subagent task runs on the one model picked below.',
-            'router': 'The main model sends each task to Easy, Mid or Hard by its difficulty. Pick each level\'s model below.',
+            'router': 'The main model rates each task 0-100 and ccx runs it on the level whose range holds that score. '
+                      'Drag a boundary to move a range; click a level to pick its model and effort.',
         }[mode])
         if mode == 'router':
             self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=self.pick_row)
@@ -917,6 +1021,16 @@ class PickerTab(ttk.Frame):
                 self.show_providers(rows if isinstance(rows, list) else [])
 
         self.app.background(self.provider_rows, done)
+
+    def show_effort_aa(self):
+        """The AA column follows the Effort box: each model's score at that effort, where AA rates it."""
+        if not hasattr(self, 'list'):
+            return  # the effort is set while the tab is still being built
+        effort = self.effort.get()
+        self.list.heading('intelligence', text='AA' if effort in ('', 'default') else f'AA {effort}')
+        for model, iid in self.iids.items():
+            if self.list.exists(iid):
+                self.list.set(iid, 'intelligence', fact_values(self.facts.get(model), None, effort)[2])
 
     def remember(self):
         """Keep this tab's browsing picks (never the applied route) for the next opening."""
@@ -1101,7 +1215,7 @@ class PickerTab(ttk.Frame):
         if current:
             tags += ('current',)
         iid = self.list.insert(parent, 'end', text=f' {model}' + ('  ·  Current' if current else ''), image=logo,
-                               values=fact_values(self.facts.get(model), self.app.usage), tags=tags)
+                               values=fact_values(self.facts.get(model), self.app.usage, self.effort.get()), tags=tags)
         self.iids[model] = iid
 
     def chosen(self):
@@ -1165,7 +1279,8 @@ class PickerTab(ttk.Frame):
     # ---- apply ----
 
     def apply(self):
-        model = self.chosen()
+        model = self.chosen() or (self.current[1] if self.key == 'subagent' and self.current
+                                  and self.current[0] == self.provider.get() else None)
         if not model:
             self.status.configure(text='Pick a model first.')
             return
@@ -1488,7 +1603,7 @@ class PresetEditor(tk.Toplevel):
         providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] not in ('off', 'router')]]))
         fallback_providers = [value for value, _ in tab_rows(run_ccx('fallback', 'routes')[1])]
         helper_providers = [value for value, _ in tab_rows(run_ccx('route', 'routes')[1])]
-        for column, title in enumerate(('', 'Provider', 'Model', 'Effort', 'Up to')):
+        for column, title in enumerate(('', 'Provider', 'Model', 'Effort', 'Up to', 'Compact')):
             ttk.Label(body, text=title, style='Dim.TLabel').grid(row=1, column=column, sticky='w', padx=(0, 10))
         # a router preset's levels: as saved, else as the levels are set now
         router = settings['subagent'] if settings['subagent'].get('provider') == 'router' else None
@@ -1496,13 +1611,15 @@ class PresetEditor(tk.Toplevel):
         ranges = level_ranges(profiles)
         levels = (router or {}).get('levels') or {
             n: {**{k: (profiles.get(n) or {}).get(k) for k in ('provider', 'model', 'effort')},
-                'upto': ranges.get(n, (0, LEVEL_TOPS.get(n, 100)))[1]} for n in ROUTER_LEVELS}
+                'upto': ranges.get(n, (0, LEVEL_TOPS.get(n, 100)))[1]} for n in ROUTER_LEVELS if n in profiles}
+        # the preset's own levels (an older preset may have three), in order
+        self.router_levels = [n for n in ROUTER_LEVELS if n in levels]
         self.level_rows = []
         rows = []
         for key, label in TABS[:-1]:
             rows.append((key, label, settings[key]))
             if key == 'subagent':
-                rows += [(n, f'   {n.title()}', levels.get(n) or {}) for n in ROUTER_LEVELS]
+                rows += [(n, f'   {level_name(n)}', levels.get(n) or {}) for n in self.router_levels]
         for row, (key, label, target) in enumerate(rows, 2):
             fields = {name: tk.StringVar(value=target.get(name) or ('default' if name == 'effort' else ''))
                       for name in ('provider', 'model', 'effort')}
@@ -1529,19 +1646,24 @@ class PresetEditor(tk.Toplevel):
             spinner = ttk.Label(model_box, text='', style='Spin.TLabel')
             fields.update(model_box=model_box, effort_box=effort_box, spinner=spinner, loading=False, request=0)
             if key in ROUTER_LEVELS:
-                last = key == ROUTER_LEVELS[-1]
+                last = key == self.router_levels[-1]
                 fields['upto'] = tk.StringVar(value='100' if last else str(target.get('upto', LEVEL_TOPS.get(key, 50))))
                 upto = (ttk.Label(body, text='100', style='Dim.TLabel') if last else
                         ttk.Spinbox(body, from_=0, to=99, increment=5, textvariable=fields['upto'], width=5))
                 upto.grid(row=row, column=4, sticky='w')
-                self.level_rows += [name_label, box, model_box, effort_box, upto]
+                own = target.get('autocompact')
+                fields['autocompact'] = tk.StringVar(value=f'{own}%' if type(own) is int else own or 'inherit')
+                compact = ttk.Combobox(body, textvariable=fields['autocompact'], width=8,
+                                       values=['inherit', *COMPACT_TOKENS, '50%', '70%', '90%'])
+                compact.grid(row=row, column=5, sticky='w', padx=(10, 0))
+                self.level_rows += [name_label, box, model_box, effort_box, upto, compact]
         self.spinner_job = None
         self.spinner_frame = 0
         self.model, self.effort = self.fields['model']['model'], self.fields['model']['effort']
         self.model_box, self.effort_box = self.fields['model']['model_box'], self.fields['model']['effort_box']
         self.status = StatusLabel(body, text='Loading models…', style='Faint.TLabel')
         self.status.grid(row=20, column=0, columnspan=5, sticky='we', pady=(10, 0))
-        ttk.Label(body, text='Off = disable fallback / inherit helper. Router = each task goes to Easy, Mid or Hard '
+        ttk.Label(body, text='Off = disable fallback / inherit helper. Router = each task goes to the level '
                   'by its difficulty (0-100); each level takes scores up to its top.',
                   style='Faint.TLabel', wraplength=720).grid(row=21, column=0, columnspan=5, sticky='w')
         foot = ttk.Frame(body)
@@ -1659,7 +1781,7 @@ class PresetEditor(tk.Toplevel):
             widget.grid() if on else widget.grid_remove()
         if on and not self.levels_loaded:
             self.levels_loaded = True
-            for level in ROUTER_LEVELS:
+            for level in self.router_levels:
                 self.load_models(level)
 
     def save(self):
@@ -1680,14 +1802,18 @@ class PresetEditor(tk.Toplevel):
             effort = fields['effort'].get()
             settings[key] = {'provider': provider, 'model': model,
                              **({'effort': effort} if effort not in ('', 'default') else {})}
-            if key in ROUTER_LEVELS[:-1]:
+            if key in self.router_levels:
+                compact = fields['autocompact'].get().strip()
+                if compact not in ('', 'inherit'):
+                    settings[key]['autocompact'] = int(compact[:-1]) if compact.endswith('%') and compact[:-1].isdigit() else compact
+            if key in self.router_levels[:-1]:
                 try:
                     settings[key]['upto'] = int(fields['upto'].get())
                 except ValueError:
                     self.status.configure(text=f'{key.title()}: its top must be a whole number.')
                     return
         if router:
-            settings['subagent'] = {'provider': 'router', 'levels': {n: settings.pop(n) for n in ROUTER_LEVELS}}
+            settings['subagent'] = {'provider': 'router', 'levels': {n: settings.pop(n) for n in self.router_levels}}
         args = ['presets', 'set-bundle', self.preset['name'], json.dumps(settings)]
         self.status.configure(text='Saving…')
         self.app.background(lambda: run_ccx(*args), self.done)

@@ -122,19 +122,29 @@ so its tab shows the full chat.
 
 ### Router
 
-The `easy`, `mid` and `hard` profiles form a difficulty router. With it on, the main model starts each
-call's description with a 0-100 score (`[35] rename helper`); ccx runs the call on the level whose range
-holds it, whichever level was named, and a task that fails review reruns one range up. Defaults: easy 0-75,
-mid 76-89, hard 90-100. The switch is per session and applies from the next prompt.
+The `very-easy`, `easy`, `mid`, `hard` and `very-hard` profiles form a difficulty router. With it on, the main
+model starts each call's description with a 0-100 score (`[35] rename helper`); ccx runs the call on the level
+whose range holds it, whichever level was named, and a task that fails review reruns one range up. Defaults:
+very easy 0-30, easy 31-75, mid 76-89, hard 90-95, very hard 96-100. A level the running session does not know
+yet (added after it started) falls back to the nearest one it knows until `/reload-plugins`.
 
 ```sh
 ccx agents router on|off                      # this session
-ccx agents router ranges 75 89                # easy 0-75, mid 76-89, hard 90-100
-ccx agents router calibrate 60 20             # tops from logged scores: 60% easy, 20% mid, rest hard
+ccx agents router ranges 30 75 89 95          # one top per level but the last
+ccx agents router calibrate 20 40 20 15       # tops from logged scores, as shares per level
+ccx agents router best openai-oauth           # (model, effort) per level from AA score and price
 ```
 
+`best` picks, for each level, the cheapest (model, effort) pair that reaches a share of the provider's best
+Artificial Analysis score (very easy 50%, easy 65%, mid 80%, hard 90%; very hard takes the best). AA scores
+each reasoning effort separately; `ccx facts <provider>` lists them as `aa_efforts`, and the `/model` window's
+AA column follows its Effort box. Higher efforts count as dearer (an estimate: AA prices tokens, not efforts).
+
+In `/model`'s Subagent tab the Difficulty bar shows each level's range, model, effort and compact window in its colour: drag a
+boundary to move a range, click a level to pick its model, effort and Compact (Apply keeps the model when only those change). Preset levels store a compact window each; none means inherit.
+
 Each routed call's score lands in `~/.config/ccx/router-log.jsonl`. `calibrate` needs 20 scores and uses the
-last 500. It sets the cutoffs from the scores your main model actually gives, rather than from round numbers.
+last 500.
 
 ## Fallbacks and limits
 

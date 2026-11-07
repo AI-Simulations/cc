@@ -551,12 +551,13 @@ def saved_bundle(name, saved=None):
 def default_router_target():
     """The preset subagent by default: the router on the level profiles as set now; None without them."""
     agents = load_agents(session=False)
-    if not all((agents.get(n) or {}).get("provider") in PROVIDERS and (agents.get(n) or {}).get("model") for n in ROUTER_LEVELS):
+    levels = [n for n in ROUTER_LEVELS if (agents.get(n) or {}).get("provider") in PROVIDERS and (agents.get(n) or {}).get("model")]
+    if len(levels) < 2:
         return None
-    ranges = level_ranges(agents)
-    return {"provider": "router", "levels": {n: {k: agents[n][k] for k in ("provider", "model", "effort") if agents[n].get(k)}
-                                             | ({"upto": ranges[n][1]} if n != ROUTER_LEVELS[-1] else {})
-                                             for n in ROUTER_LEVELS}}
+    ranges = level_ranges({n: agents[n] for n in levels})
+    return {"provider": "router", "levels": {n: {k: agents[n][k] for k in ("provider", "model", "effort", "autocompact") if agents[n].get(k)}
+                                             | ({"upto": ranges[n][1]} if n != levels[-1] else {})
+                                             for n in levels}}
 
 
 def preset_profiles(target, profiles):
@@ -566,7 +567,7 @@ def preset_profiles(target, profiles):
     if target and target.get("provider") == "router" and isinstance(target.get("levels"), dict):
         for level, pick in target["levels"].items():
             old = profiles.get(level) or {}
-            profiles[level] = {**{k: v for k, v in old.items() if k not in ("provider", "model", "effort", "upto")},
+            profiles[level] = {**{k: v for k, v in old.items() if k not in ("provider", "model", "effort", "upto", "autocompact")},
                                **pick, "description": old.get("description") or LEVEL_TEXT[level]}
         return profiles
     if not (target and target.get("provider") in PROVIDERS and target.get("model")):
@@ -671,13 +672,20 @@ def presets_command(words):
                 continue
             if provider == "router" and key == "subagent":
                 levels = target.get("levels")
-                if not isinstance(levels, dict) or set(levels) != set(ROUTER_LEVELS):
-                    die(f"A router preset sets every level: {', '.join(ROUTER_LEVELS)}.")
-                picks = {level: check_target(level, levels[level], PROVIDERS) for level in ROUTER_LEVELS}
-                tops = [levels[level].get("upto") for level in ROUTER_LEVELS[:-1]]
+                order = [n for n in ROUTER_LEVELS if n in (levels or {})] if isinstance(levels, dict) else []
+                if len(order) < 2 or len(order) != len(levels):
+                    die(f"A router preset sets two or more of these levels: {', '.join(ROUTER_LEVELS)}.")
+                picks = {level: check_target(level, levels[level], PROVIDERS) for level in order}
+                for level in order:  # each level may keep its own compact window
+                    compact = levels[level].get("autocompact")
+                    if compact not in (None, "", "inherit"):
+                        check_agents({level: {"autocompact": compact}})
+                        picks[level]["autocompact"] = compact
+                tops = [levels[level].get("upto") for level in order[:-1]]
                 if not (all(type(t) is int for t in tops) and all(a < b for a, b in zip([-1, *tops], [*tops, 100]))):
-                    die("Router ranges: give easy and mid rising tops between 0 and 99; hard always reaches 100.")
-                for level, top in zip(ROUTER_LEVELS, tops):
+                    die(f"Router ranges: give {', '.join(order[:-1])} rising tops between 0 and 99; "
+                        f"{order[-1]} always reaches 100.")
+                for level, top in zip(order, tops):
                     picks[level]["upto"] = top
                 cleaned[key] = {"provider": "router", "levels": picks}
                 continue
@@ -779,6 +787,7 @@ def model_facts(name, models=None):
             "in": cost.get("input") if "input" in cost else None,
             "out": cost.get("output") if "output" in cost else None,
             "aa": info.get("intelligence"),
+            "aa_efforts": info.get("intelligence_efforts") or {},
             "score": round(float(scale.get("score") or 0) * 100, 1),
             "missing": catalog._missing(info),
         })
@@ -787,30 +796,50 @@ def model_facts(name, models=None):
 
 def level_effort(level, levels):
     """A level's effort on its pick, from the efforts that model has: cheaper models think longer, the
-    strongest needs less. On Claude's ladder: easy xhigh, mid high, hard medium."""
+    strongest needs less. On Claude's ladder: very easy and easy xhigh, mid high, hard medium, very hard high."""
     levels = [v for v in levels if v != "off"] or list(EFFORTS)
-    wanted = {"easy": "xhigh", "mid": "high", "hard": "medium"}[level]
+    wanted = {"very-easy": "xhigh", "easy": "xhigh", "mid": "high", "hard": "medium", "very-hard": "high"}[level]
     if wanted in levels:
         return wanted
-    at = {"easy": len(levels) - 2, "mid": len(levels) // 2, "hard": 1}[level]  # a ladder without that name
+    at = {"very-easy": len(levels) - 2, "easy": len(levels) - 2, "mid": len(levels) // 2, "hard": 1,
+          "very-hard": len(levels) // 2}[level]  # a ladder without that name
     return levels[max(0, min(at, len(levels) - 1))]
-LEVEL_TEXT = {"easy": "Easy tasks: lookups, counting, renames, simple mechanical edits.",
+LEVEL_TEXT = {"very-easy": "Very easy tasks: one-step lookups, reading a value, trivial one-line edits.",
+              "very-hard": "Very hard tasks: architecture calls and bugs where a wrong answer is costly.",
+              "easy": "Easy tasks: lookups, counting, renames, simple mechanical edits.",
               "mid": "Medium tasks: ordinary feature work, single-file edits, moderate analysis.",
               "hard": "Hard tasks: multi-file design, subtle bugs, tricky reasoning."}
 
 
-def best_levels(rows):
-    """{level: model id} from model_facts rows: hard = top AA score, easy = the cheapest model within
-    half of that AA, mid = the best AA-for-price score of the rest. Models without AA or price are skipped."""
-    known = [r for r in rows if r.get("aa") is not None and r.get("in") is not None and r.get("out") is not None]
-    if not known:
+# Each level's pick: the cheapest (model, effort) pair that reaches this share of the provider's best AA
+# score; very hard takes the best pair outright.
+LEVEL_AA_SHARE = {"very-easy": 0.5, "easy": 0.65, "mid": 0.8, "hard": 0.9}
+# judgement, not data: AA prices tokens, not efforts, and a higher effort writes more of them
+EFFORT_COST = {"off": 0.4, "minimal": 0.5, "low": 0.6, "medium": 0.8, "high": 1.0, "xhigh": 1.4, "max": 1.8}
+
+
+def best_levels(rows, efforts=None):
+    """{level: (model id, effort or None)} from model_facts rows. Candidates are every (model, effort)
+    with an AA score for that effort (`aa_efforts`; else the model's AA at its default effort), priced at
+    in+out $/M times EFFORT_COST. `efforts(model)` lists the efforts a model takes (None: any)."""
+    pairs = []
+    for r in rows:
+        if r.get("aa") is None or r.get("in") is None or r.get("out") is None:
+            continue
+        allowed = efforts(r["id"]) if efforts else None
+        scored = {e: aa for e, aa in (r.get("aa_efforts") or {}).items()
+                  if e != "default" and (allowed is None or e in allowed)}
+        if not scored:
+            scored = {None: r["aa"]}
+        for effort, aa in scored.items():
+            pairs.append((aa, (r["in"] + r["out"]) * EFFORT_COST.get(effort, 1.0), r["id"], effort))
+    if not pairs:
         return {}
-    price = lambda r: r["in"] + r["out"]
-    hard = max(known, key=lambda r: (r["aa"], -price(r)))
-    easy = min((r for r in known if r["aa"] >= hard["aa"] / 2), key=lambda r: (price(r), -r["aa"]))
-    rest = [r for r in known if r["id"] not in (hard["id"], easy["id"])]
-    mid = max(rest, key=lambda r: (r.get("score") or 0, r["aa"])) if rest else hard
-    return {"easy": easy["id"], "mid": mid["id"], "hard": hard["id"]}
+    top = max(pairs, key=lambda p: (p[0], -p[1]))
+    picks = {"very-hard": top}
+    for level, share in LEVEL_AA_SHARE.items():
+        picks[level] = min((p for p in pairs if p[0] >= top[0] * share), key=lambda p: (p[1], -p[0]))
+    return {level: (picks[level][2], picks[level][3]) for level in ROUTER_LEVELS}
 
 
 def set_best_levels(provider):
@@ -819,10 +848,12 @@ def set_best_levels(provider):
     provider = (provider or (agents.get("sub") or {}).get("provider") or "official").lower()
     if provider not in PROVIDERS:
         die(f"Unknown provider '{provider}'.")
-    picks = best_levels(model_facts(provider))
+    picks = best_levels(model_facts(provider), lambda model: model_efforts(provider, model))
     if not picks:
         die(f"No {provider} model has both an AA score and a price; set the levels by hand.")
-    efforts = {level: level_effort(level, model_efforts(provider, model) or EFFORTS) for level, model in picks.items()}
+    efforts = {level: effort or level_effort(level, model_efforts(provider, model) or EFFORTS)
+               for level, (model, effort) in picks.items()}
+    picks = {level: model for level, (model, _) in picks.items()}
     for level, model in picks.items():
         agents[level] = {**{k: v for k, v in (agents.get(level) or {}).items() if k not in ("provider", "model", "effort")},
                          "provider": provider, "model": model, "effort": efforts[level],
@@ -1963,7 +1994,7 @@ def set_subagents_off(off):
 
 # The router's levels: with the router on, the main model sends each task to the level that fits its
 # difficulty instead of the default `sub` profile; off, it gets `sub` (and any other profile) only.
-ROUTER_LEVELS = ("easy", "mid", "hard")
+ROUTER_LEVELS = ("very-easy", "easy", "mid", "hard", "very-hard")
 
 
 def router_on(launch=None):
@@ -1992,9 +2023,9 @@ def router_text():
 
 
 # Where each level's difficulty range ends by default: most work is easy, so the strong (costly)
-# model only takes what is really hard. Easy 0-75, mid 76-89, hard 90-100 (main models score high: at
-# 60/80 real tasks scored 66-85 and Haiku got none).
-LEVEL_TOPS = {"easy": 75, "mid": 89}
+# model only takes what is really hard. Very easy 0-30, easy 31-75, mid 76-89, hard 90-95, very hard
+# 96-100 (main models score high: at 60/80 real tasks scored 66-85 and Haiku got none).
+LEVEL_TOPS = {"very-easy": 30, "easy": 75, "mid": 89, "hard": 95}
 
 
 def level_ranges(profiles):
@@ -2016,13 +2047,13 @@ def range_text(ranges):
 
 
 def set_ranges(cuts):
-    """ccx agents router ranges <easy top> <mid top>: where each level's difficulty range ends."""
+    """ccx agents router ranges <top> ...: where each level's difficulty range ends, one top per level but the last."""
     agents = load_agents()
     levels = [n for n in ROUTER_LEVELS if n in agents]
     try:
         tops = [int(c) for c in cuts]
     except ValueError:
-        die("Usage: ccx agents router ranges <top of easy> <top of mid> (whole numbers, 0-100)")
+        die(f"Usage: ccx agents router ranges {' '.join(f'<top of {n}>' for n in levels[:-1])} (whole numbers, 0-100)")
     if len(tops) != len(levels) - 1 or not all(a < b for a, b in zip([-1, *tops], [*tops, 100])):
         die(f"Give {len(levels) - 1} rising tops between 0 and 99, one per level but the last "
             f"({', '.join(levels[:-1])}); the last level always reaches 100.")
@@ -2045,6 +2076,33 @@ def route_score(description):
 
 def level_for(score, ranges):
     return next((n for n, (low, high) in ranges.items() if low <= score <= high), list(ranges)[-1])
+
+
+def listed_types(transcript_path):
+    """The subagent types this Claude Code session knows (its transcript's agent listings), or None
+    when unreadable: profiles added after it started stay unknown until /reload-plugins or a restart."""
+    known = None
+    try:
+        with open(transcript_path, "rb") as handle:
+            for line in handle:
+                if b'"agent_listing_delta"' not in line:
+                    continue
+                listing = json.loads(line).get("attachment") or {}
+                known = (known or set()) | set(listing.get("addedTypes") or [])
+                known -= set(listing.get("removedTypes") or [])
+    except (OSError, TypeError, ValueError, AttributeError):
+        return None
+    return known
+
+
+def usable_level(level, ranges, known):
+    """`level`, or the nearest level this session knows (the stronger on a tie) when it does not know it yet."""
+    order = list(ranges)
+    usable = [n for n in order if known is None or {"ccx-" + n, f"ccx-{n}-live"} & known]
+    if not usable or level in usable:
+        return level
+    at = order.index(level)
+    return min(usable, key=lambda n: (abs(order.index(n) - at), -order.index(n)))
 
 
 def log_route(level, description):
@@ -2168,8 +2226,8 @@ def check_agents(agents):
             die(f"Subagent '{agent}': args must be a list of Claude arguments.")
     tops = [agents[n]["upto"] for n in ROUTER_LEVELS[:-1] if n in agents and agents[n].get("upto") is not None]
     if any(a >= b for a, b in zip(tops, tops[1:])) or any(t >= 100 for t in tops):
-        die("Router levels' upto values must rise (easy < mid) and stay below 100; fix them with "
-            "`ccx agents router ranges <easy top> <mid top>`.")
+        die("Router levels' upto values must rise level by level and stay below 100; fix them with "
+            "`ccx agents router ranges <top> ...`.")
     return agents
 
 
@@ -3106,7 +3164,7 @@ def _agent_decision(data):
             if score is None:
                 return deny('Router on: start the description with the task\'s difficulty from 0 to 100 in brackets, '
                             f'like "[35] rename helper", and resubmit; ccx picks the level ({range_text(ranges)}).')
-            kind = "ccx-" + level_for(score, ranges)
+            kind = "ccx-" + usable_level(level_for(score, ranges), ranges, listed_types(data.get("transcript_path")))
         def known_live():
             # Claude Code reads agent files at startup and on /reload-plugins, and records each change to the
             # types it knows in the transcript: a twin written after that is unknown to it.

@@ -576,7 +576,7 @@ with patch.object(ccx, 'ensure_key'), patch.object(ccx, 'get_models', return_val
 facts = [json.loads(line) for line in out.getvalue().splitlines()]
 assert facts[0]['id'] == 'priced' and facts[0]['ctx'] == 1000 and facts[0]['in'] == 1 and facts[0]['out'] == 2
 assert facts[0]['aa'] == 50 and facts[0]['missing'] == 0 and facts[0]['score'] > 0
-assert facts[1] == {'id': 'bare', 'ctx': None, 'in': None, 'out': None, 'aa': None, 'score': 0.0, 'missing': 3}
+assert facts[1] == {'id': 'bare', 'ctx': None, 'in': None, 'out': None, 'aa': None, 'aa_efforts': {}, 'score': 0.0, 'missing': 3}
 print('facts ok')
 
 # A child Popen already waited on is dead, even on Windows, where the handle can outlive it.
