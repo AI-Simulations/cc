@@ -279,7 +279,7 @@ class PickerTests(unittest.TestCase):
                  'beta\tmodel-b\thigh\tSecond\t1')
         self.assertEqual(tab.picked()['provider'], 'beta')
         self.assertEqual(tab.list.item(tab.iids[1][0], 'values'),
-                         ('model-b', 'high', 'Custom', 'Current'))
+                         ('model-b', 'high', '', 'Custom', 'Current'))
         self.assertIn('current', tab.list.item(tab.iids[1][0], 'tags'))
 
     def test_apply_captures_profile_before_worker_runs(self):
@@ -521,6 +521,13 @@ class PickerTests(unittest.TestCase):
         bar.press(event((bar.edge(3) + bar.edge(4)) / 2))
         picked.assert_called_once_with('very-hard')
         bar.destroy()
+        # colour helpers and the Presets tab's subagent words
+        self.assertEqual(gui.mix('#000000', '#ffffff', 0.5), '#808080')
+        self.assertEqual(gui.ramp(('#000000', '#ffffff', '#000000'), 0.5), '#ffffff')
+        router = {'settings': {'subagent': {'provider': 'router', 'levels': {'easy': {}, 'hard': {}}}}}
+        self.assertEqual(gui.subagent_text(router), 'Router · 2 levels')
+        one = {'settings': {'subagent': {'provider': 'official', 'model': 'claude-haiku-5-5', 'effort': 'xhigh'}}}
+        self.assertEqual(gui.subagent_text(one), 'Haiku 5.5 · xhigh')
 
     def test_target_tabs_explain_which_profile_they_edit(self):
         labels = [w.cget('text') for w in self.app.tabs['fallback'].winfo_children() if isinstance(w, ttk.Label)]
