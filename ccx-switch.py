@@ -553,10 +553,12 @@ def saved_bundle(name, saved=None):
     return settings
 
 
-def default_router_target():
-    """The preset subagent by default: the router on the level profiles as set now; None without them."""
-    agents = load_agents(session=False)
-    levels = [n for n in ROUTER_LEVELS if (agents.get(n) or {}).get("provider") in PROVIDERS and (agents.get(n) or {}).get("model")]
+def default_router_target(agents=None, only=None):
+    """The preset subagent by default: the router on the level profiles as set now (or `agents`, limited to the
+    levels in `only`); None without two of them."""
+    agents = load_agents(session=False) if agents is None else agents
+    levels = [n for n in ROUTER_LEVELS if (agents.get(n) or {}).get("provider") in PROVIDERS and (agents.get(n) or {}).get("model")
+              and (only is None or n in only)]
     if len(levels) < 2:
         return None
     ranges = level_ranges({n: agents[n] for n in levels})
@@ -1349,14 +1351,27 @@ def edit_preset():
     effort = effort_menu(main_t.get("effort") or default_effort(name, model) or "")
     fallback = fallback_menu(name, preset_fallback(name)) if name in FALLBACK_ROUTES else None
     sub_t = cur.get("subagent") or {}
-    sub_p = provider_menu(sub_t.get("provider") or name, "subagent")
-    sub_m = model_menu(sub_p, sub_t.get("model") if sub_t.get("provider") == sub_p else None, "subagent")
-    sub_e = effort_menu(sub_t.get("effort") or default_effort(sub_p, sub_m) or "")
+    router = None
+    if sum(n in load_agents() for n in ROUTER_LEVELS) > 1:
+        mode = catalog._arrow_menu("Subagent", [("router", "router  levels by difficulty"), ("one", "one model")],
+                                   "router" if is_router_target(sub_t) or not sub_t else "one", name="Subagent", back=True)
+        if mode == "router":
+            agents = load_agents()
+            if is_router_target(sub_t):  # start from the preset's own levels (this launch's copy: CCX_LAUNCH_ID)
+                agents = preset_profiles(sub_t, agents)
+                with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+                    save_agents(agents)
+            router_menu(agents)
+            router = default_router_target(load_agents(), sub_t.get("levels") if is_router_target(sub_t) else None)
+    if not router:
+        sub_p = provider_menu(sub_t.get("provider") if not is_router_target(sub_t) and sub_t.get("provider") else name, "subagent")
+        sub_m = model_menu(sub_p, sub_t.get("model") if sub_t.get("provider") == sub_p else None, "subagent")
+        sub_e = effort_menu(sub_t.get("effort") or default_effort(sub_p, sub_m) or "")
     bundle = preset_bundle({"provider": name, "model": model, "effort": effort or None})
     target = lambda p, m, e: {"provider": p, "model": m, **({"effort": e} if e else {})}
     saved = load_presets()
     saved[name] = {"model": model, **({"effort": effort} if effort else {}), "settings": {
-        "model": target(name, model, effort), "subagent": target(sub_p, sub_m, sub_e),
+        "model": target(name, model, effort), "subagent": router or target(sub_p, sub_m, sub_e),
         "fallback": fallback or {"provider": "off"}, "auto": bundle["auto"], "tools": bundle["tools"]}}
     save_presets(saved)
     print(f"Preset saved: {name}")
@@ -2452,6 +2467,8 @@ def startup_subagent(navigation=None, provider=None):
             save_agents(agents)
     navigation = {} if navigation is None else navigation
     drafts = navigation.setdefault("drafts", {})
+    if sum(n in agents for n in ROUTER_LEVELS) > 1:
+        return router_menu(agents, drafts, toggle=True)
     agent = navigation.get("agent")
     if agent not in agents:
         agent = next(iter(agents), "sub")
@@ -2468,6 +2485,64 @@ def startup_subagent(navigation=None, provider=None):
                 continue
             raise
         return
+
+
+def router_menu(agents, drafts=None, toggle=False):
+    """The router's full editor in the terminal: each level's route, the ranges, best picks and (at startup)
+    router on/off. Enter on "done" keeps what is shown."""
+    drafts = {} if drafts is None else drafts
+    @contextlib.contextmanager
+    def quiet():  # the commands' own printouts would break the menu
+        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+            yield
+    selected = "done"
+    while True:
+        ranges = level_ranges(agents)
+        on = router_on() if toggle else True
+        rows = [("done", "done  keep these subagents")]
+        if toggle:
+            rows.append(("toggle", f"router  {'on: tasks go by difficulty score' if on else 'off: tasks go to ccx-sub'}"))
+        rows += [(n, f"{n} {a}-{b}  {agent_summary(agents[n])}") for n, (a, b) in ranges.items()]
+        rows += [(n, f"{n}  {agent_summary(a)}") for n, a in agents.items() if n not in ranges and (n == "sub" or toggle)]
+        rows += [("ranges", "ranges  " + ", ".join(f"{a}-{b}" for a, b in ranges.values())),
+                 ("best", "best picks  set every level from AA score and price")]
+        selected = catalog._arrow_menu("Router", rows, selected, name="Router", back=True)
+        if selected == "done":
+            return
+        if selected == "toggle":
+            with quiet():
+                set_router(not on)
+        elif selected == "ranges":
+            levels = list(ranges)
+            answer = input(f"Tops for {', '.join(levels[:-1])} (rising, 0-99; {levels[-1]} reaches 100) "
+                           f"[{' '.join(str(b) for _, b in list(ranges.values())[:-1])}]: ").split()
+            try:
+                tops = [int(t) for t in answer]
+            except ValueError:
+                tops = []
+            if len(tops) == len(levels) - 1 and all(a < b for a, b in zip([-1, *tops], [*tops, 100])):
+                with quiet():
+                    set_ranges(tops)
+                agents.update(load_agents())
+            elif answer:
+                print(f"Kept the ranges: give {len(levels) - 1} rising whole numbers.")
+        elif selected == "best":
+            provider = provider_menu((agents.get("sub") or {}).get("provider") or "official", "best picks")
+            if provider in PROVIDERS:
+                try:
+                    with quiet():
+                        set_best_levels(provider)
+                except SystemExit:
+                    print(f"No {provider} model has both an AA score and a price; set the levels by hand.")
+                agents.update(load_agents())
+                drafts.clear()
+        else:
+            try:
+                edit_agent(agents, selected, skip=f"keep {agent_summary(agents[selected])}",
+                           draft=drafts.setdefault(selected, dict(agents[selected])))
+            except catalog.MenuBack:
+                pass
+            agents.update(load_agents())
 
 
 def _context_entries(path, seen=None):

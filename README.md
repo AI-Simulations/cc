@@ -154,6 +154,9 @@ In auto mode Claude Code refuses an Agent call that a hook rewrote, so there the
 name the level's in-process worker (`ccx-easy-live`) directly; a call ccx still has to remap is denied once
 with the exact call to resubmit.
 
+At launch the subagent step opens the same editor in the terminal: router on/off, each level's route, the
+ranges and best picks; **edit a preset…** asks router or one model and keeps a router preset a router.
+
 Each routed call's score lands in `~/.config/ccx/router-log.jsonl`. `calibrate` needs 20 scores and uses the
 last 500.
 

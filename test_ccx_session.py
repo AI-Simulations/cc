@@ -359,6 +359,22 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(shown, last)
         self.assertEqual(self.ccx.load_agents(), last, "keeping the offered pick keeps it for this launch")
 
+    def test_startup_router_menu_sets_ranges_and_switch_and_preset_keeps_router(self):
+        levels = {n: {"provider": "official", "model": "claude-" + n, "effort": "high"} for n in ("easy", "mid", "hard")}
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({"sub": {"provider": "official"}, **levels}), encoding="utf-8")
+        picks = iter(["ranges", "toggle", "done"])
+        with patch.object(self.ccx.sys.stdin, "isatty", return_value=True),                 patch.object(self.ccx.sys.stdout, "isatty", return_value=True),                 patch.object(self.ccx.catalog, "_arrow_menu", side_effect=lambda *a, **k: next(picks)),                 patch("builtins.input", return_value="40 80"):
+            self.ccx.startup_subagent()
+        self.assertEqual(self.ccx.level_ranges(self.ccx.load_agents()), {"easy": (0, 40), "mid": (41, 80), "hard": (81, 100)})
+        self.assertFalse(self.ccx.router_on())
+        # the preset editor keeps a router preset a router, on this launch's levels
+        menus = iter(["official", "router", "done"])
+        with patch.object(self.ccx, "provider_menu", side_effect=lambda *a, **k: next(menus)),                 patch.object(self.ccx.catalog, "_arrow_menu", side_effect=lambda *a, **k: next(menus)),                 patch.object(self.ccx, "model_menu", return_value="claude-opus-5-5"),                 patch.object(self.ccx, "effort_menu", return_value="high"),                 patch.object(self.ccx, "fallback_menu", return_value=None),                 patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.edit_preset()
+        sub = self.ccx.saved_bundle("official")["subagent"]
+        self.assertEqual(sub["provider"], "router")
+        self.assertEqual({n: v.get("upto") for n, v in sub["levels"].items()}, {"easy": 40, "mid": 80, "hard": None})
+
     def test_fallback_refuses_a_session_that_connects_directly(self):
         with patch.dict(os.environ, {"CCX_MAIN_PROVIDER": "nvidia"}), patch("sys.stdout", new_callable=io.StringIO) as out:
             self.ccx.fallback_command(["nvidia", "deepseek-ai/x"])
