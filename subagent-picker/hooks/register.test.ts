@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { effortBar, parseModels, parseProfiles } from './register'
+import { effortBar, parseModels, parseProfiles, routerArgs } from './register'
 
 test('parses agents.json profiles with their fallback', async () => {
   const out = JSON.stringify({
@@ -169,4 +169,15 @@ test('a direct session relaunches into the same conversation on the picked route
   expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'high', 'sid-1')).toBe('ccx openai-oauth gpt-6.1-sol --effort high --resume sid-1')
   // Claude's --effort ignores levels outside its own ladder; leave them off rather than lose them silently
   expect(relaunchCommand('openai-oauth', 'gpt-6.1-sol', 'ultra', 'sid-1')).toBe('ccx openai-oauth gpt-6.1-sol --resume sid-1')
+})
+
+test('/model router words map to the ccx router commands', () => {
+  expect(routerArgs([])).toEqual(['agents', 'router'])
+  expect(routerArgs(['Off'])).toEqual(['agents', 'router', 'off'])
+  expect(routerArgs(['best', 'official'])).toEqual(['agents', 'router', 'best', 'official'])
+  expect(routerArgs(['ranges', '40', '80'])).toEqual(['agents', 'router', 'ranges', '40', '80'])
+  expect(routerArgs(['ranges', '40'])).toBeUndefined()
+  expect(routerArgs(['hard', 'official', 'claude-opus-5-5', 'medium']))
+    .toEqual(['agents', 'set', 'hard', '--provider', 'official', '--model', 'claude-opus-5-5', '--effort', 'medium'])
+  expect(routerArgs(['sub', 'official', 'x'])).toBeUndefined()
 })

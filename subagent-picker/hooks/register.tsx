@@ -577,6 +577,21 @@ async function buildGrid($: EngineInterface, start: GridTab['name'], who?: strin
   }
 }
 
+export const ROUTER_USAGE = 'Usage: /model router [on | off | best [provider] | ranges [easy-top mid-top] | easy|mid|hard <provider> <model> [effort]]'
+
+// `/model router` words as the ccx command that does them; undefined for anything else.
+export function routerArgs(words: string[]): string[] | undefined {
+  const [verb, ...rest] = words.map(w => w.trim()).filter(Boolean)
+  const level = verb?.toLowerCase()
+  if (!level) return ['agents', 'router']
+  if ((level === 'on' || level === 'off') && !rest.length) return ['agents', 'router', level]
+  if (level === 'best' && rest.length <= 1) return ['agents', 'router', 'best', ...rest]
+  if (level === 'ranges' && (rest.length === 0 || rest.length === 2)) return ['agents', 'router', 'ranges', ...rest]
+  if (['easy', 'mid', 'hard'].includes(level) && (rest.length === 2 || rest.length === 3))
+    return ['agents', 'set', level, '--provider', rest[0]!, '--model', rest[1]!, ...(rest[2] ? ['--effort', rest[2]] : [])]
+  return undefined
+}
+
 // /model's grid: a pane holding the keyboard, as the built-in picker does (nothing reaches the prompt).
 const GRID_PANE = 'model-picker'
 const GRID_SIZE = { rows: 22, columns: 110 } as const
@@ -723,7 +738,10 @@ async function applyGrid($: EngineInterface, g: Grid) {
     if (nativeModel) return applyNative($, g, target.provider, target.model, target.effort ?? 'default')
     const { ok, out } = await ccx($, ['route', target.provider, target.model, ...(target.effort ? [target.effort] : [])])
     if (!ok) return update($, grid, x => (x ? { ...x, status: out.split(/\r?\n/).pop() ?? out } : x))
+    // the preset's subagent too: the router (its levels and ranges) or one model
+    const sub = await ccx($, ['presets', 'use-subagent', target.provider])
     const said = `${target.provider}/${target.model}${target.effort ? `, effort ${target.effort}` : ''}`
+      + (sub.ok ? `; ${sub.out.trim().split(/\r?\n/).pop()}` : '')
     const fresh = await buildGrid($, 'Presets')
     await update($, grid, () => ({ ...fresh, tab: g.tab, col: g.col, status: `✔ ${said}` }))
     fresh.tabs.forEach((x, ti) => {
@@ -1053,6 +1071,13 @@ export const register: Register = on => {
     const command = e.command
     const words = e.args.split(/\s+/).filter(Boolean)
     const head = words[0]?.toLowerCase()
+    // `/model router ...`: the router from the prompt (switch, best picks, ranges, a level's model)
+    if (command === 'model' && head === 'router') {
+      const args = routerArgs(words.slice(1))
+      if (!args) return { text: ROUTER_USAGE }
+      const { ok, out } = await ccx($, args)
+      return { text: (ok ? '' : 'Failed: ') + (out.trim() || (ok ? 'Done.' : ROUTER_USAGE)) }
+    }
     // `/model <name>` stays Claude Code's; a complete /fallback call stays with ccx-switch.py.
     const dialog = command === 'model' ? !words.length : !words.length || (head === 'subagent' && words.length <= 2)
     if (!dialog) return next(e)

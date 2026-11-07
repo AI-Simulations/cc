@@ -520,7 +520,8 @@ class PickerTests(unittest.TestCase):
                   for key in ('model', 'subagent', 'fallback', 'auto', 'tools')}
         editor = gui.PresetEditor(self.app, {'provider': 'beta', 'model': 'model-model',
                                            'effort': 'low', 'settings': bundle}, mock.Mock())
-        self.assertEqual(set(editor.fields), set(bundle))
+        self.assertEqual(set(editor.fields) - set(gui.ROUTER_LEVELS), set(bundle))
+        self.assertFalse(editor.fields['easy']['model_box'].winfo_manager(), 'level rows only for a router subagent')
         editor.fields['tools']['model'].set('changed-tools')
         editor.save()
         self.background.call_args.args[1]()
@@ -530,6 +531,29 @@ class PickerTests(unittest.TestCase):
         saved = json.loads(args[3])
         self.assertEqual(saved['tools']['model'], 'changed-tools')
         self.assertEqual(saved['auto']['model'], 'auto-model')
+        editor.close()
+
+    def test_editor_edits_a_router_subagents_levels(self):
+        import json
+        levels = {'easy': {'provider': 'beta', 'model': 'e', 'upto': 50}, 'mid': {'provider': 'beta', 'model': 'm', 'upto': 75},
+                  'hard': {'provider': 'beta', 'model': 'h', 'effort': 'low'}}
+        bundle = {key: {'provider': 'beta', 'model': key + '-model'} for key in ('model', 'fallback', 'auto', 'tools')}
+        bundle['subagent'] = {'provider': 'router', 'levels': levels}
+        editor = gui.PresetEditor(self.app, {'provider': 'beta', 'model': 'model-model', 'settings': bundle}, mock.Mock())
+        self.assertIn('router', editor.fields['subagent']['provider_box'].cget('values'))
+        self.assertTrue(editor.fields['hard']['model_box'].winfo_manager())
+        self.assertEqual(str(editor.fields['subagent']['model_box'].cget('state')), 'disabled')
+        editor.fields['easy']['upto'].set('30')
+        editor.fields['hard']['model'].set('h2')
+        editor.save()
+        self.background.call_args.args[1]()
+        saved = json.loads(self.run_ccx.call_args.args[3])['subagent']
+        self.assertEqual(saved['provider'], 'router')
+        self.assertEqual(saved['levels']['easy'], {'provider': 'beta', 'model': 'e', 'upto': 30})
+        self.assertEqual(saved['levels']['hard'], {'provider': 'beta', 'model': 'h2', 'effort': 'low'})
+        editor.fields['subagent']['provider'].set('beta')  # back to one model: the levels hide
+        editor.change_provider('subagent')
+        self.assertFalse(editor.fields['easy']['model_box'].winfo_manager())
         editor.close()
 
     def test_editor_provider_change_loads_the_new_providers_models(self):
@@ -558,8 +582,7 @@ class PickerTests(unittest.TestCase):
             work()
         self.assertEqual(self.run_ccx.call_args_list, [
             mock.call('route', 'beta', 'model-model', 'low'),
-            mock.call('agents', 'set', 'first', '--provider', 'beta', '--model', 'subagent-model', '--effort', 'low'),
-            mock.call('agents', 'set', 'second', '--provider', 'beta', '--model', 'subagent-model', '--effort', 'low'),
+            mock.call('presets', 'use-subagent', 'beta'),  # ccx applies one model or the router itself
             mock.call('fallback', 'beta', 'fallback-model', 'low'),
             mock.call('helper', 'auto', 'beta', 'auto-model', 'low'),
             mock.call('helper', 'tools', 'beta', 'tools-model', 'low')])

@@ -489,7 +489,7 @@ class StatusLabel(ttk.Label):
         ttk.Label.configure(self, text=text)
 
 
-LEVEL_TOPS = {'easy': 50, 'mid': 75}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {'easy': 60, 'mid': 80}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):
@@ -640,7 +640,7 @@ class PickerTab(ttk.Frame):
             entry = session_entry()
             self.levels = [n for n in ROUTER_LEVELS if n in load_profiles()]
             self.mode = tk.StringVar(value='off' if entry.get('off') else
-                                     'router' if self.levels and entry.get('router') is True else 'one')
+                                     'router' if self.levels and entry.get('router') is not False else 'one')
             modes = ttk.Frame(self)
             modes.pack(fill='x', padx=18, pady=(16, 0))
             ttk.Label(modes, text='Subagents', style='Dim.TLabel').pack(side='left', padx=(0, 12))
@@ -894,7 +894,7 @@ class PickerTab(ttk.Frame):
                 self.target.set('')  # the saved view picks the level, else the first
         elif self.key == 'fallback':
             # the subagents this session uses: the router's levels, or the one model
-            names = list(ROUTER_LEVELS) if session_entry().get('router') is True else ['sub']
+            names = list(ROUTER_LEVELS) if session_entry().get('router') is not False else ['sub']
             targets = [('session', 'session')] + [(name, name) for name in names if name in load_profiles()]
         names = [value for _, value in targets]
         self.target_box.configure(values=names)
@@ -1422,16 +1422,14 @@ class PresetsTab(ttk.Frame):
                 args.append(preset['effort'])
             work = lambda: run_ccx(*args)
         else:
-            profiles = list(load_profiles())
             def work():
                 for key, label in TABS[:-1]:
                     target = settings[key]
                     provider, model = target['provider'], target.get('model', '')
                     effort = target.get('effort') or 'default'
                     pair = ['off'] if provider == 'off' else [provider, model, *([] if effort == 'default' else [effort])]
-                    if key == 'subagent':
-                        commands = [['agents', 'set', name, '--provider', provider, '--model', model,
-                                     '--effort', effort] for name in profiles]
+                    if key == 'subagent':  # router or one model, as `ccx presets use-subagent` sets it
+                        commands = [['presets', 'use-subagent', preset.get('name') or preset['provider']]]
                     else:
                         command = (['route', *pair] if key == 'model' else ['fallback', *pair] if key == 'fallback'
                                    else ['helper', key, *(['inherit'] if provider == 'off' else pair)])
@@ -1487,19 +1485,32 @@ class PresetEditor(tk.Toplevel):
         if not preset.get('settings'):
             settings['fallback'] = {'provider': 'off'}
         providers = [value for value, _ in tab_rows(run_ccx('agents', 'providers')[1]) if value != 'off']
-        providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] != 'off']]))
+        providers = list(dict.fromkeys([*providers, *[t['provider'] for t in settings.values() if t['provider'] not in ('off', 'router')]]))
         fallback_providers = [value for value, _ in tab_rows(run_ccx('fallback', 'routes')[1])]
         helper_providers = [value for value, _ in tab_rows(run_ccx('route', 'routes')[1])]
-        for column, title in enumerate(('', 'Provider', 'Model', 'Effort')):
+        for column, title in enumerate(('', 'Provider', 'Model', 'Effort', 'Up to')):
             ttk.Label(body, text=title, style='Dim.TLabel').grid(row=1, column=column, sticky='w', padx=(0, 10))
-        for row, (key, label) in enumerate(TABS[:-1], 2):
-            target = settings[key]
+        # a router preset's levels: as saved, else as the levels are set now
+        router = settings['subagent'] if settings['subagent'].get('provider') == 'router' else None
+        profiles = load_profiles()
+        ranges = level_ranges(profiles)
+        levels = (router or {}).get('levels') or {
+            n: {**{k: (profiles.get(n) or {}).get(k) for k in ('provider', 'model', 'effort')},
+                'upto': ranges.get(n, (0, LEVEL_TOPS.get(n, 100)))[1]} for n in ROUTER_LEVELS}
+        self.level_rows = []
+        rows = []
+        for key, label in TABS[:-1]:
+            rows.append((key, label, settings[key]))
+            if key == 'subagent':
+                rows += [(n, f'   {n.title()}', levels.get(n) or {}) for n in ROUTER_LEVELS]
+        for row, (key, label, target) in enumerate(rows, 2):
             fields = {name: tk.StringVar(value=target.get(name) or ('default' if name == 'effort' else ''))
                       for name in ('provider', 'model', 'effort')}
             self.fields[key] = fields
-            ttk.Label(body, text=label).grid(row=row, column=0, sticky='w', pady=6)
+            name_label = ttk.Label(body, text=label, style='Dim.TLabel' if key in ROUTER_LEVELS else 'TLabel')
+            name_label.grid(row=row, column=0, sticky='w', pady=6)
             allowed = (fallback_providers if key == 'fallback' else helper_providers if key in ('auto', 'tools') else providers)
-            allowed = allowed + (['off'] if key in ('fallback', 'auto', 'tools') else [])
+            allowed = allowed + (['off'] if key in ('fallback', 'auto', 'tools') else ['router'] if key == 'subagent' else [])
             box = ttk.Combobox(body, textvariable=fields['provider'], values=allowed, state='readonly', width=19)
             fields['provider_box'] = box
             box.grid(row=row, column=1, padx=(0, 10))
@@ -1517,21 +1528,31 @@ class PresetEditor(tk.Toplevel):
             # the spinner sits inside the model box, left of its arrow, while the provider's list loads
             spinner = ttk.Label(model_box, text='', style='Spin.TLabel')
             fields.update(model_box=model_box, effort_box=effort_box, spinner=spinner, loading=False, request=0)
+            if key in ROUTER_LEVELS:
+                last = key == ROUTER_LEVELS[-1]
+                fields['upto'] = tk.StringVar(value='100' if last else str(target.get('upto', LEVEL_TOPS.get(key, 50))))
+                upto = (ttk.Label(body, text='100', style='Dim.TLabel') if last else
+                        ttk.Spinbox(body, from_=0, to=99, increment=5, textvariable=fields['upto'], width=5))
+                upto.grid(row=row, column=4, sticky='w')
+                self.level_rows += [name_label, box, model_box, effort_box, upto]
         self.spinner_job = None
         self.spinner_frame = 0
         self.model, self.effort = self.fields['model']['model'], self.fields['model']['effort']
         self.model_box, self.effort_box = self.fields['model']['model_box'], self.fields['model']['effort_box']
         self.status = StatusLabel(body, text='Loading models…', style='Faint.TLabel')
-        self.status.grid(row=7, column=0, columnspan=4, sticky='we', pady=(10, 0))
-        ttk.Label(body, text='Off = disable fallback / inherit helper. Subagent sets the one-model subagent; router levels keep their own.',
-                  style='Faint.TLabel').grid(row=8, column=0, columnspan=4, sticky='w')
+        self.status.grid(row=20, column=0, columnspan=5, sticky='we', pady=(10, 0))
+        ttk.Label(body, text='Off = disable fallback / inherit helper. Router = each task goes to Easy, Mid or Hard '
+                  'by its difficulty (0-100); each level takes scores up to its top.',
+                  style='Faint.TLabel', wraplength=720).grid(row=21, column=0, columnspan=5, sticky='w')
         foot = ttk.Frame(body)
-        foot.grid(row=9, column=0, columnspan=4, sticky='we', pady=(16, 0))
+        foot.grid(row=22, column=0, columnspan=5, sticky='we', pady=(16, 0))
         named = preset['name'] != preset['provider']
         if not preset.get('new') and (preset.get('custom') or not named):
             ttk.Button(foot, text='Delete' if named else 'Restore default', command=self.reset).pack(side='left')
         ttk.Button(foot, text='Cancel', command=self.close).pack(side='right', padx=(8, 0))
         ttk.Button(foot, text='Save', style='Accent.TButton', command=self.save).pack(side='right')
+        self.levels_loaded = False
+        self.show_router(router is not None)  # before sizing, so the dialog centres at its real height
         self.bind('<Escape>', lambda _e: self.close())
         self.transient(app)
         self.grab_set()
@@ -1570,7 +1591,12 @@ class PresetEditor(tk.Toplevel):
         fields['request'] += 1
         request = fields['request']
         provider = fields['provider'].get()
-        disabled = provider == 'off'
+        disabled = provider in ('off', 'router')
+        if key == 'subagent':
+            self.show_router(provider == 'router')
+            if provider == 'router':
+                fields['model'].set('by difficulty: levels below')
+                fields['effort'].set('default')
         fields['typed'] = fields['model'].get()
         fields['loading'] = not disabled
         if self.spinner_job is not None:  # restart, so this box shows its spinner now, not on the next tick
@@ -1612,7 +1638,7 @@ class PresetEditor(tk.Toplevel):
     def load_efforts(self, key='model'):
         fields = self.fields[key]
         provider, model = fields['provider'].get(), fields['model'].get().strip()
-        if model and provider != 'off':
+        if model and provider not in ('off', 'router'):
             self.app.background(lambda: efforts_for(provider, model),
                                 lambda levels: self.show_efforts(levels, key)
                                 if self.winfo_exists() and model == fields['model'].get().strip()
@@ -1627,19 +1653,41 @@ class PresetEditor(tk.Toplevel):
         if fields['effort'].get() not in values:
             fields['effort'].set('default')
 
+    def show_router(self, on):
+        """The level rows show only while the subagent is the router; their models load the first time."""
+        for widget in self.level_rows:
+            widget.grid() if on else widget.grid_remove()
+        if on and not self.levels_loaded:
+            self.levels_loaded = True
+            for level in ROUTER_LEVELS:
+                self.load_models(level)
+
     def save(self):
         settings = {}
+        router = self.fields['subagent']['provider'].get() == 'router'
         for key, fields in self.fields.items():
+            if key in ROUTER_LEVELS and not router:
+                continue
             provider, model = fields['provider'].get(), fields['model'].get().strip()
             if provider == 'off':
                 settings[key] = {'provider': 'off'}
                 continue
-            if not model:
-                self.status.configure(text=f'{key.title()}: type a model id first.')
+            if provider == 'router':
+                continue
+            if not provider or not model:
+                self.status.configure(text=f'{key.title()}: pick a provider and model first.')
                 return
             effort = fields['effort'].get()
             settings[key] = {'provider': provider, 'model': model,
                              **({'effort': effort} if effort not in ('', 'default') else {})}
+            if key in ROUTER_LEVELS[:-1]:
+                try:
+                    settings[key]['upto'] = int(fields['upto'].get())
+                except ValueError:
+                    self.status.configure(text=f'{key.title()}: its top must be a whole number.')
+                    return
+        if router:
+            settings['subagent'] = {'provider': 'router', 'levels': {n: settings.pop(n) for n in ROUTER_LEVELS}}
         args = ['presets', 'set-bundle', self.preset['name'], json.dumps(settings)]
         self.status.configure(text='Saving…')
         self.app.background(lambda: run_ccx(*args), self.done)

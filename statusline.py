@@ -378,7 +378,7 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
 
 
 ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
-LEVEL_TOPS = {"easy": 50, "mid": 75}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {"easy": 60, "mid": 80}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):
@@ -416,7 +416,7 @@ def ccx_agents(session_id=None, offered=True):
     else:
         agents, entry = shared, entry if isinstance(entry, dict) else {}
     if offered and any(n in ROUTER_LEVELS for n in agents):
-        on = entry.get("router") is True
+        on = entry.get("router") is not False
         kept = {n: a for n, a in agents.items() if (n != "sub" if on else n not in ROUTER_LEVELS)}
         agents = kept or agents
     return agents
@@ -1106,7 +1106,7 @@ def render(d):
         order = lambda kv: ROUTER_LEVELS.index(kv[0]) if kv[0] in ROUTER_LEVELS else len(ROUTER_LEVELS)
         for name, profile in sorted(rows.items(), key=order):  # levels easy to hard, other profiles after
             idle = name not in offered
-            # a router level shows its slice of the 0-100 difficulty scale: "easy 0-50"
+            # a router level shows its slice of the 0-100 difficulty scale: "easy 0-60"
             label = f"{name} {ranges[name][0]}-{ranges[name][1]}" if name in ranges and not idle and len(ranges) > 1 else name
             # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}

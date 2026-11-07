@@ -512,7 +512,7 @@ def preset_bundle(row):
     main = {"provider": row["provider"], "model": row["model"]}
     if row.get("effort"):
         main["effort"] = row["effort"]
-    settings = {"model": dict(main), "subagent": dict(main), "fallback": {"provider": "off"},
+    settings = {"model": dict(main), "subagent": default_router_target() or dict(main), "fallback": {"provider": "off"},
                 "auto": helper_default("auto", row["provider"]) or dict(main),
                 "tools": helper_default("tools", row["provider"]) or dict(main)}
     if not helper_default("tools", row["provider"]):
@@ -527,6 +527,8 @@ def preset_bundle(row):
             if isinstance(target, dict) and isinstance(target.get("provider"), str):
                 if target["provider"] == "off" and key in ("fallback", "auto", "tools"):
                     settings[key] = {"provider": "off"}
+                elif key == "subagent" and target["provider"] == "router" and isinstance(target.get("levels"), dict):
+                    settings[key] = target
                 elif target["provider"] in PROVIDERS and isinstance(target.get("model"), str) and target["model"]:
                     settings[key] = {"provider": target["provider"], "model": target["model"]}
                     if target.get("effort") in EFFORTS:
@@ -544,17 +546,58 @@ def saved_bundle(name, saved=None):
     return settings
 
 
-def preset_agents(name):
-    """Every subagent profile on the saved preset's subagent route; None without a saved preset."""
-    bundle = saved_bundle(name)
-    target = bundle and bundle["subagent"]
+def default_router_target():
+    """The preset subagent by default: the router on the level profiles as set now; None without them."""
+    agents = load_agents(session=False)
+    if not all((agents.get(n) or {}).get("provider") in PROVIDERS and (agents.get(n) or {}).get("model") for n in ROUTER_LEVELS):
+        return None
+    ranges = level_ranges(agents)
+    return {"provider": "router", "levels": {n: {k: agents[n][k] for k in ("provider", "model", "effort") if agents[n].get(k)}
+                                             | ({"upto": ranges[n][1]} if n != ROUTER_LEVELS[-1] else {})
+                                             for n in ROUTER_LEVELS}}
+
+
+def preset_profiles(target, profiles):
+    """`profiles` with a preset's subagent applied. A router target sets the levels (model, effort, range)
+    and leaves the one-model profiles alone; a one-model target sets those and leaves the levels alone."""
+    profiles = dict(profiles or {"sub": {}})
+    if target and target.get("provider") == "router" and isinstance(target.get("levels"), dict):
+        for level, pick in target["levels"].items():
+            old = profiles.get(level) or {}
+            profiles[level] = {**{k: v for k, v in old.items() if k not in ("provider", "model", "effort", "upto")},
+                               **pick, "description": old.get("description") or LEVEL_TEXT[level]}
+        return profiles
     if not (target and target.get("provider") in PROVIDERS and target.get("model")):
         return None
     route = {"provider": target["provider"], "model": target["model"], **({"effort": target["effort"]} if target.get("effort") else {})}
-    profiles = load_agents(session=False) or {"sub": {}}
-    # the router's levels keep their own models: one preset route on all of them would undo the routing
+    if not any(n not in ROUTER_LEVELS for n in profiles):
+        profiles["sub"] = {}
     return {n: a if n in ROUTER_LEVELS else {**{k: v for k, v in a.items() if k not in ("provider", "model", "effort")}, **route}
             for n, a in profiles.items()}
+
+
+def preset_agents(name):
+    """Every subagent profile on the saved preset's subagent; None without a saved preset."""
+    bundle = saved_bundle(name)
+    return preset_profiles(bundle["subagent"], load_agents(session=False)) if bundle else None
+
+
+def is_router_target(target):
+    return isinstance(target, dict) and target.get("provider") == "router"
+
+
+def use_preset_subagent(name):
+    """ccx presets use-subagent <name>: this session's subagents from the preset (router or one model)."""
+    if name not in PROVIDERS and name not in load_presets():
+        die(f"Unknown preset '{name}'.")
+    bundle = saved_bundle(name)
+    target = bundle["subagent"] if bundle else default_router_target()
+    agents = preset_profiles(target, load_agents())
+    if agents is None:
+        die(f"Preset '{name}' has no usable subagent.")
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+        save_agents(agents)
+    set_router(is_router_target(target))
 
 
 def is_resume(claude_args):
@@ -568,6 +611,7 @@ def seed_launch_from_preset(name, launch, adapter, providers):
     if agents and session_launch() == launch and _session_agents(launch) is None:
         with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
             save_agents(agents)
+            _set_session_flag("router", is_router_target(saved_bundle(name)["subagent"]), "router on|off")
     bundle = saved_bundle(name)
     if not bundle or not adapter:
         return
@@ -587,6 +631,8 @@ def presets_command(words):
     if words == ["bundles"]:
         print(json.dumps([{"name": row["provider"], **row, "settings": preset_bundle(row)} for row in preset_targets()]))
         return
+    if words[:1] == ["use-subagent"] and len(words) == 2:
+        return use_preset_subagent(words[1].strip().lower())
     if words[:1] == ["set-bundle"] and len(words) == 3:
         name = words[1].strip().lower()
         if name not in PROVIDERS and not PRESET_NAME.fullmatch(name):
@@ -597,16 +643,10 @@ def presets_command(words):
             die("Invalid preset JSON.")
         if not isinstance(settings, dict) or set(settings) != set(PRESET_CATEGORIES):
             die("A preset must include model, subagent, fallback, auto and tools.")
-        cleaned = {}
-        for key, target in settings.items():
+        def check_target(key, target, allowed):
             if not isinstance(target, dict):
                 die(f"Invalid {key} preset.")
-            provider = target.get("provider")
-            if provider == "off" and key in ("fallback", "auto", "tools"):
-                cleaned[key] = {"provider": "off"}
-                continue
-            model, effort = target.get("model"), target.get("effort", "default")
-            allowed = FALLBACK_ROUTES if key == "fallback" else route_providers() if key in ("auto", "tools") else PROVIDERS
+            provider, model, effort = target.get("provider"), target.get("model"), target.get("effort", "default")
             if not isinstance(provider, str) or provider not in allowed:
                 die(f"Invalid {key} provider.")
             if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", model):
@@ -617,7 +657,30 @@ def presets_command(words):
                 levels = model_efforts(provider, model)
                 if levels is not None and effort not in levels:
                     die(f"{provider}/{model} does not support effort {effort}.")
-            cleaned[key] = {"provider": provider, "model": model, **({"effort": effort} if effort != "default" else {})}
+            return {"provider": provider, "model": model, **({"effort": effort} if effort != "default" else {})}
+
+        cleaned = {}
+        for key, target in settings.items():
+            if not isinstance(target, dict):
+                die(f"Invalid {key} preset.")
+            provider = target.get("provider")
+            if provider == "off" and key in ("fallback", "auto", "tools"):
+                cleaned[key] = {"provider": "off"}
+                continue
+            if provider == "router" and key == "subagent":
+                levels = target.get("levels")
+                if not isinstance(levels, dict) or set(levels) != set(ROUTER_LEVELS):
+                    die(f"A router preset sets every level: {', '.join(ROUTER_LEVELS)}.")
+                picks = {level: check_target(level, levels[level], PROVIDERS) for level in ROUTER_LEVELS}
+                tops = [levels[level].get("upto") for level in ROUTER_LEVELS[:-1]]
+                if not (all(type(t) is int for t in tops) and all(a < b for a, b in zip([-1, *tops], [*tops, 100]))):
+                    die("Router ranges: give easy and mid rising tops between 0 and 99; hard always reaches 100.")
+                for level, top in zip(ROUTER_LEVELS, tops):
+                    picks[level]["upto"] = top
+                cleaned[key] = {"provider": "router", "levels": picks}
+                continue
+            allowed = FALLBACK_ROUTES if key == "fallback" else route_providers() if key in ("auto", "tools") else PROVIDERS
+            cleaned[key] = check_target(key, target, allowed)
         if name in PROVIDERS and cleaned["model"]["provider"] != name:
             die("The main model must use the preset's provider.")
         saved = load_presets()
@@ -658,7 +721,7 @@ def presets_command(words):
         save_presets(saved)
         print(f"Preset {'reset' if name in PROVIDERS else 'deleted'}: {name}")
         return
-    die("Usage: ccx presets [list | bundles | set <provider> <model> [effort] | set-bundle <provider|name> <json> | reset <provider|name>]")
+    die("Usage: ccx presets [list | bundles | set <provider> <model> [effort] | set-bundle <provider|name> <json> | use-subagent <provider|name> | reset <provider|name>]")
 
 
 def models_command(words):
@@ -1909,11 +1972,12 @@ def router_on(launch=None):
             entry = json.load(f).get(launch) if launch else None
     except (OSError, ValueError, AttributeError):
         entry = None
-    return isinstance(entry, dict) and entry.get("router") is True
+    # on unless this session turned it off: the router is the default subagent mode
+    return not (isinstance(entry, dict) and entry.get("router") is False)
 
 
 def set_router(on):
-    _set_session_flag("router", True if on else None, "router on|off")
+    _set_session_flag("router", bool(on), "router on|off")
     print(router_text())
 
 
@@ -1926,8 +1990,8 @@ def router_text():
 
 
 # Where each level's difficulty range ends by default: most work is easy, so the strong (costly)
-# model only takes what is really hard. Easy 0-50, mid 51-75, hard 76-100.
-LEVEL_TOPS = {"easy": 50, "mid": 75}
+# model only takes what is really hard. Easy 0-60, mid 61-80, hard 81-100.
+LEVEL_TOPS = {"easy": 60, "mid": 80}
 
 
 def level_ranges(profiles):

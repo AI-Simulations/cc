@@ -80,15 +80,12 @@ class CcSessionTests(unittest.TestCase):
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
         call = lambda kind: {"tool_name": "Agent", "tool_input": {"subagent_type": kind, "prompt": "x"}}
         decision = lambda kind: (self.ccx.agent_hook(call(kind)).get("hookSpecificOutput") or {}).get("permissionDecision")
-        self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "one subagent by default")
-        self.assertEqual(decision("ccx-easy"), "deny")
-        with patch("sys.stdout", new_callable=io.StringIO):
-            self.ccx.set_router(True)
-        self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"])
+        self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"], "the router by default")
+        self.assertEqual(decision("ccx-sub"), "deny")
         context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(easy tasks)", context)
         self.assertIn("0 (trivial) to 100", context)
-        self.assertIn("ccx-easy 0-50, ccx-mid 51-75, ccx-hard 76-100", context)
+        self.assertIn("ccx-easy 0-60, ccx-mid 61-80, ccx-hard 81-100", context)
         with patch("sys.stdout", new_callable=io.StringIO):
             self.ccx.set_ranges(["20", "90"])
         self.assertIn("ccx-easy 0-20, ccx-mid 21-90, ccx-hard 91-100",
@@ -107,9 +104,14 @@ class CcSessionTests(unittest.TestCase):
             self.ccx.set_router(True)
         self.ccx.link_session("sid-r")
         os.environ["CCX_LAUNCH_ID"] = "launch-b"
-        self.assertFalse(self.ccx.router_on(), "other sessions keep one subagent")
+        self.assertTrue(self.ccx.router_on(), "other sessions start on the router")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(False)
+        os.environ["CCX_LAUNCH_ID"] = "launch-a"
         self.ccx.link_session("sid-r")
         self.assertTrue(self.ccx.router_on(), "a resume keeps the switch")
+        self.assertFalse(self.ccx.router_on() and os.environ.update(CCX_LAUNCH_ID="launch-b") or self.ccx.router_on(),
+                         "launch-b keeps its own off")
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps(self.global_agents), encoding="utf-8")
         os.environ["CCX_LAUNCH_ID"] = "launch-c"  # a session that never saved levels of its own
         with patch("sys.stdout", new_callable=io.StringIO):
@@ -129,6 +131,37 @@ class CcSessionTests(unittest.TestCase):
         agents = self.ccx.load_agents()
         self.assertEqual(agents["sub"]["effort"], "low")
         self.assertEqual(agents["hard"]["model"], "claude-opus-5-5")
+
+    def test_router_preset_saves_seeds_and_applies_levels(self):
+        levels = {"easy": {"provider": "official", "model": "claude-haiku-5-5", "effort": "max", "upto": 40},
+                  "mid": {"provider": "official", "model": "claude-sonnet-5-5", "upto": 80},
+                  "hard": {"provider": "official", "model": "claude-opus-5-5", "effort": "medium"}}
+        main = {"provider": "official", "model": "claude-opus-5-5"}
+        bundle = {"model": main, "subagent": {"provider": "router", "levels": levels}, "fallback": {"provider": "off"},
+                  "auto": main, "tools": main}
+        self.ccx.model_efforts = lambda provider, model: None
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.presets_command(["set-bundle", "mine", json.dumps(bundle)])
+        self.assertEqual(self.ccx.saved_bundle("mine")["subagent"]["levels"]["mid"]["upto"], 80)
+        bad = {**bundle, "subagent": {"provider": "router", "levels": {**levels, "mid": {**levels["mid"], "upto": 30}}}}
+        with self.assertRaises(SystemExit), patch("sys.stdout", new_callable=io.StringIO), patch("sys.stderr", new_callable=io.StringIO):
+            self.ccx.presets_command(["set-bundle", "mine", json.dumps(bad)])  # tops must rise
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(False)
+            self.ccx.presets_command(["use-subagent", "mine"])
+        self.assertTrue(self.ccx.router_on())
+        agents = self.ccx.load_agents()
+        self.assertEqual(agents["sub"], self.global_agents["sub"], "a router preset leaves the one-model subagent")
+        self.assertEqual(self.ccx.level_ranges(agents), {"easy": (0, 40), "mid": (41, 80), "hard": (81, 100)})
+        self.assertEqual(agents["easy"]["model"], "claude-haiku-5-5")
+        # a new launch seeds the same levels and turns the router on
+        os.environ["CCX_LAUNCH_ID"] = "launch-new"
+        self.ccx.seed_launch_from_preset("mine", "launch-new", adapter=False, providers=[])
+        self.assertEqual(self.ccx.load_agents()["hard"]["model"], "claude-opus-5-5")
+        self.assertTrue(self.ccx.router_on())
+        # the default preset subagent is the router on the levels as set
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
+        self.assertEqual(self.ccx.default_router_target()["levels"]["easy"]["upto"], 40)
 
     def test_best_levels_pick_by_aa_and_price(self):
         row = lambda id, aa, price, score: {"id": id, "aa": aa, "in": price, "out": price * 5, "score": score}
@@ -162,6 +195,7 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(self.ccx.load_routes()["launch-a"]["helpers"]["auto"]["model"], "claude-haiku-5-5")
         self.assertEqual(json.loads(Path(self.ccx.AGENTS_FILE).read_text()), self.global_agents, "global profiles untouched")
         self.assertIsNone(self.ccx.preset_fallback("official"))
+        self.assertFalse(self.ccx.router_on(), "a one-model preset starts the launch off the router")
         os.environ["CCX_LAUNCH_ID"] = "launch-b"
         self.ccx.save_agents({"sub": {"provider": "official", "effort": "low"}})
         self.ccx.seed_launch_from_preset("official", "launch-b", adapter=False, providers=[])
