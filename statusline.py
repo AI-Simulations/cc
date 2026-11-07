@@ -1104,7 +1104,9 @@ def render(d):
             dots = (effort_indicator(effort, dim=not active, label=False, levels=effort_levels(provider, mid))
                     if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
-            head = f"↳ {name}:" if active and not idle else f"{DIM}↳ {name}:{RESET}"
+            # a row kept only for its runs says so: its workers predate the current mode (e.g. sub before the router)
+            head = (f"{DIM}↳ {name} (earlier):{RESET}" if idle
+                    else f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}")
             own = profile.get('autocompact')
             # A profile without its own limit inherits the main session's (ccx-switch parent_compact).
             ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own
