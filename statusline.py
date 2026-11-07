@@ -1150,7 +1150,9 @@ def render(d):
                   else f" {DIM}ac {k(limit)}{RESET}" if limit else '')
             used = sub_costs.get(name) or {}
             if folded is not None:
-                folded.append(f"{DIM if not used.get('ctx') else ''}{label} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET}"
+                # shortest form that still tells the levels apart: "v-easy haiku · mid sonnet $100"
+                short = name.replace("very-", "v-")
+                folded.append(f"{DIM if not used.get('ctx') else ''}{short} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target.split()[0]}{RESET}"
                               + (f" {DIM}{money(used['usd'])}{RESET}" if used.get("priced") else ""))
                 continue
             seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots}{'' if used.get('ctx') else ac}{route}"
@@ -1181,7 +1183,7 @@ def render(d):
                 seg += quota_parts(None, None, q.get('rate_limits') or {}, q.get('at'), now)
             sub_lines.append(SEP.join(seg))
         if folded:
-            sub_lines.append(f"{DIM}↳{RESET} " + SEP.join(folded))
+            sub_lines.append(f"{DIM}↳{RESET} " + f"{DIM} · {RESET}".join(folded))
     for sub_source, names in ({} if configured or child or source == "anthropic" else subagent_sources(d.get("session_id"))).items():
         if sub_source == source:
             continue  # same account as the session, already shown
