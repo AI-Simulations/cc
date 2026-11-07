@@ -3103,7 +3103,7 @@ text; do not retry.
         # which resolves the profile from the model name, so its tab shows the worker's whole conversation.
         live = f"""---
 name: ccx-{agent}-live
-description: {json.dumps(f"In-process ccx-{agent} worker; ccx picks it for ccx-{agent}; name it directly only when the ccx hint says so.")}
+description: {json.dumps(f"In-process ccx-{agent} worker; ccx picks it for ccx-{agent} itself. Do not call it directly.")}
 model: {LIVE_MODEL}{agent}
 disallowedTools: {WORKER_UNUSED_TOOLS}
 ---
