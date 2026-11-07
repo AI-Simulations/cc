@@ -1412,7 +1412,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not target or (isinstance(exc, urllib.error.HTTPError) and exc.code not in (402, 429) and exc.code < 500):
                     raise
                 request["model"] = target["model"]
+                # Caches never cross providers or models, but an openai-oauth fallback still needs the key so later turns hit what this one fills.
                 request.pop("prompt_cache_key", None)
+                if target["provider"] == "openai-oauth" and cache_key(body):
+                    request["prompt_cache_key"] = cache_key(body)
                 if target.get("effort"):
                     raw_effort = target["effort"]
                     request["reasoning_effort"] = openai_effort({"output_config": {"effort": raw_effort}})
