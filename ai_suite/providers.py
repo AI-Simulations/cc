@@ -133,22 +133,31 @@ SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth"
 
 @lru_cache(maxsize=None)
 def _models_dev() -> dict:
-    """models.dev catalogue: opencode's copy if under a day old, else live, else stale."""
+    """models.dev catalogue: opencode's copy or our own if under a day old, else live (saved as our own,
+    so a machine without a running opencode fetches it once a day, not on every call), else stale."""
+    own = AA_CACHE.parent / "models_dev.json"
+    copies = sorted((p for p in (MODELS_DEV_CACHE, own) if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
     try:
-        if time.time() - MODELS_DEV_CACHE.stat().st_mtime < 86400:
-            return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+        if copies and time.time() - copies[0].stat().st_mtime < 86400:
+            return json.loads(copies[0].read_text(encoding="utf-8"))
     except Exception:
         pass
     try:
         req = Request(MODELS_DEV_URL, headers={"User-Agent": "ai-book-creator"})
         with urlopen(req, timeout=10) as resp:
-            return json.load(resp)
+            data = json.load(resp)
+        with contextlib.suppress(OSError):
+            own.parent.mkdir(parents=True, exist_ok=True)
+            own.write_text(json.dumps(data), encoding="utf-8")
+        return data
     except Exception:
         pass
-    try:
-        return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    for path in copies:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return {}
 
 
 @lru_cache(maxsize=None)

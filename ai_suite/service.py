@@ -26,21 +26,22 @@ try:
 except ImportError:  # Calibre's bundled Python has none; _StdlibSession stands in
     requests = None  # type: ignore
 
-# Try optional OpenAI python client
-try:
-    from openai import OpenAI  # type: ignore
-    _HAS_OPENAI_CLIENT = True
-except Exception:
-    OpenAI = None  # type: ignore
-    _HAS_OPENAI_CLIENT = False
+# The optional OpenAI and Google Gemini clients load on first use (~3 s together): model
+# listings, facts and hooks import this module and never build a client.
+def _openai_class():
+    try:
+        from openai import OpenAI  # type: ignore
+        return OpenAI
+    except Exception:
+        return None
 
-# Try optional Google Gemini client
-try:
-    from google import genai  # type: ignore
-    _HAS_GEMINI_CLIENT = True
-except Exception:
-    genai = None  # type: ignore
-    _HAS_GEMINI_CLIENT = False
+
+def _genai():
+    try:
+        from google import genai  # type: ignore
+        return genai
+    except Exception:
+        return None
 
 
 DEFAULT_CONFIG_PATH = os.path.join(
@@ -1529,7 +1530,7 @@ class AIService:
 
         keyless = not self.api_key and self.provider != "openai-oauth"
         if (self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper", "grok")
-                and self.use_openai_client and _HAS_OPENAI_CLIENT and not keyless):
+                and self.use_openai_client and _openai_class() is not None and not keyless):
             try:
                 kwargs = {"api_key": self.api_key, "base_url": self.base_url}
                 if self.client_max_retries is not None:
@@ -1537,7 +1538,7 @@ class AIService:
                 headers = self._extra_headers()
                 if headers:
                     kwargs["default_headers"] = headers
-                self.client = OpenAI(**kwargs)
+                self.client = _openai_class()(**kwargs)
                 if self.provider == "groq":
                     self._log("Using OpenAI-compatible client for Groq")
                 else:
@@ -1546,7 +1547,8 @@ class AIService:
             except Exception as e:
                 self._log(f"{self.provider.title()} client initialization failed, falling back to HTTP. Error:", e)
 
-        if self.provider == "google" and _HAS_GEMINI_CLIENT:
+        genai = _genai() if self.provider == "google" else None
+        if genai is not None:
             try:
                 self.client = genai.Client(api_key=self.api_key)
                 self._log("Using Google Gemini client")

@@ -52,6 +52,11 @@ SESSION_AGENTS_FILE = os.path.join(CFG_DIR, "session-agents.json")
 ROUTES_FILE = os.path.join(CFG_DIR, "routes.json")
 KEYS_FILE = os.path.join(CFG_DIR, "keys.json")
 EFFORTS_FILE = os.path.join(CFG_DIR, "efforts.json")
+# Every provider's model listing, shared by the CLI, the /model window, the picker and the adapter: served
+# from disk for MODELS_TTL, and refetched in a background process at most every MODELS_RECHECK meanwhile.
+MODELS_CACHE_FILE = os.path.join(CFG_DIR, "models-cache.json")
+MODELS_TTL = 86400
+MODELS_RECHECK = 1800
 CLAUDE_SETTINGS = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 AGENTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "agents")
 OPENCODE_AUTH = os.path.expanduser(r"~\.local\share\opencode\auth.json")
@@ -1013,7 +1018,62 @@ def commandcode_plan_models():
 
 
 def get_models(name):
-    models, filtered = [], False
+    """`name`'s models: a listing under a day old from disk (refetched in the background every half hour, so
+    models added during the day show up), else a live fetch that refills the cache."""
+    entry = _models_cache().get(name) if MODELS_TTL > 0 else None
+    now = time.time()
+    if entry and now - entry.get("at", 0) < MODELS_TTL:
+        if now - entry.get("checked", entry["at"]) >= MODELS_RECHECK:
+            _refresh_models_later(name)
+        return entry["models"]
+    models, live = fetch_models(name)
+    if live:
+        _save_models(name, models)
+    return models
+
+
+def _models_cache():
+    try:
+        with open(MODELS_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("models"), list)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _save_models(name, models, **fields):
+    """One provider's entry, merged into the shared file (written whole, then swapped in)."""
+    data = _models_cache()
+    now = time.time()
+    data[name] = {**data.get(name, {}), "at": now, "checked": now, "models": models, **fields} if models is not None \
+        else {**data.get(name, {}), **fields}
+    os.makedirs(os.path.dirname(MODELS_CACHE_FILE), exist_ok=True)
+    tmp = f"{MODELS_CACHE_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, MODELS_CACHE_FILE)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
+def _refresh_models_later(name):
+    """A detached `ccx models-refresh <name>`; marked first, so other callers in the meantime don't start one too."""
+    _save_models(name, None, checked=time.time())
+    try:
+        subprocess.Popen([sys.executable, "-B", os.path.abspath(__file__), "models-refresh", name],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+                         if os.name == "nt" else 0, start_new_session=os.name != "nt")
+    except OSError:
+        pass
+
+
+def fetch_models(name):
+    """(models, live): the provider's listing now; live is False when the fetch failed and the
+    offline fallback (never cached) stands in."""
+    models, filtered, failed = [], False, False
     try:
         if name == "official":
             models = [{"id": mid, "name": "", "context": None, "output": None} for mid in catalog._provider_models("claude")]
@@ -1100,11 +1160,13 @@ def get_models(name):
                     continue
                 models.append({"id": m["id"], "name": "", "context": m.get("context_window") or limits.get(m["id"]), "output": m.get("max_output_tokens")})
     except Exception as e:
+        failed = True
         print(f"  (model fetch failed: {e} - using fallback)", file=sys.stderr)
 
+    live = not failed and bool(models or filtered)
     if not models and not filtered:  # offline fallback must not re-offer plan-locked models
         models = [{"id": i, "name": n, "context": None, "output": None} for i, n in FALLBACK_MODELS.get(name, [])]
-    return models
+    return models, live
 
 
 def ensure_oauth_proxy():
@@ -3521,6 +3583,12 @@ def main():
         opts, task = agent_options(args[2:])
         return run_agent(args[1], " ".join(task) or sys.stdin.buffer.read().decode("utf-8"), opts,
                          require_context=args[0] == "agent-relay")
+    if args[:1] == ["models-refresh"] and len(args) == 2 and args[1] in PROVIDERS:
+        with contextlib.redirect_stderr(open(os.devnull, "w")):
+            models, live = fetch_models(args[1])
+        if live:
+            _save_models(args[1], models)
+        return
     if args[:1] == ["fallback"]:
         return fallback_command(args[1:])
     if args[:1] == ["route"]:

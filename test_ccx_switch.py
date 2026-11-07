@@ -26,6 +26,9 @@ spec.loader.exec_module(ccx)
 ccx.EFFORTS_FILE = os.path.join(tempfile.mkdtemp(), 'efforts.json')
 # Tests that set no routes file of their own once wrote helper rows into the real ~/.config/ccx/routes.json.
 ccx.ROUTES_FILE = os.path.join(tempfile.mkdtemp(), 'routes.json')
+# Each check below fetches with its own mocks: no shared model cache (and never the real one).
+ccx.MODELS_CACHE_FILE = os.path.join(tempfile.mkdtemp(), 'models-cache.json')
+ccx.MODELS_TTL = 0
 # Keep real credentials out of mock failure output, and make runs inside Claude Code match plain runs.
 for _name in [k for k in os.environ if k == 'CLAUDECODE' or re.search('KEY|TOKEN|SECRET|PASSWORD', k.upper())]:
     del os.environ[_name]
@@ -578,6 +581,31 @@ assert facts[0]['id'] == 'priced' and facts[0]['ctx'] == 1000 and facts[0]['in']
 assert facts[0]['aa'] == 50 and facts[0]['missing'] == 0 and facts[0]['score'] > 0
 assert facts[1] == {'id': 'bare', 'ctx': None, 'in': None, 'out': None, 'aa': None, 'aa_efforts': {}, 'score': 0.0, 'missing': 3}
 print('facts ok')
+
+# The model cache: a listing under a day old comes from disk; a stale check refetches in the background.
+with tempfile.TemporaryDirectory() as tmp:
+    ccx.MODELS_CACHE_FILE, ccx.MODELS_TTL = os.path.join(tmp, 'models.json'), 86400
+    fetched, spawned = [], []
+    with patch.object(ccx, 'fetch_models', side_effect=lambda n: (fetched.append(n) or [{'id': 'm1'}], True)),             patch.object(ccx.subprocess, 'Popen', side_effect=lambda *a, **k: spawned.append(a[0])):
+        assert ccx.get_models('nvidia') == [{'id': 'm1'}] and fetched == ['nvidia']
+        assert ccx.get_models('nvidia') == [{'id': 'm1'}] and fetched == ['nvidia'], 'served from disk'
+        assert not spawned, 'fresh: no background check'
+        data = json.load(open(ccx.MODELS_CACHE_FILE))
+        data['nvidia']['checked'] -= ccx.MODELS_RECHECK + 1
+        json.dump(data, open(ccx.MODELS_CACHE_FILE, 'w'))
+        assert ccx.get_models('nvidia') == [{'id': 'm1'}] and len(spawned) == 1 and spawned[0][-2:] == ['models-refresh', 'nvidia']
+        ccx.get_models('nvidia')
+        assert len(spawned) == 1, 'one background check at a time'
+        data = json.load(open(ccx.MODELS_CACHE_FILE))
+        data['nvidia']['at'] -= 86401
+        json.dump(data, open(ccx.MODELS_CACHE_FILE, 'w'))
+        ccx.get_models('nvidia')
+        assert fetched == ['nvidia', 'nvidia'], 'a day old: fetched live'
+    with patch.object(ccx, 'fetch_models', return_value=([{'id': 'fallback'}], False)):
+        assert ccx.get_models('gemini') == [{'id': 'fallback'}]
+    assert 'gemini' not in json.load(open(ccx.MODELS_CACHE_FILE)), 'a failed fetch is never cached'
+    ccx.MODELS_CACHE_FILE, ccx.MODELS_TTL = os.path.join(tempfile.mkdtemp(), 'models-cache.json'), 0
+print('model cache ok')
 
 # A child Popen already waited on is dead, even on Windows, where the handle can outlive it.
 finished = subprocess.Popen([ccx.sys.executable, '-c', 'pass'],
