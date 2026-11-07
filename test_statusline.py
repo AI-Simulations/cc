@@ -296,7 +296,7 @@ class ConfiguredAgentLineTests(unittest.TestCase):
              patch.object(statusline, 'load_json', side_effect=lambda name: (stored or {}).get(name, {})), \
              patch.object(statusline, 'save_json'), \
              patch.object(statusline, 'keyword_ultracode', return_value=False):
-            text = statusline.render({'model': {'id': 'main-model'}})
+            text = statusline.render({'model': {'id': 'main-model'}, **({'session_id': 's1'} if stored else {})})
         return text if ansi else re.sub(r'\x1b\[[0-9;]*m', '', text)
 
     def test_official_main_shows_configured_worker_provider_model_and_effort(self):
@@ -323,8 +323,8 @@ class ConfiguredAgentLineTests(unittest.TestCase):
         profiles = {'easy': {'provider': 'official', 'model': 'claude-haiku-5-5'},
                     'mid': {'provider': 'official', 'model': 'claude-sonnet-5-5'}}
         with patch.object(statusline.time, 'time', return_value=1000.0):
-            open_panel = self.render('official', profiles, stored={'panel-None.json': {'at': 995.0, 'rows': 3}})
-            stale = self.render('official', profiles, stored={'panel-None.json': {'at': 900.0, 'rows': 3}})
+            open_panel = self.render('official', profiles, stored={'panel-s1.json': {'at': 995.0, 'rows': 3}})
+            stale = self.render('official', profiles, stored={'panel-s1.json': {'at': 900.0, 'rows': 3}})
         self.assertEqual(open_panel.splitlines()[-1], '↳ easy 0-75 haiku 5.5 │ mid 76-100 sonnet 5.5')
         self.assertEqual(stale.count('no runs yet'), 2)  # a panel not refreshed for 15 s is closed
 

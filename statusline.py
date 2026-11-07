@@ -1118,8 +1118,9 @@ def render(d):
         ranges = level_ranges(rows)
         # Claude's agent panel sits below these rows and is cut off at the screen's bottom edge: while it lists
         # agents (ccx-switch refreshes this every 5 s), the level rows fold into one so the panel fits.
-        panel = load_json(f"panel-{d.get('session_id')}.json")
-        folded = [] if (panel.get("rows") or 0) > 0 and now - (panel.get("at") or 0) < 15 else None
+        panels = [load_json(f"panel-{key}.json") for key in
+                  {d.get("session_id"), os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0]} if key]
+        folded = [] if any((p.get("rows") or 0) > 0 and now - (p.get("at") or 0) < 15 for p in panels) else None
         order = lambda kv: ROUTER_LEVELS.index(kv[0]) if kv[0] in ROUTER_LEVELS else len(ROUTER_LEVELS)
         for name, profile in sorted(rows.items(), key=order):  # levels easy to hard, other profiles after
             idle = name not in offered

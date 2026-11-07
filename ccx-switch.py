@@ -3662,7 +3662,7 @@ def _worker_now(path):
 
 def _note_panel(session, count):
     """Tells statusline.py the agent panel is open, so it folds its level rows and the panel fits on screen."""
-    if not isinstance(session, str) or not re.fullmatch(r"[\w-]{1,80}", session):
+    if not isinstance(session, str) or not re.fullmatch(r"[\w-]{8,80}", session):
         return
     try:
         folder = Path.home() / ".claude" / "statusline"
@@ -3680,7 +3680,9 @@ def agent_statusline(data):
     columns = data.get("columns")
     width = max(20, min(columns, 2000)) if type(columns) is int else 160
     tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
-    _note_panel(data.get("session_id"), len(tasks))
+    # A resumed session gets a new id but keeps its transcript: statusline.py looks under both.
+    for key in {data.get("session_id"), Path(str(data.get("transcript_path") or "")).stem}:
+        _note_panel(key, len(tasks))
     for index, task in enumerate(tasks, 1):
         kind = task.get("agentType") or "unknown"
         live = isinstance(kind, str) and kind.startswith("ccx-") and kind.endswith("-live")
