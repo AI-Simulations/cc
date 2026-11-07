@@ -1086,7 +1086,9 @@ def render(d):
         offered = set(rows)
         # a profile the session no longer offers (sub under the router) keeps its row while it has runs to show
         every = ccx_agents(d.get("session_id"), offered=False)
-        rows.update({n: every[n] for n in sub_costs if n not in rows and isinstance(every.get(n), dict)})
+        # ...and clears once those workers have been quiet for 10 minutes; their spend stays in the agents total
+        rows.update({n: every[n] for n, used in sub_costs.items() if n not in rows and isinstance(every.get(n), dict)
+                     and now - (used.get("at") or 0) < 600})
         for name, profile in rows.items():
             idle = name not in offered
             # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
