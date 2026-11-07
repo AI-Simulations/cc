@@ -3620,9 +3620,8 @@ def _worker_tokens(path):
         return ""
     k = lambda n: f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1000:.1f}k" if n >= 1000 else str(n)
     # Kept short for the panel: all tokens sent with their cache share, then the API cost.
-    hit = f" ({cached * 100 // total}% cached)" if total else ""
-    money = (f" · ${usd:,.2f}" if usd >= 1 else f" · ${usd:.3f}") if priced else ""
-    return f"{k(total)}{hit}{money}" if seen else ""
+    money = (f" ${usd:,.2f}" if usd >= 1 else f" ${usd:.3f}") if priced else ""
+    return f"{k(total)}{money}" if seen else ""
 
 
 def _statusline():
@@ -3658,6 +3657,16 @@ def _worker_now(path):
             if block.get("type") == "text" and (block.get("text") or "").strip():
                 return _feed_text(block["text"].strip().splitlines()[0], 80)
     return ""
+
+
+# The agent panel rows stay as narrow as statusline.py's folded level row above them.
+PANEL_ROW_WIDTH = 82
+
+
+def _short_model(model):
+    """`claude-sonnet-5-5` -> `sonnet`; other providers' ids keep their last path part."""
+    model = str(model).rsplit("/", 1)[-1]
+    return re.sub(r"^claude-([a-z]+).*$", r"\1", model)
 
 
 def _note_panel(session, count):
@@ -3703,18 +3712,18 @@ def agent_statusline(data):
             route = saved or profile
             # Only what the row is for: the model doing the work, its usage, the task.
             model = (route.get("model") or f"{route.get('provider', 'official')} default") if route else "route unavailable"
-            label = " · ".join(filter(None, [model, _worker_tokens(path) if path else ""]))
+            label = " ".join(filter(None, [_short_model(model), _worker_tokens(path) if path else ""]))
             now = _worker_now(path) if path and task.get("status") == "running" else ""
         else:
             try:
                 tokens = _worker_tokens(_agent_files(data, task["id"]).with_suffix(".jsonl"))
             except (ValueError, KeyError, TypeError):
                 tokens = ""
-            label, now = " · ".join(filter(None, [task.get("model") or "model pending", tokens])), ""
+            label, now = " ".join(filter(None, [_short_model(task.get("model") or "model pending"), tokens])), ""
         label += f" · {task.get('description') or ''}" + (f" › {now}" if now else "")
         # Claude's panel clips rows below the screen without saying so; `2/7` shows how many are hidden.
         label = f"{index}/{len(tasks)} {label}"
-        label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:width]
+        label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:min(width, PANEL_ROW_WIDTH)]
         if task.get("status") == "running":
             label = f"\x1b[1;97m{label}\x1b[0m"  # Claude dims every row; a running one stands out
         yield {"id": task["id"], "content": label}
