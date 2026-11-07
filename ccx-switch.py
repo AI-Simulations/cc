@@ -552,7 +552,9 @@ def preset_agents(name):
         return None
     route = {"provider": target["provider"], "model": target["model"], **({"effort": target["effort"]} if target.get("effort") else {})}
     profiles = load_agents(session=False) or {"sub": {}}
-    return {n: {**{k: v for k, v in a.items() if k not in ("provider", "model", "effort")}, **route} for n, a in profiles.items()}
+    # the router's levels keep their own models: one preset route on all of them would undo the routing
+    return {n: a if n in ROUTER_LEVELS else {**{k: v for k, v in a.items() if k not in ("provider", "model", "effort")}, **route}
+            for n, a in profiles.items()}
 
 
 def is_resume(claude_args):
@@ -683,6 +685,17 @@ def model_facts_command(words):
         models = get_models(name)
         catalog._models_dev()
         catalog._artificial_analysis()
+    for row in model_facts(name, models):
+        print(json.dumps(row))
+
+
+def model_facts(name, models=None):
+    """One dict per model of `name`: id, ctx, in/out $ per M, aa (Artificial Analysis), score, missing."""
+    if models is None:
+        with catalog._loading(f"{name} model facts"):
+            models = get_models(name)
+            catalog._models_dev()
+            catalog._artificial_analysis()
     facts_name = {"official": "claude", "commandcode-cli": "commandcode"}.get(name, name)
     infos = []
     for model in models:
@@ -691,10 +704,11 @@ def model_facts_command(words):
             info = {**info, "limit": {**(info.get("limit") or {}), "context": model["context"]}}
         infos.append(info)
     scales = catalog._scales(infos)
+    rows = []
     for model, info, scale in zip(models, infos, scales):
         context = (info.get("limit") or {}).get("context")
         cost = info.get("cost") or {}
-        print(json.dumps({
+        rows.append({
             "id": model["id"],
             "ctx": context if type(context) is int and context > 0 else None,
             "in": cost.get("input") if "input" in cost else None,
@@ -702,7 +716,48 @@ def model_facts_command(words):
             "aa": info.get("intelligence"),
             "score": round(float(scale.get("score") or 0) * 100, 1),
             "missing": catalog._missing(info),
-        }))
+        })
+    return rows
+
+
+# Each level's effort on its best pick: cheaper models think longer, the strongest needs less.
+# shortcut: Claude's ladder; a provider without these levels takes its default on the next worker call
+LEVEL_EFFORTS = {"easy": "xhigh", "mid": "high", "hard": "medium"}
+LEVEL_TEXT = {"easy": "Easy tasks: lookups, counting, renames, simple mechanical edits.",
+              "mid": "Medium tasks: ordinary feature work, single-file edits, moderate analysis.",
+              "hard": "Hard tasks: multi-file design, subtle bugs, tricky reasoning."}
+
+
+def best_levels(rows):
+    """{level: model id} from model_facts rows: hard = top AA score, easy = the cheapest model within
+    half of that AA, mid = the best AA-for-price score of the rest. Models without AA or price are skipped."""
+    known = [r for r in rows if r.get("aa") is not None and r.get("in") is not None and r.get("out") is not None]
+    if not known:
+        return {}
+    price = lambda r: r["in"] + r["out"]
+    hard = max(known, key=lambda r: (r["aa"], -price(r)))
+    easy = min((r for r in known if r["aa"] >= hard["aa"] / 2), key=lambda r: (price(r), -r["aa"]))
+    rest = [r for r in known if r["id"] not in (hard["id"], easy["id"])]
+    mid = max(rest, key=lambda r: (r.get("score") or 0, r["aa"])) if rest else hard
+    return {"easy": easy["id"], "mid": mid["id"], "hard": hard["id"]}
+
+
+def set_best_levels(provider):
+    """ccx agents router best [provider]: the levels on `provider`'s best picks (default: the sub profile's)."""
+    agents = load_agents()
+    provider = (provider or (agents.get("sub") or {}).get("provider") or "official").lower()
+    if provider not in PROVIDERS:
+        die(f"Unknown provider '{provider}'.")
+    picks = best_levels(model_facts(provider))
+    if not picks:
+        die(f"No {provider} model has both an AA score and a price; set the levels by hand.")
+    for level, model in picks.items():
+        agents[level] = {**{k: v for k, v in (agents.get(level) or {}).items() if k not in ("provider", "model", "effort")},
+                         "provider": provider, "model": model, "effort": LEVEL_EFFORTS[level],
+                         "description": (agents.get(level) or {}).get("description") or LEVEL_TEXT[level]}
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+        save_agents(agents)
+    print("Best picks: " + ", ".join(f"{level} {provider}/{model} {LEVEL_EFFORTS[level]}" for level, model in picks.items()))
 
 
 def process_alive(pid):
@@ -1749,7 +1804,17 @@ def _session_agents(launch=None):
             entry = json.load(f).get(launch)
     except (OSError, ValueError):
         return None
-    return entry.get("agents") if isinstance(entry, dict) and isinstance(entry.get("agents"), dict) else None
+    own = entry.get("agents") if isinstance(entry, dict) and isinstance(entry.get("agents"), dict) else None
+    if own is None:
+        return None
+    # Router levels added after this session saved its profiles still reach it, as set globally: the
+    # adapter resolves a live worker's profile here, and a session without them failed every level call.
+    try:
+        with open(AGENTS_FILE, encoding="utf-8") as f:
+            shared = json.load(f)
+    except (OSError, ValueError):
+        shared = {}
+    return {**own, **{n: a for n, a in shared.items() if n in ROUTER_LEVELS and n not in own and isinstance(a, dict)}}
 
 
 def _latest_session_agents():
@@ -3208,6 +3273,8 @@ def main():
         return save_agents(agents)
     if args[:2] == ["agents", "models"] and len(args) in (2, 3, 4):
         return agent_models(args[2].lower() if len(args) >= 3 else None, *args[3:])
+    if args[:3] == ["agents", "router", "best"] and len(args) <= 4:
+        return set_best_levels(args[3] if len(args) == 4 else None)
     if args[:2] == ["agents", "router"] and len(args) <= 3:
         if len(args) == 2:
             return print(router_text())
@@ -3257,7 +3324,7 @@ def main():
         print("ccx --resume [session-id-or-name] | ccx --continue | ccx status")
         print("ccx agents (edit menu, then write subagents) | ccx agents set <name> [--provider P] [--model M]")
         print("    [--effort E|default] [--autocompact N|default] [--description D] | ccx agents models <name> [provider]")
-        print("    | ccx agents remove <name> | ccx agents router [on|off]")
+        print("    | ccx agents remove <name> | ccx agents router [on|off|best [provider]]")
         print("ccx agent <name> [same options, this run only] [task, else stdin]")
         print("Every launch, resume included, asks for the provider and model unless both are given.")
         return

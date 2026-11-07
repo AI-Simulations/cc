@@ -22,6 +22,7 @@ CCX = Path(__file__).with_name('ccx-switch.py')
 TABS = [('model', 'Model'), ('subagent', 'Subagent'), ('fallback', 'Fallbacks'),
         ('auto', 'Auto'), ('tools', 'Tools'), ('presets', 'Presets')]
 TARGET_TABS = ('subagent', 'fallback')
+ROUTER_LEVELS = ('easy', 'mid', 'hard')  # ccx-switch.py's router levels, in the Subagent tab's order
 
 # Dark by default, independent of the desktop's light/dark setting.
 BG, PANEL, FIELD, HOVER = '#0d1117', '#141a22', '#19202a', '#243042'
@@ -35,6 +36,7 @@ FONT = (UI, 10)
 BOLD = (UI, 10, 'bold')
 SMALL_BOLD = (UI, 9, 'bold')
 MONO = ('Consolas' if os.name == 'nt' else 'Menlo' if sys.platform == 'darwin' else 'DejaVu Sans Mono', 10)
+LOADING_MODELS = 'Loading models…'  # the model list's only row while it loads
 BUSY = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 # Claude Code's own ladder, used when a provider publishes none (as the launch menu does).
 EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -451,6 +453,13 @@ def session_entry():
     return entry if isinstance(entry, dict) else {}
 
 
+def short_model(model):
+    """'claude-haiku-5-5' -> 'Haiku 5.5', 'deepseek-ai/deepseek-v4.1-flash' -> 'deepseek-v4.1-flash'."""
+    name = re.sub(r'^claude-', '', str(model).rsplit('/', 1)[-1])
+    m = re.match(r'^(opus|sonnet|haiku|fable)-(\d+)-(\d+)$', name)
+    return f'{m[1].capitalize()} {m[2]}.{m[3]}' if m else name
+
+
 def load_profiles():
     """agents.json profiles for this session, as the picker names them."""
     agents = {}
@@ -458,8 +467,12 @@ def load_profiles():
         agents = json.loads((Path.home() / '.config/ccx/agents.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         pass
-    agents = session_entry().get('agents', agents)
-    return agents if isinstance(agents, dict) else {}
+    shared = agents if isinstance(agents, dict) else {}
+    own = session_entry().get('agents')
+    if isinstance(own, dict):
+        # router levels added after this session saved its profiles reach it as set globally
+        return {**own, **{n: a for n, a in shared.items() if n in ROUTER_LEVELS and n not in own}}
+    return shared
 
 
 class ThinScrollbar(tk.Canvas):
@@ -570,6 +583,25 @@ class PickerTab(ttk.Frame):
         saved = session_view().get(key)
         self.view = migrate_view(saved)
 
+        if key == 'subagent':
+            # Off: the main model does all the work. One model: every task goes to `sub`.
+            # Router: the main model sends each task to the easy, mid or hard level that fits it.
+            entry = session_entry()
+            self.levels = [n for n in ROUTER_LEVELS if n in load_profiles()]
+            self.mode = tk.StringVar(value='off' if entry.get('off') else
+                                     'router' if self.levels and entry.get('router') is not False else 'one')
+            modes = ttk.Frame(self)
+            modes.pack(fill='x', padx=18, pady=(16, 0))
+            ttk.Label(modes, text='Subagents', style='Dim.TLabel').pack(side='left', padx=(0, 12))
+            for value, text in (('off', 'Off'), ('one', 'One model'), ('router', 'Router')):
+                ttk.Radiobutton(modes, text=text, value=value, variable=self.mode, style='Seg.Toolbutton',
+                                command=self.set_mode,
+                                state='normal' if session_launch_id() and (value != 'router' or self.levels)
+                                else 'disabled').pack(side='left', padx=(0, 2))
+            # the subline under the switch says what the chosen mode does
+            self.mode_hint = ttk.Label(self, text='', style='Faint.TLabel')
+            self.mode_hint.pack(fill='x', padx=18, pady=(6, 0))
+
         bar = ttk.Frame(self)
         bar.pack(fill='x', padx=18, pady=(16, 6))
         ttk.Label(bar, text='Find', style='Dim.TLabel').pack(side='left')
@@ -582,33 +614,32 @@ class PickerTab(ttk.Frame):
                                      values=list(SORTS))
         self.sort_box.pack(side='left', padx=(8, 0))
         self.sort_box.bind('<<ComboboxSelected>>', lambda _e: self.render_models())
-        if key == 'subagent':
-            # Off: this session's main model does all the work; every Agent call is refused.
-            self.use_agents = tk.BooleanVar(value=not session_entry().get('off'))
-            ttk.Checkbutton(bar, text='Use subagents in this session', variable=self.use_agents,
-                            command=self.toggle_agents,
-                            state='normal' if session_launch_id() else 'disabled').pack(side='right')
-            # Router: each task goes to the easy/mid/hard profile that fits it, instead of `sub`.
-            self.use_router = tk.BooleanVar(value=session_entry().get('router') is not False)
-            ttk.Checkbutton(bar, text='Route by difficulty (easy/mid/hard)', variable=self.use_router,
-                            command=self.toggle_router,
-                            state='normal' if session_launch_id() else 'disabled').pack(side='right', padx=(0, 16))
 
-        pick = ttk.Frame(self)
+        pick = self.pick_row = ttk.Frame(self)
         pick.pack(fill='x', padx=18, pady=(2, 10))
         self.target_label = ttk.Label(pick, text='Target', style='Dim.TLabel')
         self.target = tk.StringVar()
         self.target_box = ttk.Combobox(pick, textvariable=self.target, state='readonly', width=15)
-        # One subagent profile leaves nothing to choose: the Target box would only show 'sub'.
-        if key == 'fallback' or (key == 'subagent' and len(load_profiles()) > 1):
+        if key == 'subagent':
+            # The router's levels, each its own model; one model mode edits `sub` and shows no switch.
+            self.level_bar = ttk.Frame(self)  # a row of its own, above Provider
+            ttk.Label(self.level_bar, text='Level', style='Dim.TLabel').pack(side='left', padx=(0, 8))
+            self.level_buttons = {}
+            for name in self.levels:
+                self.level_buttons[name] = ttk.Radiobutton(self.level_bar, text=name.capitalize(), value=name,
+                                                           variable=self.target, style='Seg.Toolbutton', command=self.load)
+                self.level_buttons[name].pack(side='left', padx=(0, 2))
+            # fills every level from the picked provider: top AA for hard, cheapest close one for easy
+            ttk.Button(self.level_bar, text='Best picks', command=self.best_picks).pack(side='left', padx=(8, 0))
+            self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=pick)
+        elif key == 'fallback':
             self.target_label.pack(side='left')
             self.target_box.pack(side='left', padx=(8, 18))
             self.target_box.bind('<<ComboboxSelected>>', lambda _e: self.load())
-            # Say why the picker exists: one route per profile, not one route per tab.
-            hint = 'Target: the subagent profile this tab edits.' if key == 'subagent' else (
-                    'Target: this session or one subagent profile (a session fallback needs a ccx adapter launch).')
-            ttk.Label(self, text=hint, style='Faint.TLabel', wraplength=900).pack(fill='x', padx=18, pady=(0, 8))
-        ttk.Label(pick, text='Provider', style='Dim.TLabel').pack(side='left')
+            ttk.Label(self, text='Target: this session or one subagent profile (a session fallback needs a ccx adapter launch).',
+                      style='Faint.TLabel', wraplength=900).pack(fill='x', padx=18, pady=(0, 8))
+        self.provider_label = ttk.Label(pick, text='Provider', style='Dim.TLabel')
+        self.provider_label.pack(side='left')
         self.provider = tk.StringVar()
         self.provider_box = ttk.Combobox(pick, textvariable=self.provider, state='readonly', width=24)
         self.provider_box.pack(side='left', padx=(8, 8))
@@ -668,18 +699,50 @@ class PickerTab(ttk.Frame):
 
         self.now = ttk.Label(self, text='', style='Faint.TLabel')
         self.now.pack(fill='x', padx=18, pady=(0, 12))
+        if key == 'subagent':
+            self.show_mode()
 
-    def toggle_router(self):
-        ok, out = run_ccx('agents', 'router', 'on' if self.use_router.get() else 'off')
-        if not ok:
-            self.use_router.set(not self.use_router.get())
-        self.status.configure(text=out)
+    def set_mode(self):
+        mode = self.mode.get()
+        steps = [('agents', 'off')] if mode == 'off' else [('agents', 'on'), ('agents', 'router', 'on' if mode == 'router' else 'off')]
+        for step in steps:
+            ok, out = run_ccx(*step)
+            if not ok:
+                break
+        self.status.configure(text=out.strip().splitlines()[-1] if out.strip() else '')
+        self.show_mode()
+        self.load()
 
-    def toggle_agents(self):
-        ok, out = run_ccx('agents', 'on' if self.use_agents.get() else 'off')
-        if not ok:
-            self.use_agents.set(not self.use_agents.get())
-        self.status.configure(text=out)
+    def show_levels(self):
+        """Each level button names the model it runs on now."""
+        profiles = load_profiles()
+        for name, button in self.level_buttons.items():
+            model = (profiles.get(name) or {}).get('model')
+            button.configure(text=f'{name.capitalize()} · {short_model(model)}' if model else name.capitalize())
+
+    def best_picks(self):
+        provider = self.provider.get() or 'official'
+        self.busy(f'Finding the best {provider} picks…')
+
+        def done(result):
+            ok, out = result
+            self.settle(out.strip().splitlines()[-1] if out.strip() else ('Done.' if ok else 'Failed.'))
+            self.show_levels()
+            self.load()
+        self.app.background(lambda: run_ccx('agents', 'router', 'best', provider), done)
+
+    def show_mode(self):
+        mode = self.mode.get()
+        self.show_levels()
+        self.mode_hint.configure(text={
+            'off': 'No subagents: the main model does all the work itself.',
+            'one': 'Every subagent task runs on the one model picked below.',
+            'router': 'The main model sends each task to Easy, Mid or Hard by its difficulty. Pick each level\'s model below.',
+        }[mode])
+        if mode == 'router':
+            self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=self.pick_row)
+        else:
+            self.level_bar.pack_forget()
 
     # ---- data ----
 
@@ -735,7 +798,10 @@ class PickerTab(ttk.Frame):
         self.busy('Loading providers…')
         targets = [('', '')]
         if self.key == 'subagent':
-            targets = [(name, name) for name in load_profiles()]
+            # shortcut: profiles other than sub and the levels are only editable with `ccx agents set`
+            targets = [(n, n) for n in self.levels] if self.mode.get() == 'router' else [('sub', 'sub')]
+            if self.mode.get() == 'router' and self.target.get() not in self.levels:
+                self.target.set('')  # the saved view picks the level, else the first
         elif self.key == 'fallback':
             targets = [('session', 'session')] + [(name, name) for name in load_profiles()]
         names = [value for _, value in targets]
@@ -1051,6 +1117,7 @@ class PickerTab(ttk.Frame):
             return
         if self.key == 'subagent':
             self.render_now()
+            self.show_levels()
             self.mark_current()
         else:
             name = {'model': 'Route', 'fallback': 'Fallback', 'auto': 'Helper', 'tools': 'Helper'}[self.key]
@@ -1346,13 +1413,13 @@ class PresetEditor(tk.Toplevel):
             box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.change_provider(k))
             model_box = ttk.Combobox(body, textvariable=fields['model'], width=38)
             model_box.grid(row=row, column=2, padx=(0, 10))
-            model_box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.load_efforts(k))
+            model_box.bind('<<ComboboxSelected>>', lambda _e, k=key: self.pick_model(k))
             model_box.bind('<FocusOut>', lambda _e, k=key: self.load_efforts(k))
             effort_box = ttk.Combobox(body, textvariable=fields['effort'], state='readonly',
                                       values=['default', *EFFORTS], width=10)
             effort_box.grid(row=row, column=3)
-            spinner = ttk.Label(body, text='', style='Dim.TLabel', width=2)
-            spinner.grid(row=row, column=4, padx=(8, 0))
+            # the spinner sits inside the model box, left of its arrow, while the provider's list loads
+            spinner = ttk.Label(model_box, text='', style='Spin.TLabel')
             fields.update(model_box=model_box, effort_box=effort_box, spinner=spinner, loading=False, request=0)
         self.spinner_job = None
         self.spinner_frame = 0
@@ -1360,7 +1427,7 @@ class PresetEditor(tk.Toplevel):
         self.model_box, self.effort_box = self.fields['model']['model_box'], self.fields['model']['effort_box']
         self.status = ttk.Label(body, text='Loading models…', style='Faint.TLabel')
         self.status.grid(row=7, column=0, columnspan=4, sticky='w', pady=(10, 0))
-        ttk.Label(body, text='Off = disable fallback / inherit helper. Subagent applies to every configured profile.',
+        ttk.Label(body, text='Off = disable fallback / inherit helper. Subagent sets the one-model subagent; router levels keep their own.',
                   style='Faint.TLabel').grid(row=8, column=0, columnspan=4, sticky='w')
         foot = ttk.Frame(body)
         foot.grid(row=9, column=0, columnspan=4, sticky='we', pady=(16, 0))
@@ -1383,7 +1450,13 @@ class PresetEditor(tk.Toplevel):
     def spin_models(self):
         self.spinner_job = None
         for fields in self.fields.values():
-            fields['spinner'].configure(text=BUSY[self.spinner_frame % len(BUSY)] if fields['loading'] else '')
+            frame = BUSY[self.spinner_frame % len(BUSY)]
+            if fields['loading']:
+                fields['spinner'].configure(text=frame)
+                fields['spinner'].place(relx=1, x=-26, rely=0.5, anchor='e')
+                fields['model_box'].configure(values=[f'{frame} {LOADING_MODELS}'])
+            else:
+                fields['spinner'].place_forget()
         self.spinner_frame += 1
         if any(fields['loading'] for fields in self.fields.values()):
             self.spinner_job = self.after(90, self.spin_models)
@@ -1402,10 +1475,11 @@ class PresetEditor(tk.Toplevel):
         request = fields['request']
         provider = fields['provider'].get()
         disabled = provider == 'off'
+        fields['typed'] = fields['model'].get()
         fields['loading'] = not disabled
-        fields['spinner'].configure(text=BUSY[0] if not disabled else '')
-        if self.spinner_job is None:
-            self.spin_models()
+        if self.spinner_job is not None:  # restart, so this box shows its spinner now, not on the next tick
+            self.after_cancel(self.spinner_job)
+        self.spin_models()
         fields['model_box'].configure(state='disabled' if disabled else 'normal')
         fields['effort_box'].configure(state='disabled' if disabled else 'readonly')
         if not disabled:
@@ -1419,7 +1493,7 @@ class PresetEditor(tk.Toplevel):
             return
         fields = self.fields[key]
         fields['loading'] = False
-        fields['spinner'].configure(text='')
+        fields['spinner'].place_forget()
         ok, out = result
         models = plain_rows(out) if ok else []
         current = fields['model'].get().strip()
@@ -1429,6 +1503,14 @@ class PresetEditor(tk.Toplevel):
         values = [current, *[m for m in models if m != current]] if current else models
         fields['model_box'].configure(values=values)
         self.status.configure(text=f'{len(models)} models; type any id' if models else 'Type a model id.')
+        self.load_efforts(key)
+
+    def pick_model(self, key):
+        """A pick from the list; the loading row is no model, so it brings the typed one back."""
+        fields = self.fields[key]
+        if fields['model'].get().endswith(LOADING_MODELS):
+            fields['model'].set(fields.get('typed', ''))
+            return
         self.load_efforts(key)
 
     def load_efforts(self, key='model'):
@@ -1542,6 +1624,12 @@ class App(tk.Tk):
                              darkcolor=BORDER, padding=6)
         self.style.map('TCombobox', fieldbackground=[('readonly', FIELD)],
                        foreground=[('readonly', FG)], bordercolor=[('focus', ACCENT)])
+        # A segmented switch (Subagent tab's mode and level): flat cells, the chosen one in the accent.
+        self.style.configure('Seg.Toolbutton', background=FIELD, foreground=DIM, borderwidth=0, focusthickness=0,
+                             padding=(14, 6), font=FONT, anchor='center')
+        self.style.map('Seg.Toolbutton', background=[('selected', ACCENT), ('disabled', BG), ('active', HOVER)],
+                       foreground=[('selected', 'white'), ('disabled', FAINT), ('active', FG)])
+        self.style.configure('Spin.TLabel', background=FIELD, foreground=ACCENT, font=FONT)
         self.style.configure('TCheckbutton', background=BG, foreground=FG)
         self.style.map('TCheckbutton', background=[('active', BG)])
         self.style.configure('Picker.Treeview', background=FIELD, fieldbackground=FIELD, foreground=FG,

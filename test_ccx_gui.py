@@ -377,13 +377,16 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(self.tab.provider.get(), 'alpha')
 
     def test_view_cache_restores_the_saved_target(self):
-        gui.save_view('subagent', {'target': 'second', 'provider': 'beta', 'picks': {'beta': 'model-b'},
+        gui.save_view('subagent', {'target': 'hard', 'provider': 'beta', 'picks': {'beta': 'model-b'},
                                    'sort': 'Listed', 'query': '', 'effort': 'default'})
         tab = self.app.tabs['subagent']
         tab.view = gui.session_view().get('subagent')
-        with mock.patch.object(gui, 'load_profiles', return_value={'first': {}, 'second': {}}):
+        tab.mode.set('router')
+        tab.levels = ['easy', 'hard']
+        tab.target.set('')
+        with mock.patch.object(gui, 'load_profiles', return_value={'easy': {}, 'hard': {}}):
             tab.load()
-        self.assertEqual(tab.target.get(), 'second')
+        self.assertEqual(tab.target.get(), 'hard')
 
     def test_subagent_apply_moves_current_mark_in_place(self):
         tab = self.app.tabs['subagent']
@@ -455,14 +458,19 @@ class PickerTests(unittest.TestCase):
 
     def test_target_picker_change_is_kept(self):
         tab = self.app.tabs['subagent']
-        tab.view = {'target': 'first', 'provider': 'alpha', 'picks': {'alpha': 'model-a'},
+        tab.view = {'target': 'easy', 'provider': 'alpha', 'picks': {'alpha': 'model-a'},
                     'sort': 'Listed', 'query': '', 'effort': 'default'}
-        with mock.patch.object(gui, 'load_profiles', return_value={'first': {}, 'second': {}}):
+        tab.mode.set('router')
+        tab.levels = ['easy', 'hard']
+        with mock.patch.object(gui, 'load_profiles', return_value={'easy': {}, 'hard': {}}):
             tab.load()
-            self.assertEqual(tab.target.get(), 'first')
-            tab.target.set('second')
+            self.assertEqual(tab.target.get(), 'easy')
+            tab.target.set('hard')
             tab.load()
-            self.assertEqual(tab.target.get(), 'second')
+            self.assertEqual(tab.target.get(), 'hard')
+            tab.mode.set('one')
+            tab.load()
+            self.assertEqual(tab.target.get(), 'sub', 'one-model mode edits sub, never a level')
 
     def test_subagent_view_does_not_leak_across_targets(self):
         tab = self.app.tabs['subagent']
@@ -480,11 +488,14 @@ class PickerTests(unittest.TestCase):
     def test_target_tabs_explain_which_profile_they_edit(self):
         labels = [w.cget('text') for w in self.app.tabs['fallback'].winfo_children() if isinstance(w, ttk.Label)]
         self.assertTrue(any('profile' in text for text in labels), labels)
-        # the Subagent tab shows Target (and its hint) only when there is more than one profile to pick
+        # the Subagent tab has no Target box: router levels, or the one `sub` model, and a subline per mode
         tab = self.app.tabs['subagent']
-        labels = [w.cget('text') for w in tab.winfo_children() if isinstance(w, ttk.Label)]
-        self.assertEqual(any('profile' in text for text in labels), len(gui.load_profiles()) > 1, labels)
-        self.assertEqual(bool(tab.target_box.winfo_manager()), len(gui.load_profiles()) > 1)
+        self.assertFalse(tab.target_box.winfo_manager())
+        for mode, word in (('off', 'main model'), ('one', 'one model'), ('router', 'Easy, Mid or Hard')):
+            tab.mode.set(mode)
+            tab.show_mode()
+            self.assertIn(word, tab.mode_hint.cget('text'))
+            self.assertEqual(bool(tab.level_bar.winfo_manager()), mode == 'router')
         model = [w.cget('text') for w in self.app.tabs['model'].winfo_children() if isinstance(w, ttk.Label)]
         self.assertFalse(any('profile' in text for text in model), model)
 
@@ -569,9 +580,15 @@ class PickerTests(unittest.TestCase):
         fields = editor.fields['model']
         self.assertTrue(fields['loading'])
         self.assertTrue(fields['spinner'].cget('text'))
+        self.assertTrue(fields['spinner'].winfo_manager(), 'the spinner shows inside the model box')
+        self.assertTrue(str(fields['model_box'].cget('values')[0]).endswith(gui.LOADING_MODELS))
+        # picking the loading row keeps the model that was there
+        fields['model'].set(fields['model_box'].cget('values')[0])
+        editor.pick_model('model')
+        self.assertEqual(fields['model'].get(), 'first')
         self.background.call_args.args[2]((False, 'unavailable'))
         self.assertFalse(fields['loading'])
-        self.assertEqual(fields['spinner'].cget('text'), '')
+        self.assertFalse(fields['spinner'].winfo_manager())
         editor.load_models()
         self.assertTrue(fields['loading'])
         self.background.call_args.args[2]((True, 'first\nsecond'))

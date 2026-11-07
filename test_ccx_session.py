@@ -99,6 +99,28 @@ class CcSessionTests(unittest.TestCase):
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps(self.global_agents), encoding="utf-8")
         self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "no levels: the switch changes nothing")
 
+    def test_router_levels_survive_presets_and_reach_old_sessions(self):
+        levels = {"easy": {"provider": "official", "model": "claude-haiku-5-5"},
+                  "hard": {"provider": "official", "model": "claude-opus-5-5"}}
+        Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
+        self.ccx.saved_bundle = lambda name: {"subagent": {"provider": "official", "model": "claude-sonnet-5-5"}}
+        seeded = self.ccx.preset_agents("official")
+        self.assertEqual(seeded["sub"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(seeded["hard"]["model"], "claude-opus-5-5", "a preset never flattens the levels")
+        # a session that saved only `sub` before the levels existed still gets them
+        self.ccx.save_agents({"sub": {"provider": "official", "effort": "low"}})
+        agents = self.ccx.load_agents()
+        self.assertEqual(agents["sub"]["effort"], "low")
+        self.assertEqual(agents["hard"]["model"], "claude-opus-5-5")
+
+    def test_best_levels_pick_by_aa_and_price(self):
+        row = lambda id, aa, price, score: {"id": id, "aa": aa, "in": price, "out": price * 5, "score": score}
+        rows = [row("opus", 59, 4, 75), row("sonnet", 54, 2, 74), row("fable", 50, 10, 53),
+                row("haiku", 36, 0.1, 67), row("tiny", 20, 0.01, 60), {"id": "alias", "aa": None, "in": 1, "out": 1}]
+        # hard: top AA; easy: cheapest within half of it (tiny is too weak); mid: best score of the rest
+        self.assertEqual(self.ccx.best_levels(rows), {"easy": "haiku", "mid": "sonnet", "hard": "opus"})
+        self.assertEqual(self.ccx.best_levels([{"id": "x", "aa": None}]), {})
+
     def test_review_hook_reminds_only_after_ccx_workers(self):
         out = self.ccx.review_hook({"tool_name": "Agent", "tool_input": {"subagent_type": "ccx-mid"}})
         self.assertIn("Review every ccx worker", out["hookSpecificOutput"]["additionalContext"])

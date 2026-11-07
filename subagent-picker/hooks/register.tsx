@@ -72,7 +72,9 @@ agents = json.load(open(os.path.expanduser('~/.config/ccx/agents.json')))
 launch = os.environ.get('CCX_LAUNCH_ID', '') or 'claude-' + os.environ['CLAUDE_CODE_SESSION_ID']
 if launch:
     try:
-        agents = json.load(open(os.path.expanduser('~/.config/ccx/session-agents.json'))).get(launch, {}).get('agents', agents)
+        own = json.load(open(os.path.expanduser('~/.config/ccx/session-agents.json'))).get(launch, {}).get('agents')
+        if isinstance(own, dict):
+            agents = {**own, **{n: a for n, a in agents.items() if n in ('easy', 'mid', 'hard') and n not in own}}
     except Exception:
         pass
 print(json.dumps(agents))`

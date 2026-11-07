@@ -377,8 +377,11 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
                     "openai-oauth": "openai", "opencode-go": "opencode-go", "openrouter": "openrouter"}
 
 
+ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
+
+
 def ccx_agents(session_id=None):
-    """This session's subagent profiles, or the shared defaults."""
+    """The subagent profiles this session offers (ccx-switch's offered_agents): its own, or the shared defaults."""
     try:
         with open(os.path.expanduser("~/.config/ccx/agents.json"), encoding="utf-8") as f:
             agents = json.load(f)
@@ -386,15 +389,24 @@ def ccx_agents(session_id=None):
         return {}
     # ccx-switch's session_launch: a Claude session not started by ccx keys its profiles by session id
     launch = os.environ.get("CCX_LAUNCH_ID") or (f"claude-{session_id}" if session_id else "")
+    entry = {}
     if launch:
         try:
             with open(os.path.expanduser("~/.config/ccx/session-agents.json"), encoding="utf-8") as f:
                 entry = json.load(f).get(launch) or {}
-            if isinstance(entry.get("agents"), dict):
-                return entry["agents"]
         except (OSError, ValueError, AttributeError):
-            pass
-    return agents if isinstance(agents, dict) else {}
+            entry = {}
+    shared = agents if isinstance(agents, dict) else {}
+    if isinstance(entry, dict) and isinstance(entry.get("agents"), dict):
+        own = entry["agents"]
+        agents = {**own, **{n: a for n, a in shared.items() if n in ROUTER_LEVELS and n not in own}}
+    else:
+        agents, entry = shared, entry if isinstance(entry, dict) else {}
+    if any(n in ROUTER_LEVELS for n in agents):
+        on = entry.get("router") is not False
+        kept = {n: a for n, a in agents.items() if (n != "sub" if on else n not in ROUTER_LEVELS)}
+        agents = kept or agents
+    return agents
 
 
 def subagent_sources(session_id=None):
