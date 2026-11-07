@@ -1965,7 +1965,7 @@ ROUTER_LEVELS = ("easy", "mid", "hard")
 
 
 def router_on(launch=None):
-    """This session's router switch: off (one subagent) unless the session turned it on."""
+    """This session's router switch: on unless the session turned it off (new sessions store off)."""
     launch = launch or session_launch()
     try:
         with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
@@ -2093,6 +2093,10 @@ def check_agents(agents):
             die(f"Subagent '{agent}': invalid model id '{model}'.")
         if not isinstance(a.get("args", []), list) or not all(isinstance(x, str) for x in a.get("args", [])):
             die(f"Subagent '{agent}': args must be a list of Claude arguments.")
+    tops = [agents[n]["upto"] for n in ROUTER_LEVELS[:-1] if n in agents and agents[n].get("upto") is not None]
+    if any(a >= b for a, b in zip(tops, tops[1:])) or any(t >= 100 for t in tops):
+        die("Router levels' upto values must rise (easy < mid) and stay below 100; fix them with "
+            "`ccx agents router ranges <easy top> <mid top>`.")
     return agents
 
 
