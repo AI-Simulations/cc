@@ -77,6 +77,9 @@ copy a `ccx … --resume` command that continues the conversation on the new pro
 still works the usual way. Without a window (for example, no Tk) the picker falls back to an
 in-terminal grid.
 
+Model listings are cached for a day in `~/.config/ccx/models-cache.json`; while cached, a background
+`ccx models-refresh <provider>` rechecks at most every 30 minutes, so models added that day still appear.
+
 Each provider and model family shows a coloured initials badge. To use a real logo instead, drop a
 24×24 SVG named after the provider or family (`openai.svg`, `deepseek.svg`, …) into
 `~/.config/ccx/logos`; it needs Tk 8.7 or newer, which reads SVG.
