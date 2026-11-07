@@ -87,7 +87,15 @@ class CcSessionTests(unittest.TestCase):
         self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"])
         context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(easy tasks)", context)
-        self.assertIn("cheapest profile", context)
+        self.assertIn("0 (trivial) to 100", context)
+        self.assertIn("ccx-easy 0-50, ccx-mid 51-75, ccx-hard 76-100", context)
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_ranges(["20", "90"])
+        self.assertIn("ccx-easy 0-20, ccx-mid 21-90, ccx-hard 91-100",
+                      self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"])
+        with self.assertRaises(SystemExit):  # tops must rise and stay under 100
+            self.ccx.set_ranges(["90", "20"])
+        self.assertEqual(self.ccx.level_ranges(self.ccx.load_agents())["mid"], (21, 90), "a rejected edit changes nothing")
         self.assertIn("Review every ccx worker", context)
         self.assertNotIn("ccx-sub:", context)
         self.assertEqual(decision("ccx-sub"), "deny")
@@ -103,6 +111,9 @@ class CcSessionTests(unittest.TestCase):
         self.ccx.link_session("sid-r")
         self.assertTrue(self.ccx.router_on(), "a resume keeps the switch")
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps(self.global_agents), encoding="utf-8")
+        os.environ["CCX_LAUNCH_ID"] = "launch-c"  # a session that never saved levels of its own
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(True)
         self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "no levels: the switch changes nothing")
 
     def test_router_levels_survive_presets_and_reach_old_sessions(self):

@@ -378,6 +378,19 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
 
 
 ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
+LEVEL_TOPS = {"easy": 50, "mid": 75}  # ccx-switch.py's default range tops
+
+
+def level_ranges(profiles):
+    """ccx-switch.py's level_ranges: {level: (low, high)} on the 0-100 difficulty scale."""
+    levels = [n for n in ROUTER_LEVELS if n in profiles]
+    ranges, low = {}, 0
+    for i, name in enumerate(levels):
+        high = 100 if i == len(levels) - 1 else (profiles[name] or {}).get("upto", LEVEL_TOPS.get(name, 50))
+        high = max(low, min(int(high), 100))
+        ranges[name] = (low, high)
+        low = min(high + 1, 100)
+    return ranges
 
 
 def ccx_agents(session_id=None, offered=True):
@@ -1089,8 +1102,12 @@ def render(d):
         # ...and clears once those workers have been quiet for 10 minutes; their spend stays in the agents total
         rows.update({n: every[n] for n, used in sub_costs.items() if n not in rows and isinstance(every.get(n), dict)
                      and now - (used.get("at") or 0) < 600})
-        for name, profile in rows.items():
+        ranges = level_ranges(rows)
+        order = lambda kv: ROUTER_LEVELS.index(kv[0]) if kv[0] in ROUTER_LEVELS else len(ROUTER_LEVELS)
+        for name, profile in sorted(rows.items(), key=order):  # levels easy to hard, other profiles after
             idle = name not in offered
+            # a router level shows its slice of the 0-100 difficulty scale: "easy 0-50"
+            label = f"{name} {ranges[name][0]}-{ranges[name][1]}" if name in ranges and not idle and len(ranges) > 1 else name
             # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
             provider = profile.get("provider", "official")
@@ -1108,7 +1125,7 @@ def render(d):
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
             # a row kept only for its runs says so: its workers predate the current mode (e.g. sub before the router)
             head = (f"{DIM}↳ {name} (earlier):{RESET}" if idle
-                    else f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}")
+                    else f"↳ {label}:" if active else f"{DIM}↳ {label}:{RESET}")
             own = profile.get('autocompact')
             # A profile without its own limit inherits the main session's (ccx-switch parent_compact).
             ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own

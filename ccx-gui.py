@@ -489,6 +489,21 @@ class StatusLabel(ttk.Label):
         ttk.Label.configure(self, text=text)
 
 
+LEVEL_TOPS = {'easy': 50, 'mid': 75}  # ccx-switch.py's default range tops
+
+
+def level_ranges(profiles):
+    """ccx-switch.py's level_ranges: {level: (low, high)} on the 0-100 difficulty scale."""
+    levels = [n for n in ROUTER_LEVELS if n in profiles]
+    ranges, low = {}, 0
+    for i, name in enumerate(levels):
+        high = 100 if i == len(levels) - 1 else (profiles[name] or {}).get('upto', LEVEL_TOPS.get(name, 50))
+        high = max(low, min(int(high), 100))
+        ranges[name] = (low, high)
+        low = min(high + 1, 100)
+    return ranges
+
+
 def short_model(model):
     """'claude-haiku-5-5' -> 'Haiku 5.5', 'deepseek-ai/deepseek-v4.1-flash' -> 'deepseek-v4.1-flash'."""
     name = re.sub(r'^claude-', '', str(model).rsplit('/', 1)[-1])
@@ -669,6 +684,23 @@ class PickerTab(ttk.Frame):
             self.best_button = ttk.Button(self.level_bar, text='Best picks', command=self.best_picks)
             self.best_button.pack(side='left', padx=(8, 0))
             self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=pick)
+            # Difficulty: the 0-100 scale the main model rates each task on, cut into the levels' ranges.
+            # Each box is where a level's range ends; the last level always runs to 100.
+            self.range_bar = ttk.Frame(self)
+            ttk.Label(self.range_bar, text='Difficulty', style='Dim.TLabel').pack(side='left', padx=(0, 8))
+            self.tops, self.range_labels = {}, {}
+            for i, name in enumerate(self.levels):
+                last = i == len(self.levels) - 1
+                self.range_labels[name] = ttk.Label(self.range_bar, text='', style='Dim.TLabel')
+                self.range_labels[name].pack(side='left', padx=(12 if i else 0, 4))
+                if not last:
+                    self.tops[name] = tk.StringVar()
+                    box = ttk.Spinbox(self.range_bar, from_=0, to=99, width=4, textvariable=self.tops[name],
+                                      command=self.save_ranges)
+                    box.bind('<Return>', lambda _e: self.save_ranges())
+                    box.bind('<FocusOut>', lambda _e: self.save_ranges())
+                    box.pack(side='left')
+            self.range_bar.pack(fill='x', padx=18, pady=(0, 8), before=pick)
         elif key == 'fallback':
             self.target_label.pack(side='left')
             self.target_box.pack(side='left', padx=(8, 18))
@@ -756,11 +788,25 @@ class PickerTab(ttk.Frame):
         self.load()
 
     def show_levels(self):
-        """Each level button names the model it runs on now."""
+        """Each level button names its difficulty range and the model it runs on now."""
         profiles = load_profiles()
+        ranges = level_ranges(profiles)
         for name, button in self.level_buttons.items():
             model = (profiles.get(name) or {}).get('model')
-            button.configure(text=f'{name.capitalize()} · {short_model(model)}' if model else name.capitalize())
+            low, high = ranges.get(name, (0, 100))
+            button.configure(text=f'{name.capitalize()} {low}–{high}' + (f' · {short_model(model)}' if model else ''))
+            self.range_labels[name].configure(text=f'{name.capitalize()} {low}–' + ('' if name in self.tops else '100'))
+            if name in self.tops:
+                self.tops[name].set(str(high))
+
+    def save_ranges(self):
+        tops = [self.tops[n].get().strip() for n in self.levels if n in self.tops]
+        current = [str(level_ranges(load_profiles())[n][1]) for n in self.levels if n in self.tops]
+        if tops == current:
+            return  # a focus change with nothing edited
+        ok, out = run_ccx('agents', 'router', 'ranges', *tops)
+        self.settle(out.strip().splitlines()[-1] if out.strip() else ('Saved.' if ok else 'Failed.'))
+        self.show_levels()  # a rejected pair snaps back to the saved ranges
 
     def best_picks(self):
         provider = self.provider.get() or 'official'
@@ -783,8 +829,10 @@ class PickerTab(ttk.Frame):
         }[mode])
         if mode == 'router':
             self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=self.pick_row)
+            self.range_bar.pack(fill='x', padx=18, pady=(0, 8), before=self.pick_row)
         else:
             self.level_bar.pack_forget()
+            self.range_bar.pack_forget()
 
     # ---- data ----
 
@@ -1678,6 +1726,9 @@ class App(tk.Tk):
         self.style.map('Seg.Toolbutton', background=[('selected', ACCENT), ('disabled', BG), ('active', HOVER)],
                        foreground=[('selected', 'white'), ('disabled', FAINT), ('active', FG)])
         self.style.configure('Spin.TLabel', background=FIELD, foreground=ACCENT, font=FONT)
+        self.style.configure('TSpinbox', fieldbackground=FIELD, background=PANEL, foreground=FG, arrowcolor=DIM,
+                             bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, insertcolor=FG, padding=4)
+        self.style.map('TSpinbox', bordercolor=[('focus', ACCENT)])
         self.style.configure('TCheckbutton', background=BG, foreground=FG)
         self.style.map('TCheckbutton', background=[('active', BG)])
         self.style.configure('Picker.Treeview', background=FIELD, fieldbackground=FIELD, foreground=FG,

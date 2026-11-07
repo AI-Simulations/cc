@@ -1925,6 +1925,47 @@ def router_text():
             else "Router off: tasks go to ccx-sub.")
 
 
+# Where each level's difficulty range ends by default: most work is easy, so the strong (costly)
+# model only takes what is really hard. Easy 0-50, mid 51-75, hard 76-100.
+LEVEL_TOPS = {"easy": 50, "mid": 75}
+
+
+def level_ranges(profiles):
+    """{level: (low, high)} on the 0-100 difficulty scale, in level order. Each level runs up to its
+    `upto` (else LEVEL_TOPS); the next starts one above, and the last reaches 100."""
+    levels = [n for n in ROUTER_LEVELS if n in profiles]
+    ranges, low = {}, 0
+    for i, name in enumerate(levels):
+        default = LEVEL_TOPS.get(name, round(100 * (i + 1) / len(levels)))
+        high = 100 if i == len(levels) - 1 else profiles[name].get("upto", default)
+        high = max(low, min(int(high), 100))
+        ranges[name] = (low, high)
+        low = min(high + 1, 100)
+    return ranges
+
+
+def range_text(ranges):
+    return ", ".join(f"ccx-{n} {a}-{b}" for n, (a, b) in ranges.items())
+
+
+def set_ranges(cuts):
+    """ccx agents router ranges <easy top> <mid top>: where each level's difficulty range ends."""
+    agents = load_agents()
+    levels = [n for n in ROUTER_LEVELS if n in agents]
+    try:
+        tops = [int(c) for c in cuts]
+    except ValueError:
+        die("Usage: ccx agents router ranges <top of easy> <top of mid> (whole numbers, 0-100)")
+    if len(tops) != len(levels) - 1 or not all(a < b for a, b in zip([-1, *tops], [*tops, 100])):
+        die(f"Give {len(levels) - 1} rising tops between 0 and 99, one per level but the last "
+            f"({', '.join(levels[:-1])}); the last level always reaches 100.")
+    for name, top in zip(levels, tops):
+        agents[name] = {**agents[name], "upto": top}
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+        save_agents(agents)
+    print("Difficulty ranges: " + range_text(level_ranges(agents)))
+
+
 def offered_agents():
     """The profiles the main model may call now: the router's levels or `sub`, never both."""
     profiles = load_agents()
@@ -1976,6 +2017,9 @@ def check_agents(agents):
             die(f"Subagent '{agent}': unknown provider '{a.get('provider')}'.")
         if a.get("effort") not in (None, *EFFORTS):
             die(f"Subagent '{agent}': effort must be one of {', '.join(EFFORTS)}.")
+        upto = a.get("upto")
+        if upto is not None and not (type(upto) is int and 0 <= upto <= 100):
+            die(f"Subagent '{agent}': upto (its difficulty range's top) must be a whole number from 0 to 100.")
         pct = a.get("autocompact")
         if pct is not None and not ((type(pct) is int and 1 <= pct <= 100)
                                     or (isinstance(pct, str) and re.fullmatch(TOKENS_RE, pct))):
@@ -3085,7 +3129,11 @@ def hook_context(data):
     profiles = offered_agents()
     choices = "; ".join(f"ccx-{name}: {agent_summary(a)}" + (f" ({a['description']})" if a.get("description") else "")
                         for name, a in profiles.items())
-    if len(profiles) > 1:  # several profiles act as a router: the main model picks per task
+    ranges = level_ranges(profiles)
+    if len(ranges) > 1:  # the router: the main model scores each task and the score picks the level
+        choices += (". Rate each task's difficulty from 0 (trivial) to 100 (hardest) and send it to the level whose "
+                    f"range holds that score: {range_text(ranges)}; split mixed work into separate calls")
+    elif len(profiles) > 1:  # several profiles act as a router: the main model picks per task
         choices += (". Route each task to the cheapest profile whose description fits its difficulty; "
                     "split mixed work into separate calls")
     return {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name", "UserPromptSubmit"),
@@ -3280,6 +3328,10 @@ def main():
         return save_agents(agents)
     if args[:2] == ["agents", "models"] and len(args) in (2, 3, 4):
         return agent_models(args[2].lower() if len(args) >= 3 else None, *args[3:])
+    if args[:3] == ["agents", "router", "ranges"]:
+        if len(args) == 3:
+            return print("Difficulty ranges: " + (range_text(level_ranges(load_agents())) or "no router levels"))
+        return set_ranges(args[3:])
     if args[:3] == ["agents", "router", "best"] and len(args) <= 4:
         return set_best_levels(args[3] if len(args) == 4 else None)
     if args[:2] == ["agents", "router"] and len(args) <= 3:
@@ -3331,7 +3383,7 @@ def main():
         print("ccx --resume [session-id-or-name] | ccx --continue | ccx status")
         print("ccx agents (edit menu, then write subagents) | ccx agents set <name> [--provider P] [--model M]")
         print("    [--effort E|default] [--autocompact N|default] [--description D] | ccx agents models <name> [provider]")
-        print("    | ccx agents remove <name> | ccx agents router [on|off|best [provider]]")
+        print("    | ccx agents remove <name> | ccx agents router [on|off|best [provider]|ranges [easy-top mid-top]]")
         print("ccx agent <name> [same options, this run only] [task, else stdin]")
         print("Every launch, resume included, asks for the provider and model unless both are given.")
         return
