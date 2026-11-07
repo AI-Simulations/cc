@@ -378,7 +378,7 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
 
 
 ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
-LEVEL_TOPS = {"easy": 60, "mid": 80}  # ccx-switch.py's default range tops
+LEVEL_TOPS = {"easy": 75, "mid": 88}  # ccx-switch.py's default range tops
 
 
 def level_ranges(profiles):

@@ -85,7 +85,7 @@ class CcSessionTests(unittest.TestCase):
         context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(easy tasks)", context)
         self.assertIn("0 (trivial) to 100", context)
-        self.assertIn("ccx-easy 0-60, ccx-mid 61-80, ccx-hard 81-100", context)
+        self.assertIn("ccx-easy 0-75, ccx-mid 76-88, ccx-hard 89-100", context)
         with patch("sys.stdout", new_callable=io.StringIO):
             self.ccx.set_ranges(["20", "90"])
         self.assertIn("ccx-easy 0-20, ccx-mid 21-90, ccx-hard 91-100",
@@ -133,7 +133,18 @@ class CcSessionTests(unittest.TestCase):
         call("ccx-sub", "[50] not a router level")
         logged = [json.loads(line) for line in Path(self.ccx.router_log()).read_text().splitlines()]
         self.assertEqual(len(logged), 25, "only valid scores are kept")
-        self.assertEqual(logged[1]["level"], "easy")
+        self.assertEqual([r["level"] for r in logged if r["score"] in (4, 76, 92)], ["easy", "mid", "hard"],
+                         "the score picks the level, not the named type")
+        # the pick: any named level runs where the score belongs; no score is refused
+        kind = lambda result: result["hookSpecificOutput"].get("updatedInput", {}).get("subagent_type")
+        self.assertEqual(kind(call("ccx-hard", "[30] rename")), "ccx-easy")
+        self.assertEqual(kind(call("ccx-easy", "[95] redesign")), "ccx-hard")
+        denied = call("ccx-mid", "no score")["hookSpecificOutput"]
+        self.assertEqual(denied["permissionDecision"], "deny")
+        self.assertIn('"[35] rename helper"', denied["permissionDecisionReason"])
+        auto = call("ccx-hard", "[30] rename", "auto")["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn('subagent_type "ccx-easy"', auto, "auto mode is told the level to resubmit on")
+        Path(self.ccx.router_log()).write_text("".join(json.dumps(r) + "\n" for r in logged))
         out = io.StringIO()
         with patch("sys.stdout", out):
             self.ccx.calibrate_ranges(["60", "20"])

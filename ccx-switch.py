@@ -1990,8 +1990,9 @@ def router_text():
 
 
 # Where each level's difficulty range ends by default: most work is easy, so the strong (costly)
-# model only takes what is really hard. Easy 0-60, mid 61-80, hard 81-100.
-LEVEL_TOPS = {"easy": 60, "mid": 80}
+# model only takes what is really hard. Easy 0-75, mid 76-88, hard 89-100 (main models score high: at
+# 60/80 real tasks scored 66-85 and Haiku got none).
+LEVEL_TOPS = {"easy": 75, "mid": 88}
 
 
 def level_ranges(profiles):
@@ -2034,15 +2035,25 @@ def router_log():
     return os.path.join(CFG_DIR, "router-log.jsonl")
 
 
-def log_route(level, description):
-    """Keep the main model's score for a router call ("[35] ..." description): `router calibrate` reads them."""
+def route_score(description):
+    """The main model's difficulty score from a router call's "[35] ..." description, or None."""
     m = re.match(r"\s*\[(\d{1,3})\]", str(description or ""))
-    if not m or int(m.group(1)) > 100:
+    return int(m.group(1)) if m and int(m.group(1)) <= 100 else None
+
+
+def level_for(score, ranges):
+    return next((n for n, (low, high) in ranges.items() if low <= score <= high), list(ranges)[-1])
+
+
+def log_route(level, description):
+    """Keep the main model's score for a router call: `router calibrate` reads them."""
+    score = route_score(description)
+    if score is None:
         return
     try:
         with open(router_log(), "a", encoding="utf-8") as f:
             f.write(json.dumps({"at": round(time.time()), "launch": session_launch(), "level": level,
-                                "score": int(m.group(1))}) + "\n")
+                                "score": score}) + "\n")
     except OSError:
         pass
 
@@ -3057,7 +3068,8 @@ def agent_hook(data):
     """Enforce configured worker types without bypassing native permission rules."""
     result = _agent_decision(data)
     call = data.get("tool_input") or {}
-    level = str(call.get("subagent_type") or "").removeprefix("ccx-").removesuffix("-live")
+    final = (result.get("hookSpecificOutput") or {}).get("updatedInput") or call
+    level = str(final.get("subagent_type") or "").removeprefix("ccx-").removesuffix("-live")
     # only calls that run: auto mode's deny-and-resubmit would log every call twice
     if (level in ROUTER_LEVELS and not call.get("resume") and os.environ.get("CCX_AGENT_CHILD") != "1"
             and (result.get("hookSpecificOutput") or {}).get("permissionDecision") != "deny"):
@@ -3085,6 +3097,13 @@ def _agent_decision(data):
         kind = original.get("subagent_type") or "general-purpose"
         if kind.endswith("-live") and kind[:-5] in {"ccx-" + name for name in profiles}:
             kind = kind[:-5]
+        ranges = level_ranges(profiles)
+        if len(ranges) > 1 and kind[4:] in ranges and kind.startswith("ccx-") and not original.get("resume"):
+            score = route_score(original.get("description"))
+            if score is None:
+                return deny('Router on: start the description with the task\'s difficulty from 0 to 100 in brackets, '
+                            f'like "[35] rename helper", and resubmit; ccx picks the level ({range_text(ranges)}).')
+            kind = "ccx-" + level_for(score, ranges)
         def known_live():
             # Claude Code reads agent files at startup and on /reload-plugins, and records each change to the
             # types it knows in the transcript: a twin written after that is unknown to it.
@@ -3270,10 +3289,12 @@ def hook_context(data):
                         for name, a in profiles.items())
     ranges = level_ranges(profiles)
     if len(ranges) > 1:  # the router: the main model scores each task and the score picks the level
-        choices += (". Rate each task's difficulty from 0 (trivial) to 100 (hardest) and send it to the level whose "
-                    f"range holds that score: {range_text(ranges)}; start each call's description with that score in "
-                    "brackets, like \"[35] rename helper\"; split mixed work into separate calls; when a worker's "
-                    "result fails your review, rerun that task once on the next level up before fixing it yourself")
+        choices += (". Rate each task's difficulty from 0 (trivial) to 100 (hardest) and start the call's description "
+                    "with it in brackets, like \"[35] rename helper\"; ccx runs the call on the level whose range holds "
+                    f"the score ({range_text(ranges)}), whichever ccx level you name. Most delegated work is routine "
+                    "and belongs low: keep the top range for work a strong model alone gets right. Split mixed work "
+                    "into separate calls; when a worker's result fails your review, rerun that task once with a "
+                    "score in the next range up before fixing it yourself")
     elif len(profiles) > 1:  # several profiles act as a router: the main model picks per task
         choices += (". Route each task to the cheapest profile whose description fits its difficulty; "
                     "split mixed work into separate calls")
