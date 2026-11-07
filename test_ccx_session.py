@@ -80,7 +80,11 @@ class CcSessionTests(unittest.TestCase):
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps({**self.global_agents, **levels}), encoding="utf-8")
         call = lambda kind: {"tool_name": "Agent", "tool_input": {"subagent_type": kind, "prompt": "x"}}
         decision = lambda kind: (self.ccx.agent_hook(call(kind)).get("hookSpecificOutput") or {}).get("permissionDecision")
-        self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"], "router on by default")
+        self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "one subagent by default")
+        self.assertEqual(decision("ccx-easy"), "deny")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(True)
+        self.assertEqual(list(self.ccx.offered_agents()), ["easy", "mid", "hard"])
         context = self.ccx.hook_context({})["hookSpecificOutput"]["additionalContext"]
         self.assertIn("(easy tasks)", context)
         self.assertIn("cheapest profile", context)
@@ -91,11 +95,13 @@ class CcSessionTests(unittest.TestCase):
             self.ccx.set_router(False)
         self.assertEqual(list(self.ccx.offered_agents()), ["sub"])
         self.assertEqual(decision("ccx-easy"), "deny")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.ccx.set_router(True)
         self.ccx.link_session("sid-r")
         os.environ["CCX_LAUNCH_ID"] = "launch-b"
-        self.assertTrue(self.ccx.router_on(), "other sessions keep the router")
+        self.assertFalse(self.ccx.router_on(), "other sessions keep one subagent")
         self.ccx.link_session("sid-r")
-        self.assertFalse(self.ccx.router_on(), "a resume keeps the switch")
+        self.assertTrue(self.ccx.router_on(), "a resume keeps the switch")
         Path(self.ccx.AGENTS_FILE).write_text(json.dumps(self.global_agents), encoding="utf-8")
         self.assertEqual(list(self.ccx.offered_agents()), ["sub"], "no levels: the switch changes nothing")
 

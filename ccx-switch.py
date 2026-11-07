@@ -1895,18 +1895,18 @@ ROUTER_LEVELS = ("easy", "mid", "hard")
 
 
 def router_on(launch=None):
-    """This session's router switch; on unless the session turned it off."""
+    """This session's router switch: off (one subagent) unless the session turned it on."""
     launch = launch or session_launch()
     try:
         with open(SESSION_AGENTS_FILE, encoding="utf-8") as f:
             entry = json.load(f).get(launch) if launch else None
     except (OSError, ValueError, AttributeError):
         entry = None
-    return not (isinstance(entry, dict) and entry.get("router") is False)
+    return isinstance(entry, dict) and entry.get("router") is True
 
 
 def set_router(on):
-    _set_session_flag("router", None if on else False, "router on|off")
+    _set_session_flag("router", True if on else None, "router on|off")
     print(router_text())
 
 

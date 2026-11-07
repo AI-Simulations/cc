@@ -403,7 +403,7 @@ def ccx_agents(session_id=None):
     else:
         agents, entry = shared, entry if isinstance(entry, dict) else {}
     if any(n in ROUTER_LEVELS for n in agents):
-        on = entry.get("router") is not False
+        on = entry.get("router") is True
         kept = {n: a for n, a in agents.items() if (n != "sub" if on else n not in ROUTER_LEVELS)}
         agents = kept or agents
     return agents

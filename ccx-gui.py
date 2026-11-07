@@ -589,7 +589,7 @@ class PickerTab(ttk.Frame):
             entry = session_entry()
             self.levels = [n for n in ROUTER_LEVELS if n in load_profiles()]
             self.mode = tk.StringVar(value='off' if entry.get('off') else
-                                     'router' if self.levels and entry.get('router') is not False else 'one')
+                                     'router' if self.levels and entry.get('router') is True else 'one')
             modes = ttk.Frame(self)
             modes.pack(fill='x', padx=18, pady=(16, 0))
             ttk.Label(modes, text='Subagents', style='Dim.TLabel').pack(side='left', padx=(0, 12))
@@ -803,7 +803,9 @@ class PickerTab(ttk.Frame):
             if self.mode.get() == 'router' and self.target.get() not in self.levels:
                 self.target.set('')  # the saved view picks the level, else the first
         elif self.key == 'fallback':
-            targets = [('session', 'session')] + [(name, name) for name in load_profiles()]
+            # the subagents this session uses: the router's levels, or the one model
+            names = list(ROUTER_LEVELS) if session_entry().get('router') is True else ['sub']
+            targets = [('session', 'session')] + [(name, name) for name in names if name in load_profiles()]
         names = [value for _, value in targets]
         self.target_box.configure(values=names)
         current, saved = self.target.get(), self.view.get('target') or ''
