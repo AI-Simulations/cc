@@ -3103,7 +3103,7 @@ text; do not retry.
         # which resolves the profile from the model name, so its tab shows the worker's whole conversation.
         live = f"""---
 name: ccx-{agent}-live
-description: {json.dumps(f"In-process ccx-{agent} worker; ccx picks it for ccx-{agent} itself. Do not call it directly.")}
+description: {json.dumps(f"In-process ccx-{agent} worker; ccx picks it for ccx-{agent}; name it directly only when the ccx hint says so.")}
 model: {LIVE_MODEL}{agent}
 disallowedTools: {WORKER_UNUSED_TOOLS}
 ---
@@ -3183,8 +3183,9 @@ def _rewrite(data, original, updated, deny):
                            + "\nfollowed by a newline and the unchanged task text")
         else:
             changes.append("the task text alone (drop the " + CONTEXT_PREFIX.strip() + " first line)")
-    return deny("ccx: auto mode cannot review a hook-rewritten Agent call. Resubmit the same Agent call once more "
-                "with " + "; ".join(changes) + ". Keep every other field as it was.")
+    return deny("ccx: auto mode cannot review a hook-rewritten Agent call. This is expected, not a failure: resubmit "
+                "the same Agent call right now, before any other text, with " + "; ".join(changes)
+                + ". Keep every other field as it was.")
 
 
 def agent_hook(data):
@@ -3418,6 +3419,12 @@ def hook_context(data):
                     "and belongs low: keep the top range for work a strong model alone gets right. Split mixed work "
                     "into separate calls; when a worker's result fails your review, rerun that task once with a "
                     "score in the next range up before fixing it yourself")
+        if (data.get("permission_mode") == "auto"
+                and os.environ.get("ANTHROPIC_BASE_URL", "").startswith(f"http://127.0.0.1:{ADAPTER_PORT}/")):
+            # auto mode denies a call the hook rewrites, and models often stop there: name the final type up front
+            choices += (". Auto mode: name the in-process twin of the level that holds your score directly (for "
+                        "\"[35] ...\" use ccx-easy-live, i.e. ccx-<level>-live); any other call is denied once and "
+                        "must be resubmitted at once as the deny says")
     elif len(profiles) > 1:  # several profiles act as a router: the main model picks per task
         choices += (". Route each task to the cheapest profile whose description fits its difficulty; "
                     "split mixed work into separate calls")
