@@ -322,7 +322,7 @@ class ConfiguredAgentLineTests(unittest.TestCase):
     def test_configured_worker_line_has_short_labels_and_keeps_quota_bars(self):
         text = self.render('official', {'sub': {'provider': 'openai-oauth', 'model': 'gpt-6.1-sol', 'effort': 'xhigh'}})
         line = text.splitlines()[-1]
-        self.assertEqual(line, '↳ sub: 6.1 sol ●●●● · OAuth')
+        self.assertEqual(line, '↳ sub: 6.1 sol ●●●● · OAuth │ no runs yet')  # every row has its usage cell
         quota = {'plan': 'ChatGPT Plus', 'rate_limits': {
             'five_hour': {'used_percentage': 81, 'resets_at': None},
             'seven_day': {'used_percentage': 12, 'resets_at': None}}}
@@ -648,4 +648,4 @@ class FreshSessionModeRowTests(unittest.TestCase):
             os.makedirs(os.path.join(home, ".claude", "projects", "p"))
             open(os.path.join(home, ".claude", "projects", "p", sid + ".jsonl"), "w").close()
             row = statusline.mode_row(sid, time.time())
-        self.assertEqual(row, "≈ $13.00 · sub $4.00 (7d $9.00/$90 │ Ultra)")
+        self.assertEqual(row, "≈ $13.00 · agents $4.00 (7d $9.00/$90 │ Ultra)")

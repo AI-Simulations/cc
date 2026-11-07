@@ -380,7 +380,7 @@ CCX_QUOTA_SOURCES = {"official": "anthropic", "commandcode": "commandcode", "com
 ROUTER_LEVELS = ("easy", "mid", "hard")  # ccx-switch.py's router levels
 
 
-def ccx_agents(session_id=None):
+def ccx_agents(session_id=None, offered=True):
     """The subagent profiles this session offers (ccx-switch's offered_agents): its own, or the shared defaults."""
     try:
         with open(os.path.expanduser("~/.config/ccx/agents.json"), encoding="utf-8") as f:
@@ -402,7 +402,7 @@ def ccx_agents(session_id=None):
         agents = {**own, **{n: a for n, a in shared.items() if n in ROUTER_LEVELS and n not in own}}
     else:
         agents, entry = shared, entry if isinstance(entry, dict) else {}
-    if any(n in ROUTER_LEVELS for n in agents):
+    if offered and any(n in ROUTER_LEVELS for n in agents):
         on = entry.get("router") is True
         kept = {n: a for n, a in agents.items() if (n != "sub" if on else n not in ROUTER_LEVELS)}
         agents = kept or agents
@@ -940,7 +940,7 @@ def mode_row(session_id, now):
     for key, (usd, sub) in spent.items():
         label, week = provider_week(key, now) if key in QUOTA_FETCHERS or key == "anthropic" else (key, "")
         # the picker draws everything after the total dim, so the subagents' share reads as a dimmed aside
-        parts.append(f"≈ ${usd:,.2f}{f' · sub {money(sub)}' if sub >= 0.005 else ''} ({week or label})")
+        parts.append(f"≈ ${usd:,.2f}{f' · agents {money(sub)}' if sub >= 0.005 else ''} ({week or label})")
     return " · ".join(parts)
 
 
@@ -1082,7 +1082,13 @@ def render(d):
         active = bool(ccx_running_jobs(os.path.splitext(os.path.basename(d.get("transcript_path") or ""))[0])
                       or ccx_running_jobs(d.get("session_id")))
         sub_costs = subagent_costs(d.get("transcript_path"))
-        for name, profile in ccx_profiles(d.get("session_id")).items():
+        rows = ccx_profiles(d.get("session_id"))
+        offered = set(rows)
+        # a profile the session no longer offers (sub under the router) keeps its row while it has runs to show
+        every = ccx_agents(d.get("session_id"), offered=False)
+        rows.update({n: every[n] for n in sub_costs if n not in rows and isinstance(every.get(n), dict)})
+        for name, profile in rows.items():
+            idle = name not in offered
             # a worker that ccx reran on its fallback shows the route it really runs on, not the configured one
             profile = {**profile, **{k: v for k, v in moved.get(name, {}).items() if k in ("provider", "model", "effort")}}
             provider = profile.get("provider", "official")
@@ -1098,7 +1104,7 @@ def render(d):
             dots = (effort_indicator(effort, dim=not active, label=False, levels=effort_levels(provider, mid))
                     if effort else DIM + 'default' + RESET)
             hue = CLAUDE_HUE if not is_third_party(mid) else zlib.crc32(mid.split('/')[0].encode()) % 360
-            head = f"↳ {name}:" if active else f"{DIM}↳ {name}:{RESET}"
+            head = f"↳ {name}:" if active and not idle else f"{DIM}↳ {name}:{RESET}"
             own = profile.get('autocompact')
             # A profile without its own limit inherits the main session's (ccx-switch parent_compact).
             ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own
@@ -1110,6 +1116,9 @@ def render(d):
                 # shortcut: the window is the main session's; a subagent model with another window misreads it
                 seg.append(f"{DIM}{k(used['ctx'])}/{k(size)}{RESET}{ac}{cached_text(used)}"
                            + (f" {DIM}{money(used['usd'])}{RESET}" if used.get("priced") else ""))
+            else:
+                # every row has its usage cell, so rows line up and an unused level reads as such
+                seg.append(f"{DIM}no runs yet{RESET}")
             sub_source = CCX_QUOTA_SOURCES.get(provider)
             if sub_source and sub_source != source:
                 if sub_source == 'anthropic':
@@ -1158,7 +1167,7 @@ def render(d):
     elif source == "anthropic" and (on_api or ("rate_limits" not in d and not subscription_login(creds) and cost.get("total_cost_usd"))):
         spent = cost.get("total_cost_usd") or 0  # an untouched keyed session reads $0.000
         parts.append(f"api {YELLOW}{f'${spent:,.2f}' if spent >= 1 else f'${spent:.3f}'}{RESET}")
-    # Subagent spend shows only in the mode row's `api … (main … · sub …)` total, not per subagent row.
+    # Subagent spend shows per subagent row and in the mode row's `≈ … · agents …` total.
 
     state = cache_state(d, main_provider, source, model.get("id") or "", now)
     # Warm: reply within the countdown to reuse cached context (fast, cheap). Cold: next reply

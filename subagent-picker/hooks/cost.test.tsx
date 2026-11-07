@@ -15,13 +15,13 @@ test('the mode row draws its hint and the session cost on one row', async ($, on
 })
 
 test('without the reminder the engine keeps its line (live pills) and the cost rides as its tail', async ($, on) => {
-  on('state.get', (_, e) => ({ value: e.key === 'cost' ? { value: '≈ $13.48 · sub $6.27 (7d $1,738/$7.6k Ultra)', version: 1 } : undefined }))
+  on('state.get', (_, e) => ({ value: e.key === 'cost' ? { value: '≈ $13.48 · agents $6.27 (7d $1,738/$7.6k Ultra)', version: 1 } : undefined }))
   let drawn: any
   on('ui.render', ($, e: any) => { drawn = e.props; const { Text } = $.ui.resolve(e); return <Text>{e.props.hint}</Text> })  // the engine's line
   const ui = await $.ui.mount({ plugin: 'subagent-picker', component: 'PromptHint', surface: 'terminal',
                                 props: { isDraft: false, isWorking: false, hint: '⏵⏵ auto mode on · 4 shells, 2 monitors' } })
   expect(drawn?.hint).toBe('⏵⏵ auto mode on · 4 shells, 2 monitors')
-  expect(drawn?.tail).toBe('≈ $13.48 · sub $6.27 (7d $1,738/$7.6k Ultra)')
+  expect(drawn?.tail).toBe('≈ $13.48 · agents $6.27 (7d $1,738/$7.6k Ultra)')
   await ui.unmount()
 })
 
