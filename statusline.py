@@ -1116,6 +1116,10 @@ def render(d):
         rows.update({n: every[n] for n, used in sub_costs.items() if n not in rows and isinstance(every.get(n), dict)
                      and now - (used.get("at") or 0) < 600})
         ranges = level_ranges(rows)
+        # Claude's agent panel sits below these rows and is cut off at the screen's bottom edge: while it lists
+        # agents (ccx-switch refreshes this every 5 s), the level rows fold into one so the panel fits.
+        panel = load_json(f"panel-{d.get('session_id')}.json")
+        folded = [] if (panel.get("rows") or 0) > 0 and now - (panel.get("at") or 0) < 15 else None
         order = lambda kv: ROUTER_LEVELS.index(kv[0]) if kv[0] in ROUTER_LEVELS else len(ROUTER_LEVELS)
         for name, profile in sorted(rows.items(), key=order):  # levels easy to hard, other profiles after
             idle = name not in offered
@@ -1144,6 +1148,10 @@ def render(d):
             ac = (f" {DIM}ac {own}{'%' if type(own) is int else ''}{RESET}" if own
                   else f" {DIM}ac {k(limit)}{RESET}" if limit else '')
             used = sub_costs.get(name) or {}
+            if folded is not None:
+                folded.append(f"{DIM if not used.get('ctx') else ''}{label} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET}"
+                              + (f" {DIM}{money(used['usd'])}{RESET}" if used.get("priced") else ""))
+                continue
             seg = [f"{head} {rgb(hue, 0.45, 0.9 if active else 0.6)}{target}{RESET} {dots}{'' if used.get('ctx') else ac}{route}"
                    + (f" {YELLOW}↪ fallback active{RESET}" if name in moved else "")]
             if used.get("ctx"):
@@ -1171,6 +1179,8 @@ def render(d):
                 q = load_json(f"ratelimit-{provider}.json")
                 seg += quota_parts(None, None, q.get('rate_limits') or {}, q.get('at'), now)
             sub_lines.append(SEP.join(seg))
+        if folded:
+            sub_lines.append(f"{DIM}↳{RESET} " + SEP.join(folded))
     for sub_source, names in ({} if configured or child or source == "anthropic" else subagent_sources(d.get("session_id"))).items():
         if sub_source == source:
             continue  # same account as the session, already shown

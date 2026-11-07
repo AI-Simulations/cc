@@ -3660,6 +3660,18 @@ def _worker_now(path):
     return ""
 
 
+def _note_panel(session, count):
+    """Tells statusline.py the agent panel is open, so it folds its level rows and the panel fits on screen."""
+    if not isinstance(session, str) or not re.fullmatch(r"[\w-]{1,80}", session):
+        return
+    try:
+        folder = Path.home() / ".claude" / "statusline"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"panel-{session}.json").write_text(json.dumps({"at": time.time(), "rows": count}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def agent_statusline(data):
     try:
         profiles = load_agents()
@@ -3667,9 +3679,9 @@ def agent_statusline(data):
         profiles = {}
     columns = data.get("columns")
     width = max(20, min(columns, 2000)) if type(columns) is int else 160
-    for task in data.get("tasks") or []:
-        if not isinstance(task, dict) or not task.get("id"):
-            continue
+    tasks = [t for t in data.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+    _note_panel(data.get("session_id"), len(tasks))
+    for index, task in enumerate(tasks, 1):
         kind = task.get("agentType") or "unknown"
         live = isinstance(kind, str) and kind.startswith("ccx-") and kind.endswith("-live")
         name = kind[4:-5] if live else kind[4:] if isinstance(kind, str) else ""
@@ -3698,6 +3710,8 @@ def agent_statusline(data):
                 tokens = ""
             label, now = " · ".join(filter(None, [task.get("model") or "model pending", tokens])), ""
         label += f" · {task.get('description') or ''}" + (f" › {now}" if now else "")
+        # Claude's panel clips rows below the screen without saying so; `2/7` shows how many are hidden.
+        label = f"{index}/{len(tasks)} {label}"
         label = re.sub(r"[\x00-\x1f\x7f]", " ", label)[:width]
         if task.get("status") == "running":
             label = f"\x1b[1;97m{label}\x1b[0m"  # Claude dims every row; a running one stands out

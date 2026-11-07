@@ -283,7 +283,7 @@ class QuotaErrorTests(unittest.TestCase):
 
 
 class ConfiguredAgentLineTests(unittest.TestCase):
-    def render(self, main, profiles, quota=None, ansi=False):
+    def render(self, main, profiles, quota=None, ansi=False, stored=None):
         hooks = {'PreToolUse': [{'matcher': 'Agent|Task', 'hooks': [
             {'type': 'command', 'command': 'python ccx-switch.py hook-agent'}]}]}
         with patch.dict(os.environ, {'CCX_MAIN_PROVIDER': main, 'CCX_AGENT_CHILD': ''}), \
@@ -293,7 +293,7 @@ class ConfiguredAgentLineTests(unittest.TestCase):
              patch.object(statusline, 'provider_quota', return_value=(quota or {}, None)), \
              patch.object(statusline, 'claude_json', return_value={}), \
              patch.object(statusline, 'credentials', return_value={}), \
-             patch.object(statusline, 'load_json', return_value={}), \
+             patch.object(statusline, 'load_json', side_effect=lambda name: (stored or {}).get(name, {})), \
              patch.object(statusline, 'save_json'), \
              patch.object(statusline, 'keyword_ultracode', return_value=False):
             text = statusline.render({'model': {'id': 'main-model'}})
@@ -318,6 +318,15 @@ class ConfiguredAgentLineTests(unittest.TestCase):
         self.assertIn('NIM', text)
         self.assertIn('worker model', text)
         self.assertNotIn('same provider', text)
+
+    def test_level_rows_fold_into_one_while_the_agent_panel_lists_agents(self):
+        profiles = {'easy': {'provider': 'official', 'model': 'claude-haiku-5-5'},
+                    'mid': {'provider': 'official', 'model': 'claude-sonnet-5-5'}}
+        with patch.object(statusline.time, 'time', return_value=1000.0):
+            open_panel = self.render('official', profiles, stored={'panel-None.json': {'at': 995.0, 'rows': 3}})
+            stale = self.render('official', profiles, stored={'panel-None.json': {'at': 900.0, 'rows': 3}})
+        self.assertEqual(open_panel.splitlines()[-1], '↳ easy 0-75 haiku 5.5 │ mid 76-100 sonnet 5.5')
+        self.assertEqual(stale.count('no runs yet'), 2)  # a panel not refreshed for 15 s is closed
 
     def test_configured_worker_line_has_short_labels_and_keeps_quota_bars(self):
         text = self.render('official', {'sub': {'provider': 'openai-oauth', 'model': 'gpt-6.1-sol', 'effort': 'xhigh'}})
