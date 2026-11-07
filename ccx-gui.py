@@ -589,7 +589,7 @@ def load_profiles():
 class RangeBar(tk.Canvas):
     """The 0-100 difficulty scale cut into the router's levels. Each segment, in its level's colour, names
     its range, model and effort; drag a boundary to move where a level ends, click a segment to pick it."""
-    HEIGHT = 50
+    HEIGHT = 40
     GRAB = 6  # px either side of a boundary that starts a drag
 
     def __init__(self, master, on_change, on_pick):
@@ -637,26 +637,26 @@ class RangeBar(tk.Canvas):
 
     def draw(self):
         self.delete('all')
-        h = self.HEIGHT
+        h, width = self.HEIGHT, max(self.winfo_width(), 2)
+        gap = 3  # dark space between levels, split over both neighbours
         for i, (level, low, high) in enumerate(self.spans()):
-            x0, x1 = self.edge(i - 1), self.edge(i)
+            # every rectangle stays inside the canvas: an edge drawn on its border would be clipped away
+            x0 = self.edge(i - 1) + (gap / 2 if i else 0)
+            x1 = min(self.edge(i) - (gap / 2 if i < len(self.tops) else 0), width - 1)
             picked = level == self.selected
             color = LEVEL_COLORS.get(level, ACCENT)
             color = color if picked or self.selected is None else self.dim(color)
             # lit from above: a lighter top fading into the level's colour
-            for y in range(2, h - 2, 2):
-                self.create_rectangle(x0, y, x1, y + 2, width=0,
-                                      fill=mix(mix(color, '#ffffff', 0.28), color, (y - 2) / (h - 6)))
-            if picked:
-                self.create_rectangle(x0 + 1, 3, x1 - 1, h - 3, width=2, outline=FG)
+            for y in range(0, h, 2):
+                self.create_rectangle(x0, y, x1, min(y + 2, h), width=0,
+                                      fill=mix(mix(color, '#ffffff', 0.28), color, y / max(h - 2, 1)))
+            if picked:  # a 2 px ring wholly inside the segment
+                self.create_rectangle(x0 + 1, 1, x1 - 1, h - 1, width=2, outline=FG)
             room = x1 - x0
             title = f'{level_name(level)} {low}–{high}' if room > 130 else f'{low}–{high}'
-            self.create_text((x0 + x1) / 2, h * 0.32, text=title, fill=FG, font=SMALL_BOLD, width=room - 6)
-            self.create_text((x0 + x1) / 2, h * 0.68, text=self.labels.get(level, ''), fill=FG, font=(UI, 8),
+            self.create_text((x0 + x1) / 2, h * 0.31, text=title, fill=FG, font=(UI, 8, 'bold'), width=room - 6)
+            self.create_text((x0 + x1) / 2, h * 0.71, text=self.labels.get(level, ''), fill=FG, font=(UI, 7),
                              width=room - 6)
-        for i in range(len(self.tops)):
-            x = self.edge(i)
-            self.create_line(x, 0, x, h, fill=BG, width=3)
 
     def hover(self, e):
         self.configure(cursor='sb_h_double_arrow' if self.boundary(e.x) is not None else 'hand2')
