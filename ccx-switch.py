@@ -720,9 +720,15 @@ def model_facts(name, models=None):
     return rows
 
 
-# Each level's effort on its best pick: cheaper models think longer, the strongest needs less.
-# shortcut: Claude's ladder; a provider without these levels takes its default on the next worker call
-LEVEL_EFFORTS = {"easy": "xhigh", "mid": "high", "hard": "medium"}
+def level_effort(level, levels):
+    """A level's effort on its pick, from the efforts that model has: cheaper models think longer, the
+    strongest needs less. On Claude's ladder: easy xhigh, mid high, hard medium."""
+    levels = [v for v in levels if v != "off"] or list(EFFORTS)
+    wanted = {"easy": "xhigh", "mid": "high", "hard": "medium"}[level]
+    if wanted in levels:
+        return wanted
+    at = {"easy": len(levels) - 2, "mid": len(levels) // 2, "hard": 1}[level]  # a ladder without that name
+    return levels[max(0, min(at, len(levels) - 1))]
 LEVEL_TEXT = {"easy": "Easy tasks: lookups, counting, renames, simple mechanical edits.",
               "mid": "Medium tasks: ordinary feature work, single-file edits, moderate analysis.",
               "hard": "Hard tasks: multi-file design, subtle bugs, tricky reasoning."}
@@ -751,13 +757,14 @@ def set_best_levels(provider):
     picks = best_levels(model_facts(provider))
     if not picks:
         die(f"No {provider} model has both an AA score and a price; set the levels by hand.")
+    efforts = {level: level_effort(level, model_efforts(provider, model) or EFFORTS) for level, model in picks.items()}
     for level, model in picks.items():
         agents[level] = {**{k: v for k, v in (agents.get(level) or {}).items() if k not in ("provider", "model", "effort")},
-                         "provider": provider, "model": model, "effort": LEVEL_EFFORTS[level],
+                         "provider": provider, "model": model, "effort": efforts[level],
                          "description": (agents.get(level) or {}).get("description") or LEVEL_TEXT[level]}
     with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
         save_agents(agents)
-    print("Best picks: " + ", ".join(f"{level} {provider}/{model} {LEVEL_EFFORTS[level]}" for level, model in picks.items()))
+    print(f"Best {provider} picks: " + ", ".join(f"{level} {model} {efforts[level]}" for level, model in picks.items()))
 
 
 def process_alive(pid):

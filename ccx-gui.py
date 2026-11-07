@@ -630,7 +630,8 @@ class PickerTab(ttk.Frame):
                                                            variable=self.target, style='Seg.Toolbutton', command=self.load)
                 self.level_buttons[name].pack(side='left', padx=(0, 2))
             # fills every level from the picked provider: top AA for hard, cheapest close one for easy
-            ttk.Button(self.level_bar, text='Best picks', command=self.best_picks).pack(side='left', padx=(8, 0))
+            self.best_button = ttk.Button(self.level_bar, text='Best picks', command=self.best_picks)
+            self.best_button.pack(side='left', padx=(8, 0))
             self.level_bar.pack(fill='x', padx=18, pady=(2, 8), before=pick)
         elif key == 'fallback':
             self.target_label.pack(side='left')
@@ -641,6 +642,10 @@ class PickerTab(ttk.Frame):
         self.provider_label = ttk.Label(pick, text='Provider', style='Dim.TLabel')
         self.provider_label.pack(side='left')
         self.provider = tk.StringVar()
+        if key == 'subagent':
+            # Best picks names the provider it fills the levels from: the one picked here
+            self.provider.trace_add('write', lambda *_: self.best_button.configure(
+                text=f'Best picks · {self.provider.get()}' if self.provider.get() else 'Best picks'))
         self.provider_box = ttk.Combobox(pick, textvariable=self.provider, state='readonly', width=24)
         self.provider_box.pack(side='left', padx=(8, 8))
         self.provider_box.bind('<<ComboboxSelected>>', lambda _e: self.load_models())

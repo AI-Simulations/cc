@@ -126,6 +126,11 @@ class CcSessionTests(unittest.TestCase):
         # hard: top AA; easy: cheapest within half of it (tiny is too weak); mid: best score of the rest
         self.assertEqual(self.ccx.best_levels(rows), {"easy": "haiku", "mid": "sonnet", "hard": "opus"})
         self.assertEqual(self.ccx.best_levels([{"id": "x", "aa": None}]), {})
+        # each pick's effort comes from that model's own ladder
+        effort = lambda levels: [self.ccx.level_effort(l, levels) for l in ("easy", "mid", "hard")]
+        self.assertEqual(effort(["low", "medium", "high", "xhigh", "max"]), ["xhigh", "high", "medium"])
+        self.assertEqual(effort(["low", "medium", "high", "xhigh", "max", "ultra"]), ["xhigh", "high", "medium"])
+        self.assertEqual(effort(["low", "high"]), ["low", "high", "high"])
 
     def test_review_hook_reminds_only_after_ccx_workers(self):
         out = self.ccx.review_hook({"tool_name": "Agent", "tool_input": {"subagent_type": "ccx-mid"}})
